@@ -1,0 +1,24 @@
+# Data is never committed -- it is re-derivable from the sources and some of it
+# carries licence terms that forbid redistribution.
+data/
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+.env
+.env.*
+!.env.example
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.DS_Store
+.idea/
+.vscode/

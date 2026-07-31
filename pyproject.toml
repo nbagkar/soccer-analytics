@@ -1,0 +1,63 @@
+[project]
+name = "soccer-analytics"
+version = "0.1.0"
+description = "Local-first football intelligence centre built on free and open data"
+# Capped at <3.13 by socceraction, which is required for SPADL/VAEP and declares
+# `requires_python = "<3.13,>=3.9"`. Its last release was 2024-08-15, so do not
+# expect this ceiling to lift on its own. Raising it means dropping socceraction
+# and hand-rolling action valuation.
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # Pinned by socceraction, not by us. Declared explicitly so the constraint is
+    # visible here rather than surfacing as a confusing transitive resolution
+    # failure when the analytics extra is installed.
+    "numpy<2.0.0",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "polars>=1.0",
+    "duckdb>=1.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "structlog>=24.1",
+    "platformdirs>=4.2",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4"]
+analytics = ["socceraction>=1.5", "kloppy>=3.15"]
+mcp = ["mcp>=1.0"]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+soccer = "soccer.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/soccer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
