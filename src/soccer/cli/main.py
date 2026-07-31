@@ -478,5 +478,30 @@ def rebuild() -> None:
     console.print("\n[green]Rebuilt.[/green] View with [bold]soccer matches[/bold].")
 
 
+@app.command()
+def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
+    """Launch the read-only Streamlit dashboard over the local database."""
+    import subprocess
+    import sys
+    from importlib.resources import files
+    from importlib.util import find_spec
+
+    if find_spec("streamlit") is None:
+        console.print(
+            "[yellow]Streamlit is not installed.[/yellow] Install the dashboard extra:\n"
+            "  pip install -e '.[dashboard]'"
+        )
+        raise typer.Exit(code=1)
+
+    # files() imports only the (empty) package __init__, not app.py, so this does not
+    # require streamlit to be importable at CLI load time.
+    app_path = str(files("soccer.dashboard") / "app.py")
+    console.print(f"[green]Starting dashboard[/green] on http://localhost:{port}")
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(port)],
+        check=False,
+    )
+
+
 if __name__ == "__main__":
     app()
