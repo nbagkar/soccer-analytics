@@ -291,3 +291,13 @@ def forecast_slate(
         return None
     lam, mu = model.expected_goals(hn, an)
     return compute_markets(names.get(hn, home), names.get(an, away), lam, mu, model.rho)
+
+
+def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
+    """Player leaderboard (list[PlayerRow]) from ingested shots. [] if none."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_count() == 0:
+            return []
+        return adb.player_leaderboard(limit=top, min_shots=min_shots, order=order)

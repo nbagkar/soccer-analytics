@@ -84,6 +84,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer backtest` | Walk-forward forecast evaluation — log loss, Brier, calibration |
 | `soccer ingest-events` | Ingest StatsBomb open-data shots (xG) — proprietary EULA, opt-in |
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
+| `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G−xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, housekeeping) |
 | `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |

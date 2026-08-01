@@ -26,6 +26,7 @@ from soccer.dashboard.data import (
     forecast_teams,
     health_snapshot,
     live_snapshot,
+    player_board,
     shot_map,
     shot_matches,
 )
@@ -370,6 +371,64 @@ def _render_forecast(slate) -> None:
     st.caption("Fair prices (no margin) from a Dixon-Coles model. Directional, not advice.")
 
 
+def _render_players(rows) -> None:
+    st.subheader("Player leaderboard")
+    st.caption(
+        "StatsBomb shots across all ingested matches. G-xG > 0 = clinical finishing. "
+        "Points above the diagonal outscored their chances."
+    )
+    c = st.columns(3)
+    c[0].metric("Players", len(rows))
+    c[1].metric("Top xG", f"{rows[0].xg:.1f}", rows[0].player.split()[-1])
+    clinical = max(rows, key=lambda r: r.xg_diff)
+    c[2].metric("Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1])
+
+    frame = pl.DataFrame(
+        {
+            "player": [r.player for r in rows],
+            "team": [r.team for r in rows],
+            "xg": [round(r.xg, 2) for r in rows],
+            "goals": [r.goals for r in rows],
+            "shots": [r.shots for r in rows],
+        }
+    ).to_pandas()
+
+    scatter_base = alt.Chart(frame).encode(
+        x=alt.X("xg:Q", title="Expected goals (xG)"),
+        y=alt.Y("goals:Q", title="Goals"),
+        tooltip=["player", "team", "xg", "goals", "shots"],
+    )
+    top_val = max(float(frame["goals"].max()), float(frame["xg"].max()))
+    diagonal = (
+        alt.Chart(pl.DataFrame({"v": [0.0, top_val]}).to_pandas())
+        .mark_line(color="#9aa0a6", strokeDash=[4, 4])
+        .encode(x="v", y="v")
+    )
+    points = scatter_base.mark_circle(size=90, color="#2563eb", opacity=0.75)
+    st.altair_chart((diagonal + points).properties(height=360), width="stretch")
+
+    table_rows = [
+        {
+            "#": i,
+            "Player": r.player,
+            "Team": f'<span style="color:#8b8b8b">{r.team}</span>',
+            "xG": f"{r.xg:.1f}",
+            "npxG": f"{r.npxg:.1f}",
+            "G": f"<b>{r.goals}</b>",
+            "Sh": str(r.shots),
+            "G-xG": _diff_span(r.xg_diff),
+        }
+        for i, r in enumerate(rows, 1)
+    ]
+    st.markdown(_html_table(table_rows), unsafe_allow_html=True)
+    st.caption(ATTRIBUTION_STATSBOMB)
+
+
+def _diff_span(diff: float) -> str:
+    colour = "#16a34a" if diff > 0.5 else "#dc2626" if diff < -0.5 else "#8b8b8b"
+    return f'<span style="color:{colour}">{diff:+.1f}</span>'
+
+
 def main() -> None:
     st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
     st.title("⚽ Soccer Analytics")
@@ -379,10 +438,21 @@ def main() -> None:
         st.header("View")
         page = st.radio(
             "Page",
-            ["Live Centre", "Analytics", "Forecast", "Shot Map", "Data Health"],
+            ["Live Centre", "Analytics", "Forecast", "Shot Map", "Players", "Data Health"],
             label_visibility="collapsed",
         )
         st.button("↻ Refresh")
+
+    if page == "Players":
+        with st.sidebar:
+            order = st.selectbox("Rank by", ["xg", "goals", "npxg"])
+            min_shots = st.slider("Min shots", 1, 15, 3)
+        rows = player_board(settings.analytics_db, top=25, min_shots=min_shots, order=order)
+        if not rows:
+            st.info("No event data yet. Run `soccer ingest-events --competition 43 --season 106`.")
+        else:
+            _render_players(rows)
+        return
 
     if page == "Forecast":
         available = analytics_available(settings.analytics_db)

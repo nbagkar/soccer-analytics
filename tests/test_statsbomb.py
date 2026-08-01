@@ -142,3 +142,22 @@ class TestShotsStore:
         shots = adb.shots_for(1)
         assert all("x" in s and "y" in s for s in shots)
         assert adb.matches_with_shots() == [1]
+
+    def test_player_leaderboard(self, adb: AnalyticsDB) -> None:
+        adb.load_shots(self._shots())
+        board = adb.player_leaderboard(min_shots=1)
+        by = {r.player: r for r in board}
+        # Mbappé scored a penalty (0.76 xg, 1 goal); npxG excludes it.
+        assert by["Mbappé"].goals == 1
+        assert by["Mbappé"].npxg == 0.0  # only shot was a penalty
+        # Messi: 0.35 xg goal, non-penalty.
+        assert by["Messi"].npxg == pytest.approx(0.35)
+        assert by["Messi"].xg_diff == pytest.approx(1 - 0.35)  # 1 goal - 0.35 xg
+        assert adb.player_count() == 3
+
+    def test_leaderboard_ordering_and_min_shots(self, adb: AnalyticsDB) -> None:
+        adb.load_shots(self._shots())
+        # min_shots filters everyone out here (each player has 1 shot).
+        assert adb.player_leaderboard(min_shots=2) == []
+        by_goals = adb.player_leaderboard(min_shots=1, order="goals")
+        assert by_goals[0].goals >= by_goals[-1].goals

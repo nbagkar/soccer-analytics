@@ -89,6 +89,21 @@ class XgRow:
 
 
 @dataclass(frozen=True)
+class PlayerRow:
+    player: str
+    team: str
+    xg: float
+    npxg: float  # non-penalty xG
+    goals: int
+    shots: int
+
+    @property
+    def xg_diff(self) -> float:
+        """Goals minus xG -- finishing over/under-performance."""
+        return self.goals - self.xg
+
+
+@dataclass(frozen=True)
 class ResultRow:
     """The slim result shape the models consume (satisfies their Outcome protocols)."""
 
@@ -293,3 +308,51 @@ class AnalyticsDB:
             "FROM shots GROUP BY match_id ORDER BY match_id"
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
+
+    def player_leaderboard(
+        self, *, limit: int = 20, min_shots: int = 3, order: str = "xg"
+    ) -> list[PlayerRow]:
+        """Players ranked across all loaded shots -- xG, non-penalty xG, goals, shots.
+
+        `order` is 'xg', 'goals' or 'npxg'. `min_shots` filters out cameo appearances.
+        """
+        order_col = {"xg": "xg", "goals": "goals", "npxg": "npxg"}.get(order, "xg")
+        rows = self._con.execute(
+            f"""
+            SELECT player, mode(team) AS team, SUM(xg) AS xg,
+                   COALESCE(SUM(xg) FILTER (WHERE NOT is_penalty), 0) AS npxg,
+                   SUM(is_goal::INT) AS goals, COUNT(*) AS shots
+            FROM shots GROUP BY player
+            HAVING COUNT(*) >= ?
+            ORDER BY {order_col} DESC
+            LIMIT ?
+            """,  # order_col is from a fixed allowlist above
+            [min_shots, limit],
+        ).fetchall()
+        return [
+            PlayerRow(player=r[0], team=r[1], xg=r[2], npxg=r[3], goals=r[4], shots=r[5])
+            for r in rows
+        ]
+
+    def player_shot_log(self, player: str) -> list[dict]:
+        """One player's shots across all loaded matches, for a profile view."""
+        rows = self._con.execute(
+            "SELECT match_id, minute, xg, outcome, is_goal, is_penalty, body_part "
+            "FROM shots WHERE player=? ORDER BY match_id, minute",
+            [player],
+        ).fetchall()
+        return [
+            {
+                "match_id": r[0],
+                "minute": r[1],
+                "xg": r[2],
+                "outcome": r[3],
+                "is_goal": r[4],
+                "is_penalty": r[5],
+                "body_part": r[6],
+            }
+            for r in rows
+        ]
+
+    def player_count(self) -> int:
+        return self._con.execute("SELECT COUNT(DISTINCT player) FROM shots").fetchone()[0]

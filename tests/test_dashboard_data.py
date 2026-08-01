@@ -372,6 +372,11 @@ class TestAppSmoke:
             at.radio[0].set_value("Forecast").run()
             assert not at.exception, f"Forecast raised: {at.exception}"
 
+            # Players page needs shots; seed and visit.
+            TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
+            at.radio[0].set_value("Players").run()
+            assert not at.exception, f"Players raised: {at.exception}"
+
             # Shot Map page needs shots; seed and visit.
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Shot Map").run()

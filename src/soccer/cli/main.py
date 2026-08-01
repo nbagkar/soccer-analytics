@@ -1060,5 +1060,58 @@ def serve(
         console.print("\n[yellow]Stopped.[/yellow]")
 
 
+@app.command()
+def players(
+    top: int = typer.Option(20, help="Number of players to show."),
+    min_shots: int = typer.Option(3, help="Minimum shots to qualify."),
+    by: str = typer.Option("xg", help="Rank by: xg, goals, or npxg (non-penalty xG)."),
+) -> None:
+    """Player leaderboard from ingested StatsBomb shots: xG, goals, and finishing."""
+    from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
+
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print(
+            "[yellow]No event data.[/yellow] Run [bold]soccer ingest-events[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+    with AnalyticsDB(settings.analytics_db) as adb:
+        rows = adb.player_leaderboard(limit=top, min_shots=min_shots, order=by)
+
+    if not rows:
+        console.print(
+            "[dim]No player data.[/dim] Ingest a competition, e.g. "
+            "[bold]soccer ingest-events --competition 43 --season 106[/bold] (World Cup 2022)."
+        )
+        return
+
+    tbl = Table(title=f"Player leaderboard (by {by})", header_style="bold")
+    tbl.add_column("#", justify="right")
+    tbl.add_column("Player")
+    tbl.add_column("Team", style="dim")
+    tbl.add_column("xG", justify="right")
+    tbl.add_column("npxG", justify="right")
+    tbl.add_column("G", justify="right")
+    tbl.add_column("Sh", justify="right")
+    tbl.add_column("G-xG", justify="right")
+    for i, r in enumerate(rows, 1):
+        diff = r.xg_diff
+        diff_style = "green" if diff > 0.5 else "red" if diff < -0.5 else "dim"
+        tbl.add_row(
+            str(i),
+            r.player,
+            r.team,
+            f"{r.xg:.1f}",
+            f"{r.npxg:.1f}",
+            str(r.goals),
+            str(r.shots),
+            Text(f"{diff:+.1f}", style=diff_style),
+        )
+    console.print(tbl)
+    console.print("[dim]G-xG: goals minus expected goals — positive = clinical finishing.[/dim]")
+    console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
+
+
 if __name__ == "__main__":
     app()
