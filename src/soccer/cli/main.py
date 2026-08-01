@@ -971,5 +971,94 @@ def xg(match: int = typer.Argument(..., help="StatsBomb match_id.")) -> None:
     console.print(f"\n[dim]{SB_ATTRIBUTION}[/dim]")
 
 
+@app.command()
+def serve(
+    live_interval: int = typer.Option(60, help="Seconds between live-score ingests."),
+    fixtures_interval: int = typer.Option(3600, help="Seconds between fixture ingests."),
+    once: bool = typer.Option(False, "--once", help="Run all due jobs once and exit."),
+) -> None:
+    """Run ingestion unattended on a cadence: live scores, fixtures, and housekeeping.
+
+    A failing source is logged and retried next interval, never crashes the loop. Stop
+    with Ctrl-C.
+    """
+    import time
+    from datetime import timedelta
+
+    from soccer.ingest.scheduler import Job, JobResult, Scheduler
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+
+    def live_job() -> str:
+        async def run_it() -> str:
+            with LiveDB(settings.live_db) as db:
+                async with TheSportsDB(
+                    raw,
+                    api_key=settings.thesportsdb_key,
+                    rate_limit_per_minute=settings.thesportsdb_rpm,
+                ) as tsdb:
+                    return str(await IngestPipeline(db).ingest_thesportsdb(tsdb))
+
+        return asyncio.run(run_it())
+
+    def fixtures_job() -> str:
+        if not settings.football_data_org_token:
+            return "skipped (no football-data.org token)"
+
+        async def run_it() -> str:
+            today = datetime.now(UTC).date()
+            with LiveDB(settings.live_db) as db:
+                async with FootballDataOrg(
+                    settings.football_data_org_token,
+                    raw,
+                    rate_limit_per_minute=settings.football_data_org_rpm,
+                ) as fd:
+                    summary = await IngestPipeline(db).ingest_football_data(
+                        fd, today, today + timedelta(days=2)
+                    )
+            return str(summary)
+
+        return asyncio.run(run_it())
+
+    def prune_job() -> str:
+        removed = raw.prune(SourceId.THESPORTSDB, "livescore", keep_days=7)
+        return f"pruned {removed} old live snapshot(s)"
+
+    scheduler = Scheduler(
+        jobs=[
+            Job("live", timedelta(seconds=live_interval), live_job),
+            Job("fixtures", timedelta(seconds=fixtures_interval), fixtures_job),
+            Job("prune", timedelta(days=1), prune_job),
+        ]
+    )
+
+    def report(result: JobResult) -> None:
+        stamp = datetime.now(UTC).strftime("%H:%M:%S")
+        if result.ok:
+            console.print(f"[dim]{stamp}[/dim] [green]{result.name}[/green]  {result.message}")
+        else:
+            console.print(f"[dim]{stamp}[/dim] [red]{result.name} failed[/red]  {result.message}")
+
+    if once:
+        for result in scheduler.run_due():
+            report(result)
+        return
+
+    console.print(
+        f"[green]Serving[/green] — live every {live_interval}s, fixtures every "
+        f"{fixtures_interval}s. Ctrl-C to stop.\n"
+    )
+    tick = max(1, min(live_interval, 15))
+    try:
+        while True:
+            for result in scheduler.run_due():
+                report(result)
+            time.sleep(tick)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped.[/yellow]")
+
+
 if __name__ == "__main__":
     app()

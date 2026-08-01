@@ -45,8 +45,8 @@ weighting of recent form nudges it ahead. The real levers are more data and bett
 features (xG), not a fancier fitting method — a finding worth more than a hidden
 disappointment.
 
-Not yet built: shot-map visualization (pitch plots), Wyscout event data, operational
-scheduler.
+This realizes the original 12-week plan's full scope. Remaining ideas are optional
+extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 
 ## Quickstart
 
@@ -85,6 +85,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer ingest-events` | Ingest StatsBomb open-data shots (xG) — proprietary EULA, opt-in |
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
+| `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, housekeeping) |
 | `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |
