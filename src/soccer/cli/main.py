@@ -885,5 +885,91 @@ def mcp() -> None:
     run()
 
 
+@app.command("ingest-events")
+def ingest_events(
+    match: int = typer.Option(0, help="A single StatsBomb match_id."),
+    competition: int = typer.Option(0, help="Competition id (with --season) for a whole season."),
+    season: int = typer.Option(0, help="Season id (with --competition)."),
+) -> None:
+    """Ingest StatsBomb open-data shots (xG) into the analytics store.
+
+    StatsBomb open data is under a proprietary EULA (no redistribution, no commercial
+    use, logo attribution) -- an explicit opt-in. Data stays in the local gitignored
+    store. Find ids with the StatsBomb open-data competitions.json.
+    """
+    from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
+    from soccer.sources.statsbomb import StatsBomb
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+
+    with StatsBomb(raw) as sb, AnalyticsDB(settings.analytics_db) as adb:
+        if match:
+            match_ids = [match]
+        elif competition and season:
+            match_ids = [m["match_id"] for m in sb.matches(competition, season)]
+            console.print(f"[dim]{len(match_ids)} matches in {competition}/{season}...[/dim]")
+        else:
+            console.print("[yellow]Provide --match, or --competition and --season.[/yellow]")
+            raise typer.Exit(code=1)
+
+        total = 0
+        for match_id in match_ids:
+            shots = sb.fetch_shots(match_id)
+            if shots:
+                adb.load_shots(shots)
+                total += len(shots)
+            if match or len(match_ids) <= 10:
+                console.print(f"  match {match_id}: {len(shots)} shots")
+
+    console.print(f"\n[green]Loaded {total} shots[/green] across {len(match_ids)} match(es).")
+    console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
+
+
+@app.command()
+def xg(match: int = typer.Argument(..., help="StatsBomb match_id.")) -> None:
+    """Expected-goals summary for a match: team xG and the top shooters."""
+    from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
+
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print(
+            "[yellow]No analytics data.[/yellow] Run [bold]soccer ingest-events[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+    with AnalyticsDB(settings.analytics_db) as adb:
+        teams = adb.team_xg(match)
+        shooters = adb.top_shooters(match, 8)
+
+    if not teams:
+        console.print(
+            f"[dim]No shots for match {match}.[/dim] Ingest it: "
+            f"[bold]soccer ingest-events --match {match}[/bold]."
+        )
+        return
+
+    team_tbl = Table(title=f"xG — match {match}", header_style="bold", title_justify="left")
+    team_tbl.add_column("Team")
+    team_tbl.add_column("xG", justify="right")
+    team_tbl.add_column("Goals", justify="right")
+    team_tbl.add_column("Shots", justify="right")
+    for r in teams:
+        team_tbl.add_row(r.name, f"{r.xg:.2f}", str(r.goals), str(r.shots))
+    console.print(team_tbl)
+
+    shooter_tbl = Table(title="\nTop shooters by xG", header_style="bold", title_justify="left")
+    shooter_tbl.add_column("Player")
+    shooter_tbl.add_column("Team", style="dim")
+    shooter_tbl.add_column("xG", justify="right")
+    shooter_tbl.add_column("G", justify="right")
+    for r in shooters:
+        style = "bold green" if r.goals > 0 else ""
+        shooter_tbl.add_row(r.name, r.team or "", Text(f"{r.xg:.2f}", style=style), str(r.goals))
+    console.print(shooter_tbl)
+    console.print(f"\n[dim]{SB_ATTRIBUTION}[/dim]")
+
+
 if __name__ == "__main__":
     app()

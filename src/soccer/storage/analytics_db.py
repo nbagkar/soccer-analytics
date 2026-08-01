@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS results (
     away_reds          INTEGER,
     referee            VARCHAR
 );
+
+CREATE TABLE IF NOT EXISTS shots (
+    match_id    INTEGER NOT NULL,
+    team        VARCHAR NOT NULL,
+    player      VARCHAR NOT NULL,
+    minute      INTEGER NOT NULL,
+    period      INTEGER NOT NULL,
+    x           DOUBLE,
+    y           DOUBLE,
+    xg          DOUBLE NOT NULL,
+    outcome     VARCHAR NOT NULL,
+    is_goal     BOOLEAN NOT NULL,
+    is_penalty  BOOLEAN NOT NULL,
+    body_part   VARCHAR
+);
 """
 
 
@@ -62,6 +77,15 @@ class TableRow:
     goals_against: int
     goal_difference: int
     points: int
+
+
+@dataclass(frozen=True)
+class XgRow:
+    name: str  # team or player
+    team: str | None
+    xg: float
+    goals: int
+    shots: int
 
 
 @dataclass(frozen=True)
@@ -192,3 +216,72 @@ class AnalyticsDB:
             [season, division],
         ).fetchall()
         return [ResultRow(*r) for r in rows]
+
+    # --- StatsBomb shots / xG -------------------------------------------------
+
+    def load_shots(self, shots: list) -> int:
+        """Load shots, replacing each match's set so re-ingest is idempotent."""
+        if not shots:
+            return 0
+        frame = pl.DataFrame([asdict(s) for s in shots])
+        match_ids = {s.match_id for s in shots}
+        self._con.register("incoming_shots", frame)
+        try:
+            self._con.execute("BEGIN")
+            for match_id in match_ids:
+                self._con.execute("DELETE FROM shots WHERE match_id = ?", [match_id])
+            self._con.execute("INSERT INTO shots BY NAME SELECT * FROM incoming_shots")
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        finally:
+            self._con.unregister("incoming_shots")
+        return len(shots)
+
+    def team_xg(self, match_id: int) -> list[XgRow]:
+        """Per-team xG, goals and shot count for a match, highest xG first."""
+        rows = self._con.execute(
+            "SELECT team, SUM(xg), SUM(is_goal::INT), COUNT(*) FROM shots "
+            "WHERE match_id=? GROUP BY team ORDER BY SUM(xg) DESC",
+            [match_id],
+        ).fetchall()
+        return [XgRow(name=r[0], team=None, xg=r[1], goals=r[2], shots=r[3]) for r in rows]
+
+    def top_shooters(self, match_id: int, limit: int = 10) -> list[XgRow]:
+        """Players by total xG in a match."""
+        rows = self._con.execute(
+            "SELECT player, team, SUM(xg), SUM(is_goal::INT), COUNT(*) FROM shots "
+            "WHERE match_id=? GROUP BY player, team ORDER BY SUM(xg) DESC LIMIT ?",
+            [match_id, limit],
+        ).fetchall()
+        return [XgRow(name=r[0], team=r[1], xg=r[2], goals=r[3], shots=r[4]) for r in rows]
+
+    def shots_for(self, match_id: int) -> list[dict]:
+        """All shots in a match with location, for shot-map rendering."""
+        rows = self._con.execute(
+            "SELECT team, player, minute, x, y, xg, outcome, is_goal FROM shots "
+            "WHERE match_id=? ORDER BY minute",
+            [match_id],
+        ).fetchall()
+        return [
+            {
+                "team": r[0],
+                "player": r[1],
+                "minute": r[2],
+                "x": r[3],
+                "y": r[4],
+                "xg": r[5],
+                "outcome": r[6],
+                "is_goal": r[7],
+            }
+            for r in rows
+        ]
+
+    def matches_with_shots(self) -> list[int]:
+        return [
+            r[0]
+            for r in self._con.execute(
+                "SELECT DISTINCT match_id FROM shots ORDER BY match_id"
+            ).fetchall()
+        ]

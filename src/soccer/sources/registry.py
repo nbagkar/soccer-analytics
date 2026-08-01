@@ -24,6 +24,10 @@ class SourceId(StrEnum):
     FOOTBALL_DATA_CO_UK = "football_data_co_uk"
     OPENFOOTBALL = "openfootball"
     FPL = "fpl"
+    # A historical dataset (proprietary EULA), not a live source: used as a raw-store
+    # key and in the dataset registry, deliberately absent from the live SOURCES dict
+    # below so it does not appear as a live-data provider.
+    STATSBOMB = "statsbomb"
 
 
 class Capability(StrEnum):

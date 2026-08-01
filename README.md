@@ -32,9 +32,9 @@ Working end-to-end today: source adapters → immutable raw snapshots → canoni
 entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
 league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match forecasting,
-Monte Carlo league simulations, walk-forward forecast backtesting, a read-only Streamlit
-dashboard, and an MCP server that makes it all queryable in natural language.
-**270 passing tests.**
+Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb event
+analytics (real xG, shot data), a read-only Streamlit dashboard, and an MCP server that
+makes it all queryable in natural language. **282 passing tests.**
 
 The forecasting is evaluated honestly rather than assumed good. On real 2025/26 Premier
 League data the walk-forward backtest shows the ratio-method Poisson beats a base-rate
@@ -45,8 +45,8 @@ weighting of recent form nudges it ahead. The real levers are more data and bett
 features (xG), not a fancier fitting method — a finding worth more than a hidden
 disappointment.
 
-Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), multi-season model
-training, operational scheduler.
+Not yet built: shot-map visualization (pitch plots), Wyscout event data, operational
+scheduler.
 
 ## Quickstart
 
@@ -82,6 +82,8 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
 | `soccer simulate` | Monte Carlo league simulation — title, top-N, relegation odds |
 | `soccer backtest` | Walk-forward forecast evaluation — log loss, Brier, calibration |
+| `soccer ingest-events` | Ingest StatsBomb open-data shots (xG) — proprietary EULA, opt-in |
+| `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
