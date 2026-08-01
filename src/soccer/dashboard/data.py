@@ -4,7 +4,7 @@ Kept free of any UI import so it is unit-testable and so the Streamlit layer sta
 thin render over these models. Everything here is a read over the live database and the
 source registry; the dashboard never touches the network (that is `soccer ingest`'s
 job). A view that cannot be filled by the data we actually have is simply not produced
--- there is no Player Hub or shot map here, because nothing ingests that yet.
+-- there is no Player Hub, because nothing ingests player-season data yet.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from soccer.models.elo import EloRating, power_ranking
 from soccer.models.poisson import fit_poisson
 from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
-from soccer.storage.analytics_db import AnalyticsDB, TableRow
+from soccer.storage.analytics_db import AnalyticsDB, TableRow, XgRow
 from soccer.storage.live_db import LiveDB
 
 
@@ -229,3 +229,33 @@ def analytics_snapshot(
         title_odds=projections,
         names=names,
     )
+
+
+@dataclass(frozen=True)
+class ShotMapData:
+    match_id: int
+    label: str
+    shots: list[dict]
+    """Each: team, player, minute, x, y, xg, outcome, is_goal (StatsBomb 120x80 frame)."""
+    team_xg: list[XgRow]
+
+
+def shot_matches(analytics_db: Path) -> list[tuple[int, str]]:
+    """(match_id, label) for matches with StatsBomb shots loaded. [] if none."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.shot_match_labels()
+
+
+def shot_map(analytics_db: Path, match_id: int) -> ShotMapData | None:
+    """Shots and per-team xG for one match, for the shot-map view. None if absent."""
+    with AnalyticsDB(analytics_db) as adb:
+        shots = adb.shots_for(match_id)
+        if not shots:
+            return None
+        team_xg = adb.team_xg(match_id)
+        label = next(
+            (lbl for mid, lbl in adb.shot_match_labels() if mid == match_id), str(match_id)
+        )
+    return ShotMapData(match_id=match_id, label=label, shots=shots, team_xg=team_xg)

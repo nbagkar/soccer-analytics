@@ -285,3 +285,11 @@ class AnalyticsDB:
                 "SELECT DISTINCT match_id FROM shots ORDER BY match_id"
             ).fetchall()
         ]
+
+    def shot_match_labels(self) -> list[tuple[int, str]]:
+        """(match_id, 'Team A vs Team B') for every match with shots, for a selector."""
+        rows = self._con.execute(
+            "SELECT match_id, string_agg(DISTINCT team, ' vs ') "
+            "FROM shots GROUP BY match_id ORDER BY match_id"
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]

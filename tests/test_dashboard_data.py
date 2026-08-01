@@ -244,6 +244,48 @@ class TestAnalyticsSnapshot:
         assert ("2526", "E0", 12) in analytics_available(path)
 
 
+class TestShotMap:
+    def _seed_shots(self, path) -> None:
+        from soccer.sources.statsbomb import Shot
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        shots = [
+            Shot(
+                1, "Argentina", "Messi", 23, 1, 110.0, 40.0, 0.35, "Goal", True, False, "Left Foot"
+            ),
+            Shot(1, "France", "Mbappé", 80, 2, 108.0, 44.0, 0.76, "Goal", True, True, None),
+        ]
+        with AnalyticsDB(path) as adb:
+            adb.load_shots(shots)
+
+    def test_shot_matches_lists_loaded(self, tmp_path) -> None:
+        from soccer.dashboard.data import shot_matches
+
+        path = tmp_path / "analytics.duckdb"
+        assert shot_matches(path) == []
+        self._seed_shots(path)
+        matches = shot_matches(path)
+        assert matches[0][0] == 1
+        assert "Argentina" in matches[0][1] and "France" in matches[0][1]
+
+    def test_shot_map_returns_shots_and_xg(self, tmp_path) -> None:
+        from soccer.dashboard.data import shot_map
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_shots(path)
+        data = shot_map(path, 1)
+        assert data is not None
+        assert len(data.shots) == 2
+        assert len(data.team_xg) == 2
+
+    def test_shot_map_missing_returns_none(self, tmp_path) -> None:
+        from soccer.dashboard.data import shot_map
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_shots(path)
+        assert shot_map(path, 999) is None
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -297,5 +339,10 @@ class TestAppSmoke:
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Analytics").run()
             assert not at.exception, f"Analytics raised: {at.exception}"
+
+            # Shot Map page needs shots; seed and visit.
+            TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
+            at.radio[0].set_value("Shot Map").run()
+            assert not at.exception, f"Shot Map raised: {at.exception}"
         finally:
             config._settings = None

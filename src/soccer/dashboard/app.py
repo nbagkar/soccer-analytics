@@ -24,8 +24,11 @@ from soccer.dashboard.data import (
     analytics_snapshot,
     health_snapshot,
     live_snapshot,
+    shot_map,
+    shot_matches,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
+from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
 from soccer.storage.live_db import LiveDB
 
 # Reserved status palette: (text colour, short label). Every status renders with its
@@ -254,6 +257,63 @@ def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
     st.altair_chart((bars + labels).properties(height=max(120, 26 * len(contenders))))
 
 
+def _render_shot_map(data) -> None:
+    st.subheader(f"Shot map — {data.label}")
+    st.caption("StatsBomb event data. Circle size ∝ xG; filled = goal. Both teams attack →")
+
+    cols = st.columns(len(data.team_xg) or 1)
+    for col, row in zip(cols, data.team_xg, strict=False):
+        col.metric(f"{row.name} xG", f"{row.xg:.2f}", f"{row.goals} goals")
+
+    frame = pl.DataFrame(
+        {
+            "x": [s["x"] for s in data.shots if s["x"] is not None],
+            "y": [s["y"] for s in data.shots if s["x"] is not None],
+            "xg": [s["xg"] for s in data.shots if s["x"] is not None],
+            "team": [s["team"] for s in data.shots if s["x"] is not None],
+            "player": [s["player"] for s in data.shots if s["x"] is not None],
+            "outcome": [s["outcome"] for s in data.shots if s["x"] is not None],
+            "goal": [bool(s["is_goal"]) for s in data.shots if s["x"] is not None],
+        }
+    ).to_pandas()
+
+    st.altair_chart(_shot_chart(frame), width="stretch")
+    st.caption(ATTRIBUTION_STATSBOMB)
+
+
+def _shot_chart(frame):
+    # StatsBomb frame is 120x80; show the attacking half (x 60-120) where shots live.
+    # Recessive pitch lines, then shots as circles sized by xG, coloured by team, with
+    # goals drawn solid and everything else hollow so identity never rests on colour.
+    lines = pl.DataFrame(
+        {
+            "x": [60, 120, 120, 60, 60, 102, 102, 120, 114, 114, 120],
+            "y": [0, 0, 80, 80, 0, 18, 62, 62, 30, 50, 50],
+            "seg": [0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2],
+        }
+    ).to_pandas()
+    pitch = (
+        alt.Chart(lines)
+        .mark_line(color="#9aa0a6", strokeWidth=1)
+        .encode(
+            x=alt.X("x", scale=alt.Scale(domain=[58, 122]), axis=None),
+            y=alt.Y("y", scale=alt.Scale(domain=[-2, 82]), axis=None),
+            detail="seg",
+            order="seg",
+        )
+    )
+    base = alt.Chart(frame).encode(
+        x=alt.X("x", scale=alt.Scale(domain=[58, 122]), axis=None),
+        y=alt.Y("y", scale=alt.Scale(domain=[-2, 82]), axis=None),
+        size=alt.Size("xg", scale=alt.Scale(range=[30, 700]), legend=alt.Legend(title="xG")),
+        color=alt.Color("team", legend=alt.Legend(title=None)),
+        tooltip=["player", "team", "outcome", alt.Tooltip("xg", format=".2f")],
+    )
+    goals = base.transform_filter(alt.datum.goal).mark_circle(opacity=0.9)
+    misses = base.transform_filter(~alt.datum.goal).mark_point(filled=False, strokeWidth=1.5)
+    return (pitch + misses + goals).properties(height=380).configure_view(strokeWidth=0)
+
+
 def main() -> None:
     st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
     st.title("⚽ Soccer Analytics")
@@ -262,7 +322,9 @@ def main() -> None:
     with st.sidebar:
         st.header("View")
         page = st.radio(
-            "Page", ["Live Centre", "Analytics", "Data Health"], label_visibility="collapsed"
+            "Page",
+            ["Live Centre", "Analytics", "Shot Map", "Data Health"],
+            label_visibility="collapsed",
         )
         st.button("↻ Refresh")
 
@@ -280,6 +342,21 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_analytics(snap)
+        return
+
+    if page == "Shot Map":
+        matches = shot_matches(settings.analytics_db)
+        if not matches:
+            st.info("No event data yet. Run `soccer ingest-events --match <id>`, then reload.")
+            return
+        with st.sidebar:
+            labels = {f"{lbl} ({mid})": mid for mid, lbl in matches}
+            picked = st.selectbox("Match", list(labels))
+        data = shot_map(settings.analytics_db, labels[picked])
+        if data is None:
+            st.info("No shots for that match.")
+        else:
+            _render_shot_map(data)
         return
 
     if not settings.live_db.exists():
