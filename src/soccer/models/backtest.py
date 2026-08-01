@@ -18,6 +18,7 @@ Two things make the numbers meaningful:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -100,12 +101,41 @@ def _calibration(
 def backtest_poisson(
     outcomes: list[DatedOutcome], *, min_history: int = 60, calibration_bins: int = 10
 ) -> BacktestResult:
-    """Walk-forward backtest of the Poisson forecast over one set of results.
+    """Walk-forward backtest of the ratio-method Poisson forecast."""
+    return _walk_forward(outcomes, fit_poisson, min_history, calibration_bins)
 
-    `min_history` matches are used to warm up before the first prediction, and a match
-    is only predicted once both its teams have appeared (the model cannot rate an unseen
-    team). Refits on the growing history before each prediction -- O(n^2) but tiny at
-    league-season scale.
+
+def backtest_dixon_coles(
+    outcomes: list[DatedOutcome],
+    *,
+    min_history: int = 60,
+    calibration_bins: int = 10,
+    time_decay: float = 0.0,
+) -> BacktestResult:
+    """Walk-forward backtest of the Dixon-Coles MLE forecast.
+
+    Slower than the ratio-method backtest: it re-fits by maximum likelihood before every
+    prediction. `time_decay` (xi per day) weights recent form.
+    """
+    from soccer.models.dixon_coles import fit_dixon_coles
+
+    def fit(played: list[Outcome]) -> object:
+        return fit_dixon_coles(played, time_decay=time_decay)
+
+    return _walk_forward(outcomes, fit, min_history, calibration_bins)
+
+
+def _walk_forward(
+    outcomes: list[DatedOutcome],
+    fit: Callable[[list[Outcome]], object],
+    min_history: int,
+    calibration_bins: int,
+) -> BacktestResult:
+    """Walk a season in date order, predicting each match from a model fit on earlier ones.
+
+    `fit` maps the matches played so far to a model exposing `.forecast(home, away)`. A
+    match is predicted only once both teams have appeared, after a `min_history` warmup.
+    Refits before each prediction -- O(n^2) but tiny at league-season scale.
     """
     chronological = sorted(outcomes, key=lambda o: o.match_date)
     played: list[Outcome] = []
@@ -114,7 +144,7 @@ def backtest_poisson(
 
     for o in chronological:
         if len(played) >= min_history and o.home_norm in seen and o.away_norm in seen:
-            fc = fit_poisson(played).forecast(o.home_norm, o.away_norm)
+            fc = fit(played).forecast(o.home_norm, o.away_norm)  # type: ignore[attr-defined]
             probs = (fc.prob_home, fc.prob_draw, fc.prob_away)
             predictions.append((probs, _outcome_index(o.fthg, o.ftag)))
         played.append(o)

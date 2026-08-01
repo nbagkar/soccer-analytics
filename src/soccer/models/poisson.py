@@ -96,31 +96,41 @@ class PoissonModel:
 
     def forecast(self, home: str, away: str, *, top_n: int = 5) -> MatchForecast:
         lam, mu = self.expected_goals(home, away)
+        return scoreline_forecast(home, away, lam, mu, self.rho, top_n=top_n)
 
-        grid: dict[tuple[int, int], float] = {}
-        for x in range(MAX_GOALS + 1):
-            for y in range(MAX_GOALS + 1):
-                p = _poisson_pmf(x, lam) * _poisson_pmf(y, mu) * _dc_tau(x, y, lam, mu, self.rho)
-                grid[(x, y)] = max(p, 0.0)  # tau can push tiny cells slightly negative
 
-        total = sum(grid.values())
-        grid = {k: v / total for k, v in grid.items()}  # renormalize after tau
+def scoreline_forecast(
+    home: str, away: str, lam: float, mu: float, rho: float, *, top_n: int = 5
+) -> MatchForecast:
+    """Outcome probabilities and likely scores from two goal rates and the DC rho.
 
-        prob_home = sum(p for (x, y), p in grid.items() if x > y)
-        prob_draw = sum(p for (x, y), p in grid.items() if x == y)
-        prob_away = sum(p for (x, y), p in grid.items() if x < y)
+    Shared by the ratio-method Poisson model and the Dixon-Coles MLE model so both turn
+    (lambda, mu, rho) into a forecast identically.
+    """
+    grid: dict[tuple[int, int], float] = {}
+    for x in range(MAX_GOALS + 1):
+        for y in range(MAX_GOALS + 1):
+            p = _poisson_pmf(x, lam) * _poisson_pmf(y, mu) * _dc_tau(x, y, lam, mu, rho)
+            grid[(x, y)] = max(p, 0.0)  # tau can push tiny cells slightly negative
 
-        top = sorted(grid.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
-        return MatchForecast(
-            home=home,
-            away=away,
-            home_expected=lam,
-            away_expected=mu,
-            prob_home=prob_home,
-            prob_draw=prob_draw,
-            prob_away=prob_away,
-            top_scores=[(x, y, p) for (x, y), p in top],
-        )
+    total = sum(grid.values())
+    grid = {k: v / total for k, v in grid.items()}  # renormalize after tau
+
+    prob_home = sum(p for (x, y), p in grid.items() if x > y)
+    prob_draw = sum(p for (x, y), p in grid.items() if x == y)
+    prob_away = sum(p for (x, y), p in grid.items() if x < y)
+
+    top = sorted(grid.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    return MatchForecast(
+        home=home,
+        away=away,
+        home_expected=lam,
+        away_expected=mu,
+        prob_home=prob_home,
+        prob_draw=prob_draw,
+        prob_away=prob_away,
+        top_scores=[(x, y, p) for (x, y), p in top],
+    )
 
 
 def fit_poisson(outcomes: list[Outcome], *, rho: float = DEFAULT_RHO) -> PoissonModel:

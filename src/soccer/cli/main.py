@@ -622,6 +622,7 @@ def forecast(
     away: str = typer.Argument(..., help="Away team, e.g. Chelsea."),
     season: str = typer.Option("2526", help="Season to fit the model on."),
     division: str = typer.Option("E0", help="Division to fit the model on."),
+    mle: bool = typer.Option(False, "--mle", help="Use the Dixon-Coles MLE model."),
 ) -> None:
     """Forecast a match: outcome probabilities, expected goals, and likely scorelines."""
     from soccer.domain.names import normalize_name
@@ -630,7 +631,12 @@ def forecast(
 
     outcomes = _load_outcomes(season, division)
     names = _display_names(outcomes)
-    model = fit_poisson(outcomes)
+    if mle:
+        from soccer.models.dixon_coles import fit_dixon_coles
+
+        model = fit_dixon_coles(outcomes)
+    else:
+        model = fit_poisson(outcomes)
 
     home_norm, away_norm = normalize_name(home), normalize_name(away)
     missing = [
@@ -671,22 +677,36 @@ def backtest(
     season: str = typer.Option("2526", help="Season to backtest on."),
     division: str = typer.Option("E0", help="Division to backtest on."),
     min_history: int = typer.Option(60, help="Matches of warmup before the first forecast."),
+    model: str = typer.Option("ratio", help="Forecast model: 'ratio' or 'dc' (Dixon-Coles MLE)."),
+    half_life: float = typer.Option(
+        0.0, help="Time-decay half-life in days for the DC model (0 = no decay)."
+    ),
 ) -> None:
     """Walk-forward backtest of the forecast: log loss, Brier, and calibration."""
-    from soccer.models.backtest import backtest_poisson
+    from soccer.models.backtest import backtest_dixon_coles, backtest_poisson
 
     outcomes = _load_outcomes(season, division)
     try:
-        result = backtest_poisson(outcomes, min_history=min_history)
+        if model == "dc":
+            import math as _math
+
+            xi = _math.log(2) / half_life if half_life > 0 else 0.0
+            console.print(
+                "[dim]Fitting Dixon-Coles by MLE before each match; this is slower...[/dim]"
+            )
+            result = backtest_dixon_coles(outcomes, min_history=min_history, time_decay=xi)
+        else:
+            result = backtest_poisson(outcomes, min_history=min_history)
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/yellow]")
         raise typer.Exit(code=1) from exc
 
     skill = result.log_loss_skill
     skill_style = "green" if skill > 0 else "red"
+    model_label = "Dixon-Coles MLE" if model == "dc" else "ratio-method Poisson"
     console.print(
         f"\n[bold]Backtest - {division} {season}[/bold]  "
-        f"[dim]({result.n_predictions} forecasts, walk-forward)[/dim]\n"
+        f"[dim]({result.n_predictions} forecasts, {model_label}, walk-forward)[/dim]\n"
     )
     console.print(
         f"  Log loss   model [bold]{result.log_loss:.3f}[/bold]  vs  "

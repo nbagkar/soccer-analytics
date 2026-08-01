@@ -31,17 +31,22 @@ delayed rather than breaking when it disappears. Full detail, with quoted terms,
 Working end-to-end today: source adapters → immutable raw snapshots → canonical
 entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
-league tables, Elo power rankings, Poisson/Dixon-Coles match forecasting, Monte Carlo
-league simulations, walk-forward forecast backtesting, a read-only Streamlit dashboard,
-and an MCP server that makes it all queryable in natural language. **260 passing tests.**
+league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match forecasting,
+Monte Carlo league simulations, walk-forward forecast backtesting, a read-only Streamlit
+dashboard, and an MCP server that makes it all queryable in natural language.
+**270 passing tests.**
 
-The forecasting is evaluated honestly rather than assumed good: on real 2025/26 Premier
-League data the walk-forward backtest shows the model beats a base-rate baseline by only
-~3% log-loss skill and is somewhat over-confident on medium-strong home favourites —
-modest, real, and the concrete motivation for the documented Dixon-Coles-MLE refinement.
+The forecasting is evaluated honestly rather than assumed good. On real 2025/26 Premier
+League data the walk-forward backtest shows the ratio-method Poisson beats a base-rate
+baseline by only ~3% log-loss skill and is somewhat over-confident on medium-strong home
+favourites. The "proper" fix — full Dixon-Coles maximum-likelihood fitting — does **not**
+improve on it on a single season (measured, not assumed); only adding time-decay
+weighting of recent form nudges it ahead. The real levers are more data and better
+features (xG), not a fancier fitting method — a finding worth more than a hidden
+disappointment.
 
-Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), full Dixon-Coles MLE
-fitting.
+Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), multi-season model
+training, operational scheduler.
 
 ## Quickstart
 

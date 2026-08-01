@@ -9,10 +9,12 @@ description = "Local-first football intelligence centre built on free and open d
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    # Pinned by socceraction, not by us. Declared explicitly so the constraint is
-    # visible here rather than surfacing as a confusing transitive resolution
-    # failure when the analytics extra is installed.
-    "numpy<2.0.0",
+    # numpy powers the Monte Carlo simulation; scipy fits the Dixon-Coles model.
+    # NOT pinned <2 here: nothing in the base/forecasting stack needs numpy 1.x. The
+    # numpy<2 constraint belongs to socceraction, which lives in the `analytics` extra
+    # and is unused so far -- see that extra and docs/source-verification.md.
+    "numpy>=1.26",
+    "scipy>=1.11",
     "httpx>=0.27",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -26,7 +28,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4"]
-analytics = ["socceraction>=1.5", "kloppy>=3.15"]
+# socceraction caps numpy<2 and Python<3.13 (see docs/source-verification.md). Installing
+# this extra therefore constrains numpy for the whole environment and may need an older
+# scipy; resolve when StatsBomb/SPADL work actually begins.
+analytics = ["socceraction>=1.5", "kloppy>=3.15", "numpy<2.0.0"]
 mcp = ["mcp>=1.0"]
 dev = [
     "pytest>=8.2",
