@@ -223,6 +223,18 @@ class AnalyticsDB:
             "GROUP BY season, division ORDER BY season DESC, division"
         ).fetchall()
 
+    def latest_season(self, division: str) -> str | None:
+        """The most-recent loaded season for a division, or None if it has no results.
+
+        Lets forecasting fit on whatever a division's newest data is without hardcoding a
+        season string -- European files use "2526", the extra-country files use calendar
+        years like "2026", and both sort most-recent-last lexically.
+        """
+        row = self._con.execute(
+            "SELECT MAX(season) FROM results WHERE division = ?", [division]
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
     def outcomes_for(self, season: str, division: str) -> list[ResultRow]:
         """Results for one (season, division) in date order, for the models to fit on."""
         rows = self._con.execute(

@@ -61,6 +61,48 @@ def add_match(
     )
 
 
+def seed_results(path, *, division: str, teams: list[str], season: str = "2526") -> None:
+    """Seed a division's double round-robin so models have a connected, fittable graph."""
+    from soccer.domain.names import normalize_name
+    from soccer.sources.football_data_co_uk import MatchResult
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    rows, day = [], 1
+    for i, h in enumerate(teams):
+        for a in teams[i + 1 :]:
+            for home, away, hg, ag in ((h, a, 2, 0), (a, h, 1, 1)):
+                rows.append(
+                    MatchResult(
+                        season=season,
+                        division=division,
+                        match_date=date(2026, 1, (day % 27) + 1),
+                        home=home,
+                        away=away,
+                        home_norm=normalize_name(home),
+                        away_norm=normalize_name(away),
+                        fthg=hg,
+                        ftag=ag,
+                        ftr="H" if hg > ag else "A" if ag > hg else "D",
+                        hthg=None,
+                        htag=None,
+                        home_shots=None,
+                        away_shots=None,
+                        home_shots_target=None,
+                        away_shots_target=None,
+                        home_corners=None,
+                        away_corners=None,
+                        home_yellows=None,
+                        away_yellows=None,
+                        home_reds=None,
+                        away_reds=None,
+                        referee=None,
+                    )
+                )
+            day += 1
+    with AnalyticsDB(path) as adb:
+        adb.load_results(rows)
+
+
 class TestLiveSnapshot:
     def test_kpis_count_correctly(self, db: LiveDB) -> None:
         add_match(
@@ -370,6 +412,38 @@ class TestFixtureForecasts:
         fixtures = fixture_forecasts(live, analytics)
         assert len(fixtures) == 1
         assert fixtures[0].slate is None  # honest: no model, no forecast
+
+    def test_latest_season_picked_per_division(self, tmp_path) -> None:
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="SP1", teams=["Ath Madrid", "Barcelona"], season="2425")
+        seed_results(path, division="SP1", teams=["Ath Madrid", "Barcelona"], season="2526")
+        with AnalyticsDB(path) as adb:
+            assert adb.latest_season("SP1") == "2526"
+            assert adb.latest_season("ZZ") is None
+
+    def test_curated_alias_resolves_verbose_name(self, tmp_path) -> None:
+        # "Club Atlético de Madrid" (football-data.org) must reach "Ath Madrid" (co.uk).
+        from soccer.dashboard.data import fixture_forecasts
+
+        analytics = tmp_path / "analytics.duckdb"
+        seed_results(
+            analytics, division="SP1", teams=["Ath Madrid", "Barcelona", "Getafe", "Sevilla"]
+        )
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as build:
+            add_match(
+                build,
+                match_id="1",
+                home="Club Atlético de Madrid",
+                away="Barcelona",
+                competition="La Liga",  # -> SP1
+                status=MatchStatus.NOT_STARTED,
+            )
+        fixtures = fixture_forecasts(live, analytics)
+        assert len(fixtures) == 1
+        assert fixtures[0].slate is not None  # alias bridged the verbose name
 
 
 class TestAppSmoke:

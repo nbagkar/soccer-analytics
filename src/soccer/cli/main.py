@@ -509,16 +509,22 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
 def ingest_history(
     seasons: str = typer.Option("2526", help="Comma-separated seasons, e.g. 2526,2425."),
     divisions: str = typer.Option("E0", help="Comma-separated divisions, e.g. E0,E1,SP1."),
+    new_leagues: str = typer.Option(
+        "", help="Comma-separated 'new league' country codes, e.g. BRA,ARG,USA."
+    ),
+    recent: int = typer.Option(3, help="For new leagues: keep the N most-recent seasons."),
 ) -> None:
     """Download historical results from football-data.co.uk into the analytics store.
 
     A batch source: static season CSVs, no rate limit. Missing (season, division)
-    combinations are skipped, not errors.
+    combinations are skipped, not errors. `--new-leagues` pulls the extra-country files
+    (Brazil, Argentina, ...) which use a single-file, all-seasons schema.
     """
     settings = get_settings()
     settings.ensure_dirs()
     season_list = [s.strip() for s in seasons.split(",") if s.strip()]
     division_list = [d.strip() for d in divisions.split(",") if d.strip()]
+    new_list = [c.strip().upper() for c in new_leagues.split(",") if c.strip()]
 
     raw = RawStore(settings.raw_dir)
     total = 0
@@ -532,6 +538,15 @@ def ingest_history(
                 adb.load_results(results)
                 total += len(results)
                 console.print(f"  {season}/{division}: {len(results)} results")
+        for code in new_list:
+            results = source.fetch_new_league(code, recent_seasons=recent)
+            if not results:
+                console.print(f"  [dim]{code}: not available[/dim]")
+                continue
+            adb.load_results(results)
+            total += len(results)
+            n_seasons = len({r.season for r in results})
+            console.print(f"  {code}: {len(results)} results ({n_seasons} seasons)")
 
     console.print(
         f"\n[green]Loaded {total} results.[/green] View a table with [bold]soccer table[/bold]."

@@ -16,6 +16,7 @@ from pathlib import Path
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore, MatchView
+from soccer.domain.names import normalize_name
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.poisson import fit_poisson
 from soccer.models.simulation import TeamProjection, simulate_season
@@ -315,7 +316,42 @@ COMPETITION_TO_DIVISION = {
     "Ligue 1": "F1",
     "Eredivisie": "N1",
     "Primeira Liga": "P1",
+    "Campeonato Brasileiro Série A": "BRA",
+    "Campeonato Brasileiro Serie A": "BRA",
 }
+
+# football-data.org (verbose) fixture names -> football-data.co.uk (terse) model names,
+# for the handful of clubs whose short names are not a token-subset of the verbose ones
+# ("Athletic Club" vs "Ath Bilbao"). Keyed and valued by normalized name; only entries
+# that hit a real team in the loaded model actually apply, so a stale one is inert.
+_FDCOUK_ALIASES_RAW = {
+    # Spain (SP1)
+    "Athletic Club": "Ath Bilbao",
+    "Club Atlético de Madrid": "Ath Madrid",
+    "Atlético de Madrid": "Ath Madrid",
+    "RCD Espanyol de Barcelona": "Espanol",
+    "RCD Espanyol": "Espanol",
+    # Portugal (P1)
+    "Sporting Clube de Portugal": "Sp Lisbon",
+    "Sporting CP": "Sp Lisbon",
+    "Sporting Clube de Braga": "Sp Braga",
+    "SC Braga": "Sp Braga",
+    "Vitória SC": "Guimaraes",
+    # Netherlands (N1)
+    "Fortuna Sittard": "For Sittard",
+    "NEC": "Nijmegen",
+    "NEC Nijmegen": "Nijmegen",
+    # England (E1, Championship)
+    "Queens Park Rangers FC": "QPR",
+    "West Bromwich Albion FC": "West Brom",
+    # Brazil (BRA) -- verbose club prefixes the short file drops
+    "CA Mineiro": "Atletico-MG",
+    "Clube Atlético Mineiro": "Atletico-MG",
+    "CA Paranaense": "Athletico-PR",
+    "Botafogo FR": "Botafogo RJ",
+    "CR Flamengo": "Flamengo RJ",
+}
+FDCOUK_ALIASES: dict[str, str] = {normalize_name(k): v for k, v in _FDCOUK_ALIASES_RAW.items()}
 
 
 @dataclass(frozen=True)
@@ -328,31 +364,35 @@ class FixtureForecast:
 
 
 def fixture_forecasts(
-    live_db: Path, analytics_db: Path, *, season: str = "2526", limit: int = 60
+    live_db: Path, analytics_db: Path, *, limit: int = 60
 ) -> list[FixtureForecast]:
     """Upcoming fixtures (from the live DB), each forecast via its league's model.
 
     A fixture is forecast only when its competition maps to loaded history and both team
     names resolve into that model; otherwise it is listed without a forecast, honestly.
-    Models are fit on `season` (the last completed season) -- a preseason projection.
+    Each division's model is fit on its most-recent loaded season -- a preseason
+    projection (European "2526", Brazil's calendar-year "2026", ... resolved per league).
     """
     from soccer.domain.names import normalize_name
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.markets import compute_markets
 
     def resolve(name: str, model) -> str | None:
-        """Match a fixture team name to a model team: exact, then unique token-subset.
+        """Match a fixture team name to a model team: exact, curated alias, then fuzzy.
 
         Bridges verbose football-data.org names ("GD Estoril Praia") to the terser
-        football-data.co.uk model names ("Estoril") without a hand-curated alias per team.
+        football-data.co.uk model names ("Estoril"): a token-subset match handles most,
+        and a small curated alias map covers clubs whose short name shares no token with
+        the verbose one ("Athletic Club" -> "Ath Bilbao").
         """
         n = normalize_name(name)
         if n in model.strengths:
             return n
+        aliased = FDCOUK_ALIASES.get(n)
+        if aliased and normalize_name(aliased) in model.strengths:
+            return normalize_name(aliased)
         tokens = set(n.split())
-        subset = [
-            t for t in model.strengths if set(t.split()) < tokens or tokens < set(t.split())
-        ]
+        subset = [t for t in model.strengths if set(t.split()) < tokens or tokens < set(t.split())]
         return subset[0] if len(subset) == 1 else None  # unique match only, else skip
 
     if not Path(live_db).exists():
@@ -367,7 +407,8 @@ def fixture_forecasts(
             model = None
             if Path(analytics_db).exists():
                 with AnalyticsDB(analytics_db) as adb:
-                    outcomes = adb.outcomes_for(season, division)
+                    season = adb.latest_season(division)
+                    outcomes = adb.outcomes_for(season, division) if season else []
                 if outcomes:
                     model = fit_dixon_coles(outcomes)
             models[division] = model

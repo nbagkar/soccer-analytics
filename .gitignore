@@ -22,3 +22,7 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Local agent/skill tooling -- environment, not project source.
+.agents/
+.claude/

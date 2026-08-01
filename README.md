@@ -79,7 +79,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer ingest` | Fetch enabled sources → resolve → persist canonical match state |
 | `soccer matches` | Show ingested match state (add `--in-play`) |
 | `soccer live` | Ad-hoc live scores straight from TheSportsDB |
-| `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB |
+| `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB. `--new-leagues BRA,ARG` adds extra-country files (Brazil, ...) |
 | `soccer table` | League table computed from historical results |
 | `soccer power-rankings` | Elo power rankings from historical results |
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |

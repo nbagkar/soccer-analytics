@@ -27,6 +27,9 @@ from soccer.storage.raw import RawStore
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
+# The "extra" leagues (Brazil, Argentina, USA, ...) live under a different path with a
+# different schema: one file per country holding every season, no shot/card columns.
+NEW_LEAGUE_BASE = "https://www.football-data.co.uk/new"
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,72 @@ def _result_from_score(home: int, away: int) -> str:
     return "H" if home > away else "A" if away > home else "D"
 
 
+def parse_new_league_csv(
+    text: str, *, division: str, recent_seasons: int | None = None
+) -> list[MatchResult]:
+    """Parse a football-data.co.uk "new leagues" CSV (Brazil, Argentina, USA, ...).
+
+    A different schema from the European division files: a single file holds every
+    season, with columns Country/League/Season/Date/Home/Away/HG/AG/Res and betting odds
+    -- but no shot, corner or card stats. `recent_seasons` keeps only the N most-recent
+    seasons, so a decade-long file becomes a current, relevant model instead of loading
+    years of stale rows (and the model is fit on the newest season regardless).
+    """
+    rows = list(csv.DictReader(io.StringIO(text)))
+    seasons = sorted(
+        {(r.get("Season") or "").strip() for r in rows if (r.get("Season") or "").strip()}
+    )
+    keep = set(seasons[-recent_seasons:]) if recent_seasons else set(seasons)
+
+    results: list[MatchResult] = []
+    skipped = 0
+    for row in rows:
+        season = (row.get("Season") or "").strip()
+        home = (row.get("Home") or "").strip()
+        away = (row.get("Away") or "").strip()
+        match_date = _parse_date(row.get("Date") or "")
+        hg, ag = _int(row, "HG"), _int(row, "AG")
+
+        if season not in keep or not home or not away or match_date is None or hg is None:
+            skipped += 1
+            continue
+        if ag is None:
+            skipped += 1
+            continue
+
+        results.append(
+            MatchResult(
+                season=season,
+                division=division,
+                match_date=match_date,
+                home=home,
+                away=away,
+                home_norm=normalize_name(home),
+                away_norm=normalize_name(away),
+                fthg=hg,
+                ftag=ag,
+                ftr=(row.get("Res") or "").strip() or _result_from_score(hg, ag),
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=None,
+                away_shots_target=None,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
+            )
+        )
+
+    if skipped:
+        logger.info("Skipped %d row(s) outside kept seasons / unusable in %s", skipped, division)
+    return results
+
+
 class FootballDataCoUk:
     def __init__(
         self,
@@ -174,3 +243,28 @@ class FootballDataCoUk:
             request_meta={"url": url, "season": season, "division": division},
         )
         return parse_results_csv(response.text, season=season, division=division)
+
+    def fetch_new_league(
+        self, code: str, *, division: str | None = None, recent_seasons: int | None = 3
+    ) -> list[MatchResult]:
+        """Download and parse a "new leagues" country file (e.g. "BRA" for Brazil).
+
+        `code` is football-data.co.uk's country code; `division` is the code stored in the
+        analytics DB (defaults to `code`). Keeps the `recent_seasons` most-recent seasons.
+        Returns [] on a 404 so a sweep of several countries skips absent ones cleanly.
+        """
+        division = division or code
+        url = f"{NEW_LEAGUE_BASE}/{code}.csv"
+        response = self._client.get(url)
+        if response.status_code == 404:
+            logger.info("No new-league file for %s (404)", code)
+            return []
+        response.raise_for_status()
+
+        self._raw.write(
+            SourceId.FOOTBALL_DATA_CO_UK,
+            f"new_{code}",
+            response.text,
+            request_meta={"url": url, "code": code, "division": division},
+        )
+        return parse_new_league_csv(response.text, division=division, recent_seasons=recent_seasons)

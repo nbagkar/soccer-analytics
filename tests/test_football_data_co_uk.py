@@ -15,6 +15,7 @@ import pytest
 
 from soccer.sources.football_data_co_uk import (
     FootballDataCoUk,
+    parse_new_league_csv,
     parse_results_csv,
 )
 from soccer.storage.raw import RawStore
@@ -73,6 +74,38 @@ class TestParser:
             "01/01/2026,A,B,2,1,\n"  # FTR blank -> derive H
         )
         assert parse_results_csv(csv, season="2526", division="E0")[0].ftr == "H"
+
+
+# The "new leagues" schema: one file, every season, Country/League/Season/Date/Home/
+# Away/HG/AG/Res and odds -- no shot or card columns. A future row without a score too.
+NEW_CSV = """Country,League,Season,Date,Time,Home,Away,HG,AG,Res,PSCH,PSCD,PSCA
+Brazil,Serie A,2024,19/05/2024,22:30,Palmeiras,Santos,2,0,H,1.75,3.8,5.2
+Brazil,Serie A,2025,20/05/2025,22:30,Flamengo RJ,Vasco,1,1,D,2.1,3.4,3.6
+Brazil,Serie A,2026,21/05/2026,22:30,Corinthians,Gremio,,,,1.9,3.3,4.1
+"""
+
+
+class TestNewLeagueParser:
+    def test_parses_new_schema_fields(self) -> None:
+        rows = parse_new_league_csv(NEW_CSV, division="BRA")
+        # The 2026 row has no score yet -> dropped; two usable results remain.
+        assert len(rows) == 2
+        first = rows[0]
+        assert (first.home, first.away) == ("Palmeiras", "Santos")
+        assert (first.fthg, first.ftag, first.ftr) == (2, 0, "H")
+        assert first.season == "2024"
+        assert first.division == "BRA"
+        assert first.home_norm == "palmeiras"
+        # No shot/card columns in this schema.
+        assert first.home_shots is None and first.home_yellows is None
+
+    def test_recent_seasons_keeps_only_newest(self) -> None:
+        rows = parse_new_league_csv(NEW_CSV, division="BRA", recent_seasons=1)
+        # Only 2026 season kept -- but its one row has no score, so nothing survives.
+        assert rows == []
+        rows2 = parse_new_league_csv(NEW_CSV, division="BRA", recent_seasons=2)
+        # 2025 and 2026 kept; only 2025's row has a score.
+        assert {r.season for r in rows2} == {"2025"}
 
 
 class TestAdapter:
