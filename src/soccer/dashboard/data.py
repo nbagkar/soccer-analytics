@@ -304,6 +304,92 @@ def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order
         return adb.player_leaderboard(limit=top, min_shots=min_shots, order=order)
 
 
+def player_profiles(
+    analytics_db: Path, *, top: int = 30, min_minutes: int = 180, order: str = "contributions"
+):
+    """Full player profiles (list[PlayerProfile]) from ingested events. [] if none loaded."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_stats_count() == 0:
+            return []
+        return adb.player_profiles(limit=top, min_minutes=min_minutes, order=order)
+
+
+def player_profile(analytics_db: Path, player: str):
+    """One player's full profile (PlayerProfile) or None."""
+    if not Path(analytics_db).exists():
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.player_profile(player)
+
+
+def has_player_events(analytics_db: Path) -> bool:
+    """Whether any full-event player stats are loaded -- gates the rich Players view."""
+    if not Path(analytics_db).exists():
+        return False
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.player_stats_count() > 0
+
+
+@dataclass(frozen=True)
+class MetricPercentile:
+    category: str
+    label: str
+    value: float
+    """Per-90 value (or a raw ratio like pass %), as displayed."""
+    percentile: float  # 0..100 within the qualifying pool
+
+
+# The scouting fingerprint: metrics grouped by phase of play, each a per-90 rate unless
+# flagged otherwise. (category, label, attribute, is_per90).
+_PERCENTILE_METRICS = [
+    ("Attacking", "Non-pen xG", "npxg", True),
+    ("Attacking", "Goals", "goals", True),
+    ("Attacking", "Shots", "shots", True),
+    ("Attacking", "xA", "xa", True),
+    ("Attacking", "Key passes", "key_passes", True),
+    ("Possession", "Passes", "passes", True),
+    ("Possession", "Pass %", "pass_pct", False),
+    ("Possession", "Prog. passes", "progressive_passes", True),
+    ("Possession", "Prog. carries", "progressive_carries", True),
+    ("Possession", "Dribbles", "dribbles_completed", True),
+    ("Defending", "Tackles", "tackles", True),
+    ("Defending", "Interceptions", "interceptions", True),
+    ("Defending", "Blocks", "blocks", True),
+    ("Defending", "Clearances", "clearances", True),
+    ("Defending", "Recoveries", "ball_recoveries", True),
+    ("Defending", "Pressures", "pressures", True),
+]
+
+
+def player_percentiles(
+    analytics_db: Path, player: str, *, min_minutes: int = 200
+) -> list[MetricPercentile]:
+    """A player's per-90 rates and their percentile rank within the qualifying pool.
+
+    The FBref-style scouting fingerprint: for each metric, what fraction of players
+    (with at least `min_minutes`) this player is at or above. [] if the player is not in
+    the pool. Percentiles are only as meaningful as the pool -- small samples, wide error.
+    """
+    profiles = player_profiles(analytics_db, top=100_000, min_minutes=min_minutes, order="minutes")
+    target = next((p for p in profiles if p.player == player), None)
+    if target is None or not profiles:
+        return []
+
+    def value_of(profile, attr: str, is_per90: bool) -> float:
+        raw = getattr(profile, attr)
+        return profile.per90(raw) if is_per90 else raw
+
+    out: list[MetricPercentile] = []
+    for category, label, attr, is_per90 in _PERCENTILE_METRICS:
+        target_value = value_of(target, attr, is_per90)
+        pool = [value_of(p, attr, is_per90) for p in profiles]
+        pct = 100.0 * sum(1 for v in pool if v <= target_value) / len(pool)
+        out.append(MetricPercentile(category, label, round(target_value, 2), round(pct)))
+    return out
+
+
 # football-data.org competition names -> football-data.co.uk division codes, for
 # forecasting upcoming fixtures with the model fitted on that league's history.
 COMPETITION_TO_DIVISION = {

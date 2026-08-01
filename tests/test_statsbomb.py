@@ -10,9 +10,14 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from soccer.sources.statsbomb import Shot, StatsBomb, parse_shots
+from soccer.sources.statsbomb import Shot, StatsBomb, parse_player_stats, parse_shots
 from soccer.storage.analytics_db import AnalyticsDB
 from soccer.storage.raw import RawStore
+
+
+@pytest.fixture
+def adb(tmp_path) -> AnalyticsDB:
+    return AnalyticsDB(tmp_path / "a.duckdb")
 
 EVENTS = [
     {"type": {"name": "Pass"}, "team": {"name": "A"}},  # not a shot
@@ -95,10 +100,6 @@ class TestAdapter:
 
 
 class TestShotsStore:
-    @pytest.fixture
-    def adb(self, tmp_path) -> AnalyticsDB:
-        return AnalyticsDB(tmp_path / "a.duckdb")
-
     def _shots(self) -> list[Shot]:
         return [
             *parse_shots(EVENTS, match_id=1),
@@ -161,3 +162,153 @@ class TestShotsStore:
         assert adb.player_leaderboard(min_shots=2) == []
         by_goals = adb.player_leaderboard(min_shots=1, order="goals")
         assert by_goals[0].goals >= by_goals[-1].goals
+
+
+# A compact events stream exercising the tricky parsing rules: pass completion inferred
+# from the ABSENCE of an outcome, progressive thresholds, xA/key-pass linkage via a shot's
+# key_pass_id, a won tackle, a card, and minutes derived from Starting XI + Substitution.
+PLAYER_EVENTS = [
+    {
+        "type": {"name": "Starting XI"},
+        "team": {"name": "A"},
+        "tactics": {
+            "lineup": [
+                {"player": {"name": "P1"}, "position": {"name": "Center Midfield"}},
+                {"player": {"name": "P2"}, "position": {"name": "Striker"}},
+            ]
+        },
+    },
+    # P1 completed, progressive pass (no `outcome` key => completed; 40->90 up-pitch).
+    {
+        "id": "pass1",
+        "type": {"name": "Pass"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "location": [40.0, 40.0],
+        "pass": {"end_location": [90.0, 40.0]},
+    },
+    # P1 incomplete pass (has an outcome => not completed).
+    {
+        "id": "pass2",
+        "type": {"name": "Pass"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "location": [40.0, 40.0],
+        "pass": {"end_location": [50.0, 40.0], "outcome": {"name": "Incomplete"}},
+    },
+    # P1's assist: a pass flagged goal_assist that a shot references by key_pass_id.
+    {
+        "id": "pass3",
+        "type": {"name": "Pass"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "location": [80.0, 40.0],
+        "pass": {"end_location": [100.0, 40.0], "goal_assist": True},
+    },
+    {
+        "type": {"name": "Shot"},
+        "player": {"name": "P2"},
+        "team": {"name": "A"},
+        "minute": 10,
+        "shot": {"statsbomb_xg": 0.5, "key_pass_id": "pass3", "outcome": {"name": "Goal"}},
+    },
+    # P2 progressive carry (60->80).
+    {
+        "type": {"name": "Carry"},
+        "player": {"name": "P2"},
+        "team": {"name": "A"},
+        "location": [60.0, 40.0],
+        "carry": {"end_location": [80.0, 40.0]},
+    },
+    {
+        "type": {"name": "Duel"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "duel": {"type": {"name": "Tackle"}, "outcome": {"name": "Won"}},
+    },
+    {"type": {"name": "Interception"}, "player": {"name": "P1"}, "team": {"name": "A"}},
+    {
+        "type": {"name": "Foul Committed"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "foul_committed": {"card": {"name": "Yellow Card"}},
+    },
+    # P1 off at 70, P3 on -- minutes: P1 70, P3 20 (to match end), P2 90 (never subbed).
+    {
+        "type": {"name": "Substitution"},
+        "player": {"name": "P1"},
+        "team": {"name": "A"},
+        "minute": 70,
+        "substitution": {"replacement": {"name": "P3"}},
+    },
+    {
+        "type": {"name": "Pass"},
+        "player": {"name": "P3"},
+        "team": {"name": "A"},
+        "minute": 90,
+        "location": [40.0, 40.0],
+        "pass": {"end_location": [50.0, 40.0]},
+    },
+]
+
+
+class TestPlayerStatsParser:
+    def _by_name(self) -> dict:
+        return {p.player: p for p in parse_player_stats(PLAYER_EVENTS, match_id=1)}
+
+    def test_pass_completion_and_progression(self) -> None:
+        p1 = self._by_name()["P1"]
+        assert p1.passes == 3
+        assert p1.passes_completed == 2  # pass2 had an outcome => incomplete
+        assert p1.progressive_passes == 2  # pass1 and pass3 both gain up-pitch
+
+    def test_xa_and_key_pass_linked_from_shot(self) -> None:
+        p1 = self._by_name()["P1"]
+        assert p1.key_passes == 1
+        assert p1.xa == pytest.approx(0.5)  # the shot's xG credited to the passer
+        assert p1.assists == 1  # goal_assist flag
+
+    def test_defensive_and_discipline_counts(self) -> None:
+        p1 = self._by_name()["P1"]
+        assert (p1.tackles, p1.tackles_won) == (1, 1)
+        assert p1.interceptions == 1
+        assert p1.yellow_cards == 1
+
+    def test_carry_progression(self) -> None:
+        p2 = self._by_name()["P2"]
+        assert p2.carries == 1
+        assert p2.progressive_carries == 1
+
+    def test_minutes_from_lineup_and_subs(self) -> None:
+        by = self._by_name()
+        assert by["P1"].minutes == 70  # started, off at 70
+        assert by["P2"].minutes == 90  # started, played to the end (last event minute)
+        assert by["P3"].minutes == 20  # on at 70, to the end
+
+
+class TestPlayerProfiles:
+    def test_profile_joins_shots_and_events(self, adb: AnalyticsDB) -> None:
+        # A shooter (P2) and a non-shooting defender (P1) both get a profile.
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        adb.load_shots(
+            [Shot(1, "A", "P2", 10, 1, 100.0, 40.0, 0.5, "Goal", True, False, "Right Foot")]
+        )
+        profiles = {p.player: p for p in adb.player_profiles(min_minutes=1, order="contributions")}
+
+        striker = profiles["P2"]
+        assert striker.goals == 1 and striker.shots == 1  # from the shots table
+        assert striker.xg == pytest.approx(0.5)
+
+        mid = profiles["P1"]
+        assert mid.goals == 0  # never shot -> LEFT JOIN yields zero, not dropped
+        assert mid.assists == 1 and mid.tackles == 1
+        assert mid.pass_pct == pytest.approx(200 / 3)  # 2 of 3 completed
+
+    def test_single_profile_and_per90(self, adb: AnalyticsDB) -> None:
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        p1 = adb.player_profile("P1")
+        assert p1 is not None
+        assert p1.minutes == 70
+        # 1 interception in 70 minutes -> ~1.29 per 90.
+        assert p1.per90(p1.interceptions) == pytest.approx(90 / 70)
+        assert adb.player_profile("Nobody") is None

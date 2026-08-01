@@ -62,6 +62,91 @@ CREATE TABLE IF NOT EXISTS shots (
     is_penalty  BOOLEAN NOT NULL,
     body_part   VARCHAR
 );
+
+CREATE TABLE IF NOT EXISTS player_match_stats (
+    match_id            INTEGER NOT NULL,
+    player              VARCHAR NOT NULL,
+    team                VARCHAR NOT NULL,
+    position            VARCHAR,
+    minutes             INTEGER NOT NULL,
+    passes              INTEGER NOT NULL,
+    passes_completed    INTEGER NOT NULL,
+    key_passes          INTEGER NOT NULL,
+    assists             INTEGER NOT NULL,
+    xa                  DOUBLE  NOT NULL,
+    progressive_passes  INTEGER NOT NULL,
+    carries             INTEGER NOT NULL,
+    progressive_carries INTEGER NOT NULL,
+    dribbles            INTEGER NOT NULL,
+    dribbles_completed  INTEGER NOT NULL,
+    tackles             INTEGER NOT NULL,
+    tackles_won         INTEGER NOT NULL,
+    interceptions       INTEGER NOT NULL,
+    blocks              INTEGER NOT NULL,
+    clearances          INTEGER NOT NULL,
+    ball_recoveries     INTEGER NOT NULL,
+    pressures           INTEGER NOT NULL,
+    fouls               INTEGER NOT NULL,
+    fouled              INTEGER NOT NULL,
+    yellow_cards        INTEGER NOT NULL,
+    red_cards           INTEGER NOT NULL,
+    touches             INTEGER NOT NULL
+);
+"""
+
+# Sortable expressions for the player-profile leaderboard, allowlisted so `order` can
+# never reach the SQL string directly. Keys are what the CLI/dashboard pass.
+_PROFILE_ORDER = {
+    "goals": "COALESCE(sh.goals,0)",
+    "xg": "COALESCE(sh.xg,0)",
+    "npxg": "COALESCE(sh.npxg,0)",
+    "assists": "p.assists",
+    "xa": "p.xa",
+    "contributions": "COALESCE(sh.goals,0)+p.assists",
+    "xgxa": "COALESCE(sh.xg,0)+p.xa",
+    "key_passes": "p.key_passes",
+    "passes": "p.passes",
+    "progressive": "p.progressive_passes+p.progressive_carries",
+    "tackles": "p.tackles",
+    "interceptions": "p.interceptions",
+    "pressures": "p.pressures",
+    "defensive": "p.tackles+p.interceptions+p.blocks+p.clearances+p.ball_recoveries",
+    "minutes": "p.minutes",
+    "touches": "p.touches",
+}
+
+# Full profile per player: event stats (pstat) LEFT JOINed onto shot aggregates (sh), so
+# a non-shooting defender still gets a row. Column order matches PlayerProfile's fields.
+_PROFILE_SELECT = """
+    WITH pstat AS (
+        SELECT player, mode(team) AS team, mode(position) AS position,
+               COUNT(DISTINCT match_id) AS matches, SUM(minutes) AS minutes,
+               SUM(assists) AS assists, SUM(xa) AS xa, SUM(key_passes) AS key_passes,
+               SUM(passes) AS passes, SUM(passes_completed) AS passes_completed,
+               SUM(progressive_passes) AS progressive_passes, SUM(carries) AS carries,
+               SUM(progressive_carries) AS progressive_carries, SUM(dribbles) AS dribbles,
+               SUM(dribbles_completed) AS dribbles_completed, SUM(tackles) AS tackles,
+               SUM(tackles_won) AS tackles_won, SUM(interceptions) AS interceptions,
+               SUM(blocks) AS blocks, SUM(clearances) AS clearances,
+               SUM(ball_recoveries) AS ball_recoveries, SUM(pressures) AS pressures,
+               SUM(fouls) AS fouls, SUM(fouled) AS fouled, SUM(yellow_cards) AS yellow_cards,
+               SUM(red_cards) AS red_cards, SUM(touches) AS touches
+        FROM player_match_stats GROUP BY player
+    ),
+    sh AS (
+        SELECT player, SUM(xg) AS xg,
+               COALESCE(SUM(xg) FILTER (WHERE NOT is_penalty), 0) AS npxg,
+               SUM(is_goal::INT) AS goals, COUNT(*) AS shots
+        FROM shots GROUP BY player
+    )
+    SELECT p.player, p.team, p.position, p.matches, p.minutes,
+           COALESCE(sh.goals, 0), COALESCE(sh.xg, 0.0), COALESCE(sh.npxg, 0.0),
+           COALESCE(sh.shots, 0), p.assists, p.xa, p.key_passes, p.passes,
+           p.passes_completed, p.progressive_passes, p.carries, p.progressive_carries,
+           p.dribbles, p.dribbles_completed, p.tackles, p.tackles_won, p.interceptions,
+           p.blocks, p.clearances, p.ball_recoveries, p.pressures, p.fouls, p.fouled,
+           p.yellow_cards, p.red_cards, p.touches
+    FROM pstat p LEFT JOIN sh ON sh.player = p.player
 """
 
 
@@ -101,6 +186,74 @@ class PlayerRow:
     def xg_diff(self) -> float:
         """Goals minus xG -- finishing over/under-performance."""
         return self.goals - self.xg
+
+
+@dataclass(frozen=True)
+class PlayerProfile:
+    """A player's full contribution across all loaded matches, shooting + everything else.
+
+    Shooting (goals/xg/npxg/shots) comes from the shots table; the rest from aggregated
+    per-match event stats. Rate stats are exposed via `per90` so a substitute and an
+    ever-present are comparable.
+    """
+
+    player: str
+    team: str
+    position: str | None
+    matches: int
+    minutes: int
+    goals: int
+    xg: float
+    npxg: float
+    shots: int
+    assists: int
+    xa: float
+    key_passes: int
+    passes: int
+    passes_completed: int
+    progressive_passes: int
+    carries: int
+    progressive_carries: int
+    dribbles: int
+    dribbles_completed: int
+    tackles: int
+    tackles_won: int
+    interceptions: int
+    blocks: int
+    clearances: int
+    ball_recoveries: int
+    pressures: int
+    fouls: int
+    fouled: int
+    yellow_cards: int
+    red_cards: int
+    touches: int
+
+    @property
+    def goal_contributions(self) -> int:
+        return self.goals + self.assists
+
+    @property
+    def xg_plus_xa(self) -> float:
+        return self.xg + self.xa
+
+    @property
+    def xg_diff(self) -> float:
+        return self.goals - self.xg
+
+    @property
+    def pass_pct(self) -> float:
+        return 100.0 * self.passes_completed / self.passes if self.passes else 0.0
+
+    @property
+    def defensive_actions(self) -> int:
+        """Tackles + interceptions + blocks + clearances + recoveries -- a defending tally."""
+        return (
+            self.tackles + self.interceptions + self.blocks + self.clearances + self.ball_recoveries
+        )
+
+    def per90(self, value: float) -> float:
+        return value / self.minutes * 90.0 if self.minutes else 0.0
 
 
 @dataclass(frozen=True)
@@ -368,3 +521,53 @@ class AnalyticsDB:
 
     def player_count(self) -> int:
         return self._con.execute("SELECT COUNT(DISTINCT player) FROM shots").fetchone()[0]
+
+    # --- StatsBomb full-event player stats ------------------------------------
+
+    def load_player_stats(self, stats: list) -> int:
+        """Load per-match player stats, replacing each match's set so re-ingest is idempotent."""
+        if not stats:
+            return 0
+        frame = pl.DataFrame([asdict(s) for s in stats])
+        match_ids = {s.match_id for s in stats}
+        self._con.register("incoming_pstats", frame)
+        try:
+            self._con.execute("BEGIN")
+            for match_id in match_ids:
+                self._con.execute("DELETE FROM player_match_stats WHERE match_id = ?", [match_id])
+            self._con.execute(
+                "INSERT INTO player_match_stats BY NAME SELECT * FROM incoming_pstats"
+            )
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        finally:
+            self._con.unregister("incoming_pstats")
+        return len(stats)
+
+    def player_stats_count(self) -> int:
+        return self._con.execute(
+            "SELECT COUNT(DISTINCT player) FROM player_match_stats"
+        ).fetchone()[0]
+
+    def player_profiles(
+        self, *, limit: int = 30, min_minutes: int = 90, order: str = "contributions"
+    ) -> list[PlayerProfile]:
+        """Full player profiles across all loaded matches, ranked by `order`.
+
+        `order` is one of the keys in `_PROFILE_ORDER` (goals, xg, assists, xa,
+        contributions, progressive, defensive, ...). `min_minutes` drops cameos.
+        """
+        order_expr = _PROFILE_ORDER.get(order, _PROFILE_ORDER["contributions"])
+        rows = self._con.execute(
+            f"{_PROFILE_SELECT} WHERE p.minutes >= ? "
+            f"ORDER BY {order_expr} DESC, p.minutes DESC LIMIT ?",  # order_expr is allowlisted
+            [min_minutes, limit],
+        ).fetchall()
+        return [PlayerProfile(*r) for r in rows]
+
+    def player_profile(self, player: str) -> PlayerProfile | None:
+        """One player's full profile, or None if they have no event stats loaded."""
+        rows = self._con.execute(f"{_PROFILE_SELECT} WHERE p.player = ?", [player]).fetchall()
+        return PlayerProfile(*rows[0]) if rows else None

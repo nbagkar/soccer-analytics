@@ -25,9 +25,13 @@ from soccer.dashboard.data import (
     fixture_forecasts,
     forecast_slate,
     forecast_teams,
+    has_player_events,
     health_snapshot,
     live_snapshot,
     player_board,
+    player_percentiles,
+    player_profile,
+    player_profiles,
     shot_map,
     shot_matches,
 )
@@ -430,6 +434,152 @@ def _diff_span(diff: float) -> str:
     return f'<span style="color:{colour}">{diff:+.1f}</span>'
 
 
+# Leaderboard columns: (header, profile attribute, is a per-90 rate, number format).
+_LEADER_COLUMNS = [
+    ("G", "goals", True, "%.2f"),
+    ("xG", "xg", True, "%.2f"),
+    ("npxG", "npxg", True, "%.2f"),
+    ("Ast", "assists", True, "%.2f"),
+    ("xA", "xa", True, "%.2f"),
+    ("Key pass", "key_passes", True, "%.2f"),
+    ("Prg pass", "progressive_passes", True, "%.1f"),
+    ("Prg carry", "progressive_carries", True, "%.1f"),
+    ("Dribbles", "dribbles_completed", True, "%.1f"),
+    ("Tackles", "tackles", True, "%.1f"),
+    ("Int", "interceptions", True, "%.1f"),
+    ("Recov", "ball_recoveries", True, "%.1f"),
+]
+
+_RANK_OPTIONS = {
+    "Goal contributions": "contributions",
+    "Goals": "goals",
+    "Expected (xG+xA)": "xgxa",
+    "Assists": "assists",
+    "xA": "xa",
+    "Progression": "progressive",
+    "Defending": "defensive",
+    "Passes": "passes",
+    "Minutes": "minutes",
+}
+
+
+def _render_player_leaderboard(profiles, *, per90: bool) -> None:
+    st.subheader("Player leaderboard")
+    mode = "per 90 minutes" if per90 else "totals"
+    st.caption(
+        f"StatsBomb event data across all ingested matches, shown as {mode}. "
+        "Sort any column by clicking its header."
+    )
+
+    top = profiles[0]
+    kpi = st.columns(4)
+    kpi[0].metric("Players", len(profiles))
+    kpi[1].metric("Most G+A", top.goal_contributions, top.player.split()[-1])
+    clinical = max(profiles, key=lambda p: p.xg_diff)
+    kpi[2].metric("Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1])
+    creator = max(profiles, key=lambda p: p.xa)
+    kpi[3].metric("Top xA", f"{creator.xa:.1f}", creator.player.split()[-1])
+
+    data = {
+        "Player": [p.player for p in profiles],
+        "Team": [p.team for p in profiles],
+        "Pos": [(p.position or "")[:14] for p in profiles],
+        "Min": [p.minutes for p in profiles],
+    }
+    for header, attr, _is_rate, _fmt in _LEADER_COLUMNS:
+        data[header] = [
+            round(p.per90(getattr(p, attr)), 2) if per90 else getattr(p, attr) for p in profiles
+        ]
+    data["Pass %"] = [round(p.pass_pct, 1) for p in profiles]
+    frame = pl.DataFrame(data).to_pandas()
+
+    column_config = {
+        "Min": st.column_config.NumberColumn("Min", format="%d", help="Minutes played"),
+        "Pass %": st.column_config.NumberColumn("Pass %", format="%.1f%%"),
+    }
+    for header, _attr, _is_rate, fmt in _LEADER_COLUMNS:
+        column_config[header] = st.column_config.NumberColumn(header, format=fmt if per90 else "%d")
+
+    st.dataframe(
+        frame,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+        height=min(560, 60 + 35 * len(profiles)),
+    )
+    st.caption(ATTRIBUTION_STATSBOMB)
+
+
+_CATEGORY_COLOURS = {
+    "Attacking": "#dc2626",
+    "Possession": "#2563eb",
+    "Defending": "#16a34a",
+}
+
+
+def _render_player_profile(profile, percentiles) -> None:
+    pos = f" · {profile.position}" if profile.position else ""
+    st.subheader(f"{profile.player}")
+    st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
+
+    row = st.columns(5)
+    row[0].metric("Goals", profile.goals, f"xG {profile.xg:.1f}")
+    row[1].metric("Assists", profile.assists, f"xA {profile.xa:.1f}")
+    row[2].metric("Shots", profile.shots, f"{profile.per90(profile.shots):.1f}/90")
+    row[3].metric("Pass %", f"{profile.pass_pct:.0f}%", f"{profile.passes} att")
+    row[4].metric("Prog. actions", profile.progressive_passes + profile.progressive_carries)
+
+    if not percentiles:
+        st.info("Not enough minutes for a percentile fingerprint at this threshold.")
+        return
+
+    st.markdown("**Percentile rank** — vs all qualifying players (per 90)")
+    order = [mp.label for mp in percentiles]
+    frame = pl.DataFrame(
+        {
+            "metric": [mp.label for mp in percentiles],
+            "category": [mp.category for mp in percentiles],
+            "percentile": [mp.percentile for mp in percentiles],
+            "value": [mp.value for mp in percentiles],
+        }
+    ).to_pandas()
+
+    domain = list(_CATEGORY_COLOURS)
+    rng = [_CATEGORY_COLOURS[c] for c in domain]
+    bars = (
+        alt.Chart(frame)
+        .mark_bar(cornerRadiusEnd=3, height=14)
+        .encode(
+            x=alt.X("percentile:Q", scale=alt.Scale(domain=[0, 100]), title="Percentile"),
+            y=alt.Y("metric:N", sort=order, title=None),
+            color=alt.Color(
+                "category:N",
+                scale=alt.Scale(domain=domain, range=rng),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=[
+                "category",
+                "metric",
+                alt.Tooltip("value", title="per 90"),
+                alt.Tooltip("percentile", title="pct"),
+            ],
+        )
+    )
+    labels = bars.mark_text(align="left", dx=3, color="#8b8b8b").encode(text="value:Q")
+    midline = (
+        alt.Chart(pl.DataFrame({"v": [50]}).to_pandas())
+        .mark_rule(color="#9aa0a6", strokeDash=[3, 3])
+        .encode(x="v:Q")
+    )
+    st.altair_chart(
+        (bars + labels + midline).properties(height=22 * len(percentiles) + 10), width="stretch"
+    )
+    st.caption(
+        "Bar = percentile within the pool; number = the player's per-90 value. Dashed line "
+        "is the median (50th). " + ATTRIBUTION_STATSBOMB
+    )
+
+
 def _render_fixtures(fixtures) -> None:
     st.subheader("Fixtures & forecasts")
     forecastable = [f for f in fixtures if f.slate is not None]
@@ -525,14 +675,54 @@ def main() -> None:
         return
 
     if page == "Players":
+        if not has_player_events(settings.analytics_db):
+            # No full-event stats -- fall back to the shots-only board, or prompt.
+            rows = player_board(settings.analytics_db, top=25, min_shots=3, order="xg")
+            if rows:
+                _render_players(rows)
+            else:
+                st.info(
+                    "No event data yet. Run `soccer ingest-events --competition 43 --season 106`, "
+                    "then `soccer ingest-events --from-raw`, and reload."
+                )
+            return
+
         with st.sidebar:
-            order = st.selectbox("Rank by", ["xg", "goals", "npxg"])
-            min_shots = st.slider("Min shots", 1, 15, 3)
-        rows = player_board(settings.analytics_db, top=25, min_shots=min_shots, order=order)
-        if not rows:
-            st.info("No event data yet. Run `soccer ingest-events --competition 43 --season 106`.")
+            view = st.segmented_control(
+                "View", ["Leaderboard", "Player profile"], default="Leaderboard"
+            )
+            min_minutes = st.slider("Min minutes", 90, 900, 270, step=30)
+
+        if view == "Player profile":
+            pool = player_profiles(
+                settings.analytics_db, top=100_000, min_minutes=min_minutes, order="contributions"
+            )
+            if not pool:
+                st.info("No players clear that minutes threshold. Lower it in the sidebar.")
+                return
+            with st.sidebar:
+                names = [p.player for p in pool]
+                picked = st.selectbox("Player", names)
+            profile = player_profile(settings.analytics_db, picked)
+            pcts = player_percentiles(settings.analytics_db, picked, min_minutes=min_minutes)
+            if profile is None:
+                st.info("No profile for that player.")
+            else:
+                _render_player_profile(profile, pcts)
         else:
-            _render_players(rows)
+            with st.sidebar:
+                rank_label = st.selectbox("Rank by", list(_RANK_OPTIONS))
+                per90 = st.toggle("Per 90 minutes", value=False)
+            profiles = player_profiles(
+                settings.analytics_db,
+                top=40,
+                min_minutes=min_minutes,
+                order=_RANK_OPTIONS[rank_label],
+            )
+            if not profiles:
+                st.info("No players clear that minutes threshold. Lower it in the sidebar.")
+            else:
+                _render_player_leaderboard(profiles, per90=per90)
         return
 
     if page == "Forecast":

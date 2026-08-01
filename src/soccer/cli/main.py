@@ -905,22 +905,34 @@ def ingest_events(
     match: int = typer.Option(0, help="A single StatsBomb match_id."),
     competition: int = typer.Option(0, help="Competition id (with --season) for a whole season."),
     season: int = typer.Option(0, help="Season id (with --competition)."),
+    from_raw: bool = typer.Option(
+        False, "--from-raw", help="Re-parse already-snapshotted matches offline (no fetch)."
+    ),
 ) -> None:
-    """Ingest StatsBomb open-data shots (xG) into the analytics store.
+    """Ingest StatsBomb open-data events into the analytics store: shots (xG) and full
+    per-player match stats (passing, carrying, defending, discipline).
 
     StatsBomb open data is under a proprietary EULA (no redistribution, no commercial
     use, logo attribution) -- an explicit opt-in. Data stays in the local gitignored
-    store. Find ids with the StatsBomb open-data competitions.json.
+    store. `--from-raw` re-parses every match already snapshotted, no network needed --
+    the way to backfill richer stats after a parser change.
     """
+    from soccer.sources.registry import SourceId
     from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
-    from soccer.sources.statsbomb import StatsBomb
+    from soccer.sources.statsbomb import StatsBomb, parse_player_stats, parse_shots
 
     settings = get_settings()
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
 
     with StatsBomb(raw) as sb, AnalyticsDB(settings.analytics_db) as adb:
-        if match:
+        if from_raw:
+            match_ids = adb.matches_with_shots()
+            if not match_ids:
+                console.print("[yellow]Nothing snapshotted yet.[/yellow] Ingest a match first.")
+                raise typer.Exit(code=1)
+            console.print(f"[dim]Re-parsing {len(match_ids)} snapshotted match(es)...[/dim]")
+        elif match:
             match_ids = [match]
         elif competition and season:
             match_ids = [m["match_id"] for m in sb.matches(competition, season)]
@@ -929,16 +941,30 @@ def ingest_events(
             console.print("[yellow]Provide --match, or --competition and --season.[/yellow]")
             raise typer.Exit(code=1)
 
-        total = 0
+        total_shots, total_players = 0, 0
         for match_id in match_ids:
-            shots = sb.fetch_shots(match_id)
+            if from_raw:
+                snapshot = raw.latest(SourceId.STATSBOMB, f"events_{match_id}")
+                events = snapshot.payload if snapshot else []
+            else:
+                events = sb.fetch_events(match_id)
+            if not events:
+                continue
+            shots = parse_shots(events, match_id)
+            stats = parse_player_stats(events, match_id)
             if shots:
                 adb.load_shots(shots)
-                total += len(shots)
+                total_shots += len(shots)
+            if stats:
+                adb.load_player_stats(stats)
+                total_players += len(stats)
             if match or len(match_ids) <= 10:
-                console.print(f"  match {match_id}: {len(shots)} shots")
+                console.print(f"  match {match_id}: {len(shots)} shots, {len(stats)} players")
 
-    console.print(f"\n[green]Loaded {total} shots[/green] across {len(match_ids)} match(es).")
+    console.print(
+        f"\n[green]Loaded {total_shots} shots and {total_players} player-match rows[/green] "
+        f"across {len(match_ids)} match(es)."
+    )
     console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
 
 

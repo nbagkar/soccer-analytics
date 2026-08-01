@@ -103,6 +103,78 @@ def seed_results(path, *, division: str, teams: list[str], season: str = "2526")
         adb.load_results(rows)
 
 
+def seed_player_events(path) -> None:
+    """Seed full-event player stats + matching shots so the rich Players view has data."""
+    from soccer.sources.statsbomb import PlayerMatchStats, Shot
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    def pms(player: str, team: str, **kw) -> PlayerMatchStats:
+        base = dict(
+            match_id=1,
+            player=player,
+            team=team,
+            position=kw.pop("position", "Center Midfield"),
+            minutes=kw.pop("minutes", 300),
+            passes=0,
+            passes_completed=0,
+            key_passes=0,
+            assists=0,
+            xa=0.0,
+            progressive_passes=0,
+            carries=0,
+            progressive_carries=0,
+            dribbles=0,
+            dribbles_completed=0,
+            tackles=0,
+            tackles_won=0,
+            interceptions=0,
+            blocks=0,
+            clearances=0,
+            ball_recoveries=0,
+            pressures=0,
+            fouls=0,
+            fouled=0,
+            yellow_cards=0,
+            red_cards=0,
+            touches=0,
+        )
+        base.update(kw)
+        return PlayerMatchStats(**base)
+
+    stats = [
+        pms(
+            "Messi",
+            "Argentina",
+            passes=200,
+            passes_completed=170,
+            key_passes=10,
+            assists=3,
+            xa=2.0,
+            progressive_passes=40,
+            progressive_carries=30,
+            dribbles_completed=20,
+        ),
+        pms(
+            "Otamendi",
+            "Argentina",
+            position="Center Back",
+            passes=150,
+            passes_completed=135,
+            tackles=8,
+            interceptions=6,
+            blocks=4,
+            clearances=20,
+            ball_recoveries=15,
+        ),
+    ]
+    shots = [
+        Shot(1, "Argentina", "Messi", 23, 1, 110.0, 40.0, 0.35, "Goal", True, False, "Left Foot"),
+    ]
+    with AnalyticsDB(path) as adb:
+        adb.load_player_stats(stats)
+        adb.load_shots(shots)
+
+
 class TestLiveSnapshot:
     def test_kpis_count_correctly(self, db: LiveDB) -> None:
         add_match(
@@ -446,6 +518,42 @@ class TestFixtureForecasts:
         assert fixtures[0].slate is not None  # alias bridged the verbose name
 
 
+class TestPlayerProfileData:
+    def test_profiles_and_percentiles(self, tmp_path) -> None:
+        from soccer.dashboard.data import (
+            has_player_events,
+            player_percentiles,
+            player_profiles,
+        )
+
+        path = tmp_path / "analytics.duckdb"
+        assert has_player_events(path) is False
+        seed_player_events(path)
+        assert has_player_events(path) is True
+
+        profiles = player_profiles(path, min_minutes=1, order="contributions")
+        by = {p.player for p in profiles}
+        assert {"Messi", "Otamendi"} <= by
+
+        # Messi (goals + assists) ranks above the defender by contributions.
+        assert profiles[0].player == "Messi"
+
+        # Percentile fingerprint: the defender tops defending, Messi tops attacking.
+        otam = {
+            mp.label: mp.percentile for mp in player_percentiles(path, "Otamendi", min_minutes=1)
+        }
+        messi = {mp.label: mp.percentile for mp in player_percentiles(path, "Messi", min_minutes=1)}
+        assert otam["Tackles"] >= messi["Tackles"]
+        assert messi["xA"] >= otam["xA"]
+
+    def test_percentiles_empty_for_unknown_player(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_percentiles
+
+        path = tmp_path / "analytics.duckdb"
+        seed_player_events(path)
+        assert player_percentiles(path, "Nobody", min_minutes=1) == []
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -507,10 +615,13 @@ class TestAppSmoke:
             at.radio[0].set_value("Forecast").run()
             assert not at.exception, f"Forecast raised: {at.exception}"
 
-            # Players page needs shots; seed and visit.
-            TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
+            # Players page: seed full-event stats so the rich leaderboard + profile render.
+            seed_player_events(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Players").run()
-            assert not at.exception, f"Players raised: {at.exception}"
+            assert not at.exception, f"Players leaderboard raised: {at.exception}"
+            # Switch to the per-player profile view (percentile fingerprint).
+            at.segmented_control[0].set_value("Player profile").run()
+            assert not at.exception, f"Players profile raised: {at.exception}"
 
             # Shot Map page needs shots; seed and visit.
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")

@@ -36,8 +36,9 @@ Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb eve
 analytics (real xG, shot data), and an MCP server that makes it all queryable in natural
 language. The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
 forecasts**, league Analytics, a full **Forecast** market slate (1X2, over/under, BTTS,
-correct score, …), a **Shot Map**, and a **Player** leaderboard (xG, npxG, finishing).
-**312 passing tests.**
+correct score, …), a **Shot Map**, and a **Players** view — a full-event leaderboard
+(passing, carrying, defending) and per-player **percentile scouting fingerprints**.
+**325 passing tests.**
 
 The forecasting is evaluated honestly rather than assumed good. On real 2025/26 Premier
 League data the walk-forward backtest shows the ratio-method Poisson beats a base-rate
@@ -85,9 +86,9 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
 | `soccer simulate` | Monte Carlo league simulation — title, top-N, relegation odds |
 | `soccer backtest` | Walk-forward forecast evaluation — log loss, Brier, calibration |
-| `soccer ingest-events` | Ingest StatsBomb open-data shots (xG) — proprietary EULA, opt-in |
+| `soccer ingest-events` | Ingest StatsBomb open-data events — shots (xG) and full per-player stats. `--from-raw` re-parses snapshots offline. Proprietary EULA, opt-in |
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
-| `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G−xG) |
+| `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, housekeeping) |
 | `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |
@@ -140,7 +141,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 312 tests
+pytest            # 325 tests
 ruff check .      # lint
 ruff format .     # format
 ```
