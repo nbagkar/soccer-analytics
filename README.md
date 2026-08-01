@@ -31,10 +31,11 @@ delayed rather than breaking when it disappears. Full detail, with quoted terms,
 Working end-to-end today: source adapters → immutable raw snapshots → canonical
 entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
-league tables, and a read-only Streamlit dashboard. **218 passing tests.**
+league tables, Elo power rankings and Poisson/Dixon-Coles match forecasting, and a
+read-only Streamlit dashboard. **232 passing tests.**
 
-Not yet built: forecasting models (Elo, Dixon-Coles), StatsBomb/Wyscout event analytics
-(xG, shot maps), MCP interface.
+Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), league simulations,
+MCP interface.
 
 ## Quickstart
 
@@ -66,6 +67,8 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer live` | Ad-hoc live scores straight from TheSportsDB |
 | `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB |
 | `soccer table` | League table computed from historical results |
+| `soccer power-rankings` | Elo power rankings from historical results |
+| `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |

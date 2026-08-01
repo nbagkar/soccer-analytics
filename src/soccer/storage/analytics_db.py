@@ -13,6 +13,7 @@ normalized-name join, not a second identity system.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -61,6 +62,19 @@ class TableRow:
     goals_against: int
     goal_difference: int
     points: int
+
+
+@dataclass(frozen=True)
+class ResultRow:
+    """The slim result shape the models consume (satisfies their Outcome protocols)."""
+
+    match_date: date
+    home: str
+    away: str
+    home_norm: str
+    away_norm: str
+    fthg: int
+    ftag: int
 
 
 class AnalyticsDB:
@@ -169,3 +183,12 @@ class AnalyticsDB:
             "SELECT season, division, COUNT(*) FROM results "
             "GROUP BY season, division ORDER BY season DESC, division"
         ).fetchall()
+
+    def outcomes_for(self, season: str, division: str) -> list[ResultRow]:
+        """Results for one (season, division) in date order, for the models to fit on."""
+        rows = self._con.execute(
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag "
+            "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
+            [season, division],
+        ).fetchall()
+        return [ResultRow(*r) for r in rows]

@@ -585,5 +585,113 @@ def table(
     console.print(tbl)
 
 
+@app.command("power-rankings")
+def power_rankings(
+    season: str = typer.Option("2526", help="Season, e.g. 2526."),
+    division: str = typer.Option("E0", help="Division, e.g. E0."),
+    top: int = typer.Option(0, help="Show only the top N (0 = all)."),
+) -> None:
+    """Elo power rankings computed from historical results."""
+    from soccer.models.elo import power_ranking
+
+    outcomes = _load_outcomes(season, division)
+    ranking = power_ranking(outcomes)
+    names = _display_names(outcomes)
+    if top > 0:
+        ranking = ranking[:top]
+
+    tbl = Table(title=f"Elo power rankings — {division} {season}", header_style="bold")
+    tbl.add_column("#", justify="right")
+    tbl.add_column("Team")
+    tbl.add_column("Elo", justify="right")
+    tbl.add_column("P", justify="right")
+    for r in ranking:
+        style = "bold green" if r.position == 1 else ""
+        tbl.add_row(
+            str(r.position),
+            names.get(r.team, r.team),
+            Text(f"{r.rating:.0f}", style=style),
+            str(r.played),
+        )
+    console.print(tbl)
+
+
+@app.command()
+def forecast(
+    home: str = typer.Argument(..., help="Home team, e.g. Arsenal."),
+    away: str = typer.Argument(..., help="Away team, e.g. Chelsea."),
+    season: str = typer.Option("2526", help="Season to fit the model on."),
+    division: str = typer.Option("E0", help="Division to fit the model on."),
+) -> None:
+    """Forecast a match: outcome probabilities, expected goals, and likely scorelines."""
+    from soccer.domain.names import normalize_name
+    from soccer.models.elo import EloConfig, compute_ratings, expected_score
+    from soccer.models.poisson import fit_poisson
+
+    outcomes = _load_outcomes(season, division)
+    names = _display_names(outcomes)
+    model = fit_poisson(outcomes)
+
+    home_norm, away_norm = normalize_name(home), normalize_name(away)
+    missing = [
+        original
+        for original, norm in ((home, home_norm), (away, away_norm))
+        if norm not in model.strengths
+    ]
+    if missing:
+        console.print(f"[red]Unknown team(s):[/red] {', '.join(missing)}")
+        console.print(f"[dim]Available: {', '.join(sorted(names.values()))}[/dim]")
+        raise typer.Exit(code=1)
+
+    fc = model.forecast(home_norm, away_norm)
+    ratings = compute_ratings(outcomes)
+    elo_home = expected_score(ratings[home_norm], ratings[away_norm], EloConfig())
+    hn, an = names[home_norm], names[away_norm]
+
+    console.print(f"\n[bold]{hn}[/bold] vs [bold]{an}[/bold]  [dim]({division} {season})[/dim]\n")
+    console.print(
+        f"  Expected goals   {hn} [bold]{fc.home_expected:.2f}[/bold]  -  "
+        f"[bold]{fc.away_expected:.2f}[/bold] {an}"
+    )
+    console.print(
+        f"  Outcome          {hn} [green]{fc.prob_home:.0%}[/green]   "
+        f"Draw [yellow]{fc.prob_draw:.0%}[/yellow]   "
+        f"{an} [cyan]{fc.prob_away:.0%}[/cyan]"
+    )
+    scores = "   ".join(f"{x}-{y} ({p:.0%})" for x, y, p in fc.top_scores)
+    console.print(f"  Likely scores    {scores}")
+    console.print(
+        f"  Elo              {hn} {ratings[home_norm]:.0f}  vs  {ratings[away_norm]:.0f} {an}"
+        f"   [dim](home expected {elo_home:.2f})[/dim]\n"
+    )
+
+
+def _load_outcomes(season: str, division: str) -> list:
+    """Shared loader for the forecasting commands."""
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print(
+            "[yellow]No analytics data yet.[/yellow] Run [bold]soccer ingest-history[/bold] first."
+        )
+        raise typer.Exit(code=1)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        outcomes = adb.outcomes_for(season, division)
+    if not outcomes:
+        console.print(
+            f"[dim]No results for {season}/{division}.[/dim] Ingest with "
+            f"[bold]soccer ingest-history --seasons {season} --divisions {division}[/bold]."
+        )
+        raise typer.Exit(code=1)
+    return outcomes
+
+
+def _display_names(outcomes: list) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for o in outcomes:
+        names[o.home_norm] = o.home
+        names[o.away_norm] = o.away
+    return names
+
+
 if __name__ == "__main__":
     app()
