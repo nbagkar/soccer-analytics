@@ -28,11 +28,13 @@ delayed rather than breaking when it disappears. Full detail, with quoted terms,
 
 ## Status
 
-Working end-to-end today (`soccer ingest` → `soccer matches`): source adapters →
-immutable raw snapshots → canonical entity/match resolution with a source crosswalk →
-SQLite live state → curated aliases → replay-from-raw. **189 passing tests.**
+Working end-to-end today: source adapters → immutable raw snapshots → canonical
+entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
+replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
+league tables, and a read-only Streamlit dashboard. **218 passing tests.**
 
-Not yet built: dashboard, forecasting models, DuckDB event analytics, MCP interface.
+Not yet built: forecasting models (Elo, Dixon-Coles), StatsBomb/Wyscout event analytics
+(xG, shot maps), MCP interface.
 
 ## Quickstart
 
@@ -62,6 +64,9 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer ingest` | Fetch enabled sources → resolve → persist canonical match state |
 | `soccer matches` | Show ingested match state (add `--in-play`) |
 | `soccer live` | Ad-hoc live scores straight from TheSportsDB |
+| `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB |
+| `soccer table` | League table computed from historical results |
+| `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |
 | `soccer aliases` | List curated aliases |

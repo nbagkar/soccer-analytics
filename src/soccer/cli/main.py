@@ -19,6 +19,7 @@ from soccer.config import get_settings
 from soccer.domain.aliases import AliasStore, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore
 from soccer.ingest.pipeline import IngestPipeline
+from soccer.sources.football_data_co_uk import FootballDataCoUk
 from soccer.sources.football_data_org import FootballDataOrg
 from soccer.sources.registry import SOURCES, Capability, SourceId, Trust, attributions, sources_for
 from soccer.sources.thesportsdb import (
@@ -27,6 +28,7 @@ from soccer.sources.thesportsdb import (
     SourceUnavailableError,
     TheSportsDB,
 )
+from soccer.storage.analytics_db import AnalyticsDB
 from soccer.storage.live_db import LiveDB
 from soccer.storage.raw import RawStore
 
@@ -501,6 +503,86 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
         [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(port)],
         check=False,
     )
+
+
+@app.command("ingest-history")
+def ingest_history(
+    seasons: str = typer.Option("2526", help="Comma-separated seasons, e.g. 2526,2425."),
+    divisions: str = typer.Option("E0", help="Comma-separated divisions, e.g. E0,E1,SP1."),
+) -> None:
+    """Download historical results from football-data.co.uk into the analytics store.
+
+    A batch source: static season CSVs, no rate limit. Missing (season, division)
+    combinations are skipped, not errors.
+    """
+    settings = get_settings()
+    settings.ensure_dirs()
+    season_list = [s.strip() for s in seasons.split(",") if s.strip()]
+    division_list = [d.strip() for d in divisions.split(",") if d.strip()]
+
+    raw = RawStore(settings.raw_dir)
+    total = 0
+    with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
+        for season in season_list:
+            for division in division_list:
+                results = source.fetch_division(season, division)
+                if not results:
+                    console.print(f"  [dim]{season}/{division}: not available[/dim]")
+                    continue
+                adb.load_results(results)
+                total += len(results)
+                console.print(f"  {season}/{division}: {len(results)} results")
+
+    console.print(
+        f"\n[green]Loaded {total} results.[/green] View a table with [bold]soccer table[/bold]."
+    )
+
+
+@app.command()
+def table(
+    season: str = typer.Option("2526", help="Season, e.g. 2526 for 2025/26."),
+    division: str = typer.Option("E0", help="Division, e.g. E0 for the Premier League."),
+) -> None:
+    """Show a league table computed from ingested historical results."""
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print(
+            "[yellow]No analytics data yet.[/yellow] Run [bold]soccer ingest-history[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+    with AnalyticsDB(settings.analytics_db) as adb:
+        rows = adb.league_table(season, division)
+
+    if not rows:
+        console.print(
+            f"[dim]No results for {season}/{division}.[/dim] "
+            f"Ingest it with [bold]soccer ingest-history --seasons {season} "
+            f"--divisions {division}[/bold]."
+        )
+        return
+
+    tbl = Table(title=f"{division} {season}", header_style="bold", title_justify="left")
+    tbl.add_column("#", justify="right")
+    tbl.add_column("Team")
+    for col in ("P", "W", "D", "L", "GF", "GA", "GD", "Pts"):
+        tbl.add_column(col, justify="right")
+
+    for r in rows:
+        style = "bold green" if r.position == 1 else ""
+        tbl.add_row(
+            str(r.position),
+            r.team,
+            str(r.played),
+            str(r.won),
+            str(r.drawn),
+            str(r.lost),
+            str(r.goals_for),
+            str(r.goals_against),
+            f"{r.goal_difference:+d}",
+            Text(str(r.points), style=style),
+        )
+    console.print(tbl)
 
 
 if __name__ == "__main__":
