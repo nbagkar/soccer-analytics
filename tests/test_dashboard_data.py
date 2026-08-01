@@ -315,6 +315,63 @@ class TestForecastData:
         assert forecast_slate(path, "2526", "E0", "Arsenal", "Nobody") is None
 
 
+class TestFixtureForecasts:
+    def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:
+        add_match(
+            db, match_id="1", home="A", away="B", competition="EPL", status=MatchStatus.FINISHED
+        )
+        add_match(
+            db, match_id="2", home="C", away="D", competition="EPL", status=MatchStatus.NOT_STARTED
+        )
+        ups = MatchStateStore(db).upcoming()
+        assert [v.status for v in ups] == [MatchStatus.NOT_STARTED]
+        assert ups[0].home == "C"
+
+    def test_forecastable_fixture_gets_a_slate(self, tmp_path) -> None:
+        from soccer.dashboard.data import fixture_forecasts
+
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as build:
+            add_match(
+                build,
+                match_id="1",
+                home="Arsenal",
+                away="Brentford",
+                competition="Premier League",  # -> E0, the seeded division
+                status=MatchStatus.NOT_STARTED,
+            )
+        analytics = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+
+        fixtures = fixture_forecasts(live, analytics)
+        assert len(fixtures) == 1
+        f = fixtures[0]
+        assert (f.home, f.away) == ("Arsenal", "Brentford")
+        assert f.slate is not None  # both teams in the E0 model
+        result = {m.name: m.probability for m in f.slate.result}
+        assert result["Arsenal"] > result["Brentford"]  # strong over weak
+
+    def test_uncovered_competition_listed_without_forecast(self, tmp_path) -> None:
+        from soccer.dashboard.data import fixture_forecasts
+
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as build:
+            add_match(
+                build,
+                match_id="1",
+                home="Someone",
+                away="Nobody",
+                competition="Kazakhstan Cup",  # maps to no division
+                status=MatchStatus.NOT_STARTED,
+            )
+        analytics = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+
+        fixtures = fixture_forecasts(live, analytics)
+        assert len(fixtures) == 1
+        assert fixtures[0].slate is None  # honest: no model, no forecast
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -363,6 +420,10 @@ class TestAppSmoke:
 
             at.radio[0].set_value("Data Health").run()
             assert not at.exception, f"Data Health raised: {at.exception}"
+
+            # Fixtures page reads upcoming matches (none forecastable here) — must not raise.
+            at.radio[0].set_value("Fixtures").run()
+            assert not at.exception, f"Fixtures raised: {at.exception}"
 
             # Analytics page needs an analytics DB; seed one and visit it.
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")

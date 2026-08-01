@@ -33,8 +33,11 @@ entity/match resolution with a source crosswalk → SQLite live state → curate
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
 league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match forecasting,
 Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb event
-analytics (real xG, shot data), a read-only Streamlit dashboard, and an MCP server that
-makes it all queryable in natural language. **282 passing tests.**
+analytics (real xG, shot data), and an MCP server that makes it all queryable in natural
+language. The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
+forecasts**, league Analytics, a full **Forecast** market slate (1X2, over/under, BTTS,
+correct score, …), a **Shot Map**, and a **Player** leaderboard (xG, npxG, finishing).
+**312 passing tests.**
 
 The forecasting is evaluated honestly rather than assumed good. On real 2025/26 Premier
 League data the walk-forward backtest shows the ratio-method Poisson beats a base-rate
@@ -137,7 +140,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 189 tests
+pytest            # 312 tests
 ruff check .      # lint
 ruff format .     # format
 ```

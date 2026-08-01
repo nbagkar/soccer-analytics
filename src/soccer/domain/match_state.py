@@ -192,6 +192,16 @@ class MatchStateStore:
             views = [v for v in views if v.status.is_in_play]
         return views[:limit]
 
+    def upcoming(self, *, limit: int = 100) -> list[MatchView]:
+        """Not-yet-started matches, soonest kickoff first -- the fixture list.
+
+        A dedicated query rather than filtering `list_current`, whose kickoff-ordered
+        limit pushes future fixtures off the end behind past and live matches.
+        """
+        return [v for v in self.list_current(limit=10_000) if v.status is MatchStatus.NOT_STARTED][
+            :limit
+        ]
+
 
 @dataclass(frozen=True)
 class MatchView:

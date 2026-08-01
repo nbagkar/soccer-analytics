@@ -22,6 +22,7 @@ from soccer.dashboard.data import (
     LiveSnapshot,
     analytics_available,
     analytics_snapshot,
+    fixture_forecasts,
     forecast_slate,
     forecast_teams,
     health_snapshot,
@@ -429,6 +430,74 @@ def _diff_span(diff: float) -> str:
     return f'<span style="color:{colour}">{diff:+.1f}</span>'
 
 
+def _render_fixtures(fixtures) -> None:
+    st.subheader("Fixtures & forecasts")
+    forecastable = [f for f in fixtures if f.slate is not None]
+    uncovered = [f for f in fixtures if f.slate is None]
+    st.caption(
+        f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast from last "
+        "season's Dixon-Coles model. Predictions are a preseason projection, directional."
+    )
+    if not forecastable:
+        st.info(
+            "No forecastable fixtures yet. Run `soccer ingest` for fixtures and "
+            "`soccer ingest-history` to fit the league models."
+        )
+        return
+
+    hdr = ["Date (UTC)", "Competition", "Match", "Pred", "1", "X", "2", "O2.5", "BTTS", "Favourite"]
+    body = ""
+    for f in forecastable:
+        s = f.slate
+        x, y, _ = s.most_likely_score
+        home_p, draw_p, away_p = (m.probability for m in s.result)
+        over25 = next(o for o in s.over_under if o.line == 2.5).over
+        btts_yes = next(m.probability for m in s.btts if m.name == "Yes")
+        fav = f.home if home_p >= away_p else f.away
+        cells = [
+            f.kickoff_utc.strftime("%m-%d %H:%M"),
+            f'<span style="color:#8b8b8b">{f.competition}</span>',
+            f"{f.home} v {f.away}",
+            f"<b>{x}-{y}</b>",
+            _pct_cell(home_p, home_p >= max(draw_p, away_p)),
+            _pct_cell(draw_p, draw_p >= max(home_p, away_p)),
+            _pct_cell(away_p, away_p >= max(home_p, draw_p)),
+            f"{over25:.0%}",
+            f"{btts_yes:.0%}",
+            f'<span style="color:#16a34a">{fav}</span>',
+        ]
+        tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
+        body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
+    head = "".join(f'<th style="text-align:left;padding:4px 12px 4px 0">{h}</th>' for h in hdr)
+    table_style = "width:100%;border-collapse:collapse;font-size:0.86rem"
+    st.markdown(
+        f'<table style="{table_style}">{head}{body}</table>',
+        unsafe_allow_html=True,
+    )
+    st.caption("1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score.")
+
+    if uncovered:
+        with st.expander(f"{len(uncovered)} upcoming fixtures without a forecast"):
+            st.caption(
+                "No loaded model covers these -- a promoted team absent from last season, "
+                "or a competition without loaded history. Listed honestly, not hidden."
+            )
+            st.markdown(
+                "".join(
+                    f'<div style="font-size:0.85rem;padding:1px 0">'
+                    f'<span style="color:#8b8b8b">{f.kickoff_utc.strftime("%m-%d")} · '
+                    f"{f.competition}</span> &nbsp; {f.home} v {f.away}</div>"
+                    for f in uncovered
+                ),
+                unsafe_allow_html=True,
+            )
+
+
+def _pct_cell(p: float, is_max: bool) -> str:
+    """Outcome probability, bolded when it is the likeliest of the three."""
+    return f"<b>{p:.0%}</b>" if is_max else f"{p:.0%}"
+
+
 def main() -> None:
     st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
     st.title("⚽ Soccer Analytics")
@@ -438,10 +507,22 @@ def main() -> None:
         st.header("View")
         page = st.radio(
             "Page",
-            ["Live Centre", "Analytics", "Forecast", "Shot Map", "Players", "Data Health"],
+            [
+                "Live Centre",
+                "Fixtures",
+                "Analytics",
+                "Forecast",
+                "Shot Map",
+                "Players",
+                "Data Health",
+            ],
             label_visibility="collapsed",
         )
         st.button("↻ Refresh")
+
+    if page == "Fixtures":
+        _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
+        return
 
     if page == "Players":
         with st.sidebar:
