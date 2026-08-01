@@ -666,6 +666,83 @@ def forecast(
     )
 
 
+@app.command()
+def simulate(
+    season: str = typer.Option("2526", help="Season to simulate."),
+    division: str = typer.Option("E0", help="Division to simulate."),
+    after: str | None = typer.Option(
+        None,
+        help="Only simulate matches on/after this date (YYYY-MM-DD); earlier matches "
+        "set the current table. Omit to replay the whole season.",
+    ),
+    sims: int = typer.Option(10000, help="Number of Monte Carlo runs."),
+    top: int = typer.Option(4, help="Size of the 'top' bucket (e.g. 4 for top four)."),
+    seed: int | None = typer.Option(None, help="Seed for reproducible runs."),
+) -> None:
+    """Monte Carlo league simulation: title, top-N and relegation probabilities."""
+    from datetime import date as _date
+
+    from soccer.models.poisson import fit_poisson
+    from soccer.models.simulation import simulate_season
+
+    outcomes = _load_outcomes(season, division)
+    names = _display_names(outcomes)
+
+    cutoff = _date.fromisoformat(after) if after else None
+    played = [o for o in outcomes if cutoff and o.match_date < cutoff]
+    remaining_matches = [o for o in outcomes if not cutoff or o.match_date >= cutoff]
+
+    # Fit on what has been played; before any cutoff, use the whole season's strengths.
+    model = fit_poisson(played or outcomes)
+    points_start, gd_start = _standings_from(played)
+    remaining = [(o.home_norm, o.away_norm) for o in remaining_matches]
+
+    result = simulate_season(
+        model,
+        remaining,
+        points_start=points_start,
+        goal_diff_start=gd_start,
+        teams=list(names),
+        n_sims=sims,
+        top_n=top,
+        seed=seed,
+    )
+
+    scope = f"rest of season from {after}" if cutoff else "full-season replay"
+    tbl = Table(
+        title=f"Simulation - {division} {season} ({scope}, {sims:,} runs)",
+        header_style="bold",
+    )
+    tbl.add_column("Team")
+    tbl.add_column("Title", justify="right")
+    tbl.add_column(f"Top {top}", justify="right")
+    tbl.add_column("Releg", justify="right")
+    tbl.add_column("xPts", justify="right")
+    for p in result.projections:
+        title_style = "bold green" if p.title_pct >= 0.5 else ""
+        tbl.add_row(
+            names.get(p.team, p.team),
+            Text(f"{p.title_pct:.0%}", style=title_style),
+            f"{p.top_pct:.0%}",
+            f"{p.relegation_pct:.0%}" if p.relegation_pct >= 0.005 else "-",
+            f"{p.expected_points:.0f}",
+        )
+    console.print(tbl)
+
+
+def _standings_from(played: list) -> tuple[dict[str, int], dict[str, int]]:
+    points: dict[str, int] = {}
+    goal_diff: dict[str, int] = {}
+    for o in played:
+        hp = 3 if o.fthg > o.ftag else 1 if o.fthg == o.ftag else 0
+        ap = 3 if o.ftag > o.fthg else 1 if o.fthg == o.ftag else 0
+        points[o.home_norm] = points.get(o.home_norm, 0) + hp
+        points[o.away_norm] = points.get(o.away_norm, 0) + ap
+        goal_diff[o.home_norm] = goal_diff.get(o.home_norm, 0) + (o.fthg - o.ftag)
+        goal_diff[o.away_norm] = goal_diff.get(o.away_norm, 0) + (o.ftag - o.fthg)
+    return points, goal_diff
+
+
 def _load_outcomes(season: str, division: str) -> list:
     """Shared loader for the forecasting commands."""
     settings = get_settings()
