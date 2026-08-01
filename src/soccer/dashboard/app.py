@@ -17,8 +17,11 @@ import streamlit as st
 
 from soccer.config import get_settings
 from soccer.dashboard.data import (
+    AnalyticsSnapshot,
     HealthSnapshot,
     LiveSnapshot,
+    analytics_available,
+    analytics_snapshot,
     health_snapshot,
     live_snapshot,
 )
@@ -193,19 +196,95 @@ def _html_table(rows: list[dict]) -> str:
     )
 
 
+@st.cache_data(show_spinner="Simulating season…")
+def _cached_analytics(db_path: str, season: str, division: str) -> AnalyticsSnapshot | None:
+    # Cached on plain args so switching pages does not re-run the Monte Carlo each time.
+    from pathlib import Path
+
+    return analytics_snapshot(Path(db_path), season, division)
+
+
+def _render_analytics(snap: AnalyticsSnapshot) -> None:
+    st.subheader(f"Analytics — {snap.division} {snap.season}")
+
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown("**League table**")
+        rows = [
+            {
+                "#": r.position,
+                "Team": r.team,
+                "P": r.played,
+                "GD": f"{r.goal_difference:+d}",
+                "Pts": f"<b>{r.points}</b>",
+            }
+            for r in snap.table
+        ]
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
+
+    with right:
+        st.markdown("**Title odds** (Monte Carlo, full-season replay)")
+        contenders = [p for p in snap.title_odds if p.title_pct >= 0.005][:8]
+        if contenders:
+            _render_title_odds(contenders, snap.names)
+        else:
+            st.caption("No clear favourites — an open race.")
+
+        st.markdown("**Elo power ranking**")
+        elo_rows = [
+            {"#": r.position, "Team": snap.names.get(r.team, r.team), "Elo": f"{r.rating:.0f}"}
+            for r in snap.power[:8]
+        ]
+        st.markdown(_html_table(elo_rows), unsafe_allow_html=True)
+
+
+def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
+    frame = pl.DataFrame(
+        {
+            "team": [names.get(p.team, p.team) for p in contenders],
+            "pct": [round(p.title_pct * 100, 1) for p in contenders],
+        }
+    )
+    base = alt.Chart(frame.to_pandas()).encode(
+        x=alt.X("pct:Q", axis=alt.Axis(title="title %", grid=False)),
+        y=alt.Y("team:N", sort="-x", axis=alt.Axis(title=None)),
+    )
+    bars = base.mark_bar(color="#16a34a", cornerRadiusEnd=4, size=16)
+    labels = base.mark_text(align="left", dx=4, color="#8b8b8b").encode(text="pct:Q")
+    st.altair_chart((bars + labels).properties(height=max(120, 26 * len(contenders))))
+
+
 def main() -> None:
     st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
     st.title("⚽ Soccer Analytics")
 
     settings = get_settings()
-    if not settings.live_db.exists():
-        st.info("No database yet. Run `soccer ingest` to populate it, then reload.")
-        return
-
     with st.sidebar:
         st.header("View")
-        page = st.radio("Page", ["Live Centre", "Data Health"], label_visibility="collapsed")
-        st.button("↻ Refresh")  # any interaction reruns and re-reads the DB
+        page = st.radio(
+            "Page", ["Live Centre", "Analytics", "Data Health"], label_visibility="collapsed"
+        )
+        st.button("↻ Refresh")
+
+    if page == "Analytics":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            return
+        with st.sidebar:
+            labels = {f"{s} / {d}  ({n})": (s, d) for s, d, n in available}
+            picked = st.selectbox("Season / division", list(labels))
+        season, division = labels[picked]
+        snap = _cached_analytics(str(settings.analytics_db), season, division)
+        if snap is None:
+            st.info("No results for that selection.")
+        else:
+            _render_analytics(snap)
+        return
+
+    if not settings.live_db.exists():
+        st.info("No live database yet. Run `soccer ingest` to populate it, then reload.")
+        return
 
     with LiveDB(settings.live_db) as db:
         if page == "Live Centre":

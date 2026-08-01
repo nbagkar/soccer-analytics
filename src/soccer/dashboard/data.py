@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore, MatchView
+from soccer.models.elo import EloRating, power_ranking
+from soccer.models.poisson import fit_poisson
+from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
+from soccer.storage.analytics_db import AnalyticsDB, TableRow
 from soccer.storage.live_db import LiveDB
 
 
@@ -169,4 +174,58 @@ def health_snapshot(settings: Settings, db: LiveDB) -> HealthSnapshot:
         aliases=alias_store.all(),
         duplicate_suggestions=suggest_duplicates(db, "team"),
         attributions=attributions(),
+    )
+
+
+@dataclass(frozen=True)
+class AnalyticsSnapshot:
+    season: str
+    division: str
+    available: list[tuple[str, str, int]]
+    """(season, division, match count) pairs loaded, for the selector."""
+    table: list[TableRow]
+    power: list[EloRating]
+    title_odds: list[TeamProjection]
+    names: dict[str, str]
+
+
+def analytics_available(analytics_db: Path) -> list[tuple[str, str, int]]:
+    """What (season, division) data exists, for the dashboard selector. [] if none."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.seasons_loaded()
+
+
+def analytics_snapshot(
+    analytics_db: Path, season: str, division: str, *, sims: int = 3000, seed: int = 1
+) -> AnalyticsSnapshot | None:
+    """League table, Elo ranking and title odds for one (season, division).
+
+    Opens its own connection so the caller can cache on plain (path, season, division)
+    arguments. Returns None if that slice has no results.
+    """
+    with AnalyticsDB(analytics_db) as adb:
+        available = adb.seasons_loaded()
+        table = adb.league_table(season, division)
+        outcomes = adb.outcomes_for(season, division)
+
+    if not outcomes:
+        return None
+
+    names = {o.home_norm: o.home for o in outcomes} | {o.away_norm: o.away for o in outcomes}
+    power = power_ranking(outcomes)
+    fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
+    projections = simulate_season(
+        fit_poisson(outcomes), fixtures, teams=list(names), n_sims=sims, seed=seed
+    ).projections
+
+    return AnalyticsSnapshot(
+        season=season,
+        division=division,
+        available=available,
+        table=table,
+        power=power,
+        title_odds=projections,
+        names=names,
     )

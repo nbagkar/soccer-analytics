@@ -7,7 +7,7 @@ These run without importing Streamlit.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -172,6 +172,78 @@ class TestHealthSnapshot:
         assert by_cap["expected_goals"].available is False
 
 
+class TestAnalyticsSnapshot:
+    def _seed_results(self, path) -> None:
+        from soccer.domain.names import normalize_name
+        from soccer.sources.football_data_co_uk import MatchResult
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        def r(home, away, hg, ag, day):
+            return MatchResult(
+                season="2526",
+                division="E0",
+                match_date=date(2026, 1, day),
+                home=home,
+                away=away,
+                home_norm=normalize_name(home),
+                away_norm=normalize_name(away),
+                fthg=hg,
+                ftag=ag,
+                ftr="H" if hg > ag else "A" if ag > hg else "D",
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=None,
+                away_shots_target=None,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
+            )
+
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        rows, day = [], 1
+        for i, h in enumerate(teams):
+            for a in teams[i + 1 :]:
+                hg, ag = (3, 0) if h == "Arsenal" else (0, 2) if h == "Brentford" else (1, 1)
+                rows.append(r(h, a, hg, ag, day))
+                rows.append(r(a, h, ag, hg, day + 1))
+                day += 2
+        with AnalyticsDB(path) as adb:
+            adb.load_results(rows)
+
+    def test_snapshot_has_table_ranking_and_odds(self, tmp_path) -> None:
+        from soccer.dashboard.data import analytics_snapshot
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_results(path)
+        snap = analytics_snapshot(path, "2526", "E0", sims=500, seed=1)
+        assert snap is not None
+        assert len(snap.table) == 4
+        assert len(snap.power) == 4
+        assert sum(p.title_pct for p in snap.title_odds) == pytest.approx(1.0, abs=1e-6)
+        assert snap.title_odds[0].team == "arsenal"
+
+    def test_missing_slice_returns_none(self, tmp_path) -> None:
+        from soccer.dashboard.data import analytics_snapshot
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_results(path)
+        assert analytics_snapshot(path, "9999", "ZZ") is None
+
+    def test_available_lists_loaded_slices(self, tmp_path) -> None:
+        from soccer.dashboard.data import analytics_available
+
+        path = tmp_path / "analytics.duckdb"
+        assert analytics_available(path) == []
+        self._seed_results(path)
+        assert ("2526", "E0", 12) in analytics_available(path)
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -220,5 +292,10 @@ class TestAppSmoke:
 
             at.radio[0].set_value("Data Health").run()
             assert not at.exception, f"Data Health raised: {at.exception}"
+
+            # Analytics page needs an analytics DB; seed one and visit it.
+            TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
+            at.radio[0].set_value("Analytics").run()
+            assert not at.exception, f"Analytics raised: {at.exception}"
         finally:
             config._settings = None
