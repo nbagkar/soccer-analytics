@@ -52,6 +52,15 @@ disappointment.
 This realizes the original 12-week plan's full scope. Remaining ideas are optional
 extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 
+On betting value: there is no free source of odds for *upcoming* matches, so rather than
+fake a live edge, `soccer value` measures a real one against history — betting the model's
+positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
+(Pinnacle's close preferred). On 2024/25 Premier League the model beats the base-rate
+baseline but **loses to the closing line on log loss** (≈0.99 vs ≈0.97), and flat-stake
+yields swing either side of zero with the model and warmup — i.e. noise, not edge. The
+dashboard turns the same primitives into a what-if calculator: enter the odds you can
+actually get and see the model's edge, EV, and Kelly stake.
+
 ## Quickstart
 
 Requires **Python 3.12** (capped below 3.13 by the `socceraction` dependency).
@@ -86,6 +95,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
 | `soccer simulate` | Monte Carlo league simulation — title, top-N, relegation odds |
 | `soccer backtest` | Walk-forward forecast evaluation — log loss, Brier, calibration |
+| `soccer value` | Market-edge analysis — does the model beat the closing line? Yield vs Pinnacle odds |
 | `soccer ingest-events` | Ingest StatsBomb open-data events — shots (xG) and full per-player stats. `--from-raw` re-parses snapshots offline. Proprietary EULA, opt-in |
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
@@ -141,7 +151,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 325 tests
+pytest            # 340 tests
 ruff check .      # lint
 ruff format .     # format
 ```

@@ -45,7 +45,10 @@ CREATE TABLE IF NOT EXISTS results (
     away_yellows       INTEGER,
     home_reds          INTEGER,
     away_reds          INTEGER,
-    referee            VARCHAR
+    referee            VARCHAR,
+    close_home_odds    DOUBLE,
+    close_draw_odds    DOUBLE,
+    close_away_odds    DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS shots (
@@ -290,6 +293,30 @@ class ResultRow:
 
 
 @dataclass(frozen=True)
+class OddsRow:
+    """A dated result plus its closing 1X2 odds, for market-edge analysis.
+
+    Satisfies the same DatedOutcome shape the models fit on (match_date, home_norm,
+    away_norm, fthg, ftag), with the closing decimal odds alongside. Odds may be None.
+    """
+
+    match_date: date
+    home: str
+    away: str
+    home_norm: str
+    away_norm: str
+    fthg: int
+    ftag: int
+    close_home_odds: float | None
+    close_draw_odds: float | None
+    close_away_odds: float | None
+
+    @property
+    def has_odds(self) -> bool:
+        return None not in (self.close_home_odds, self.close_draw_odds, self.close_away_odds)
+
+
+@dataclass(frozen=True)
 class MatchMeta:
     """StatsBomb match identity: what competition/season a match_id belongs to."""
 
@@ -315,6 +342,12 @@ class AnalyticsDB:
         self._con = duckdb.connect(str(self.path))
         self._con.execute("SET enable_progress_bar = false")  # keep CLI output clean
         self._con.execute(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Idempotent column additions for databases created before a column existed."""
+        for column in ("close_home_odds", "close_draw_odds", "close_away_odds"):
+            self._con.execute(f"ALTER TABLE results ADD COLUMN IF NOT EXISTS {column} DOUBLE")
 
     def close(self) -> None:
         self._con.close()
@@ -434,6 +467,30 @@ class AnalyticsDB:
             [season, division],
         ).fetchall()
         return [ResultRow(*r) for r in rows]
+
+    def outcomes_with_odds(self, season: str, division: str) -> list[OddsRow]:
+        """Results for one (season, division) carrying closing 1X2 odds, date order.
+
+        For the market-edge analysis. Rows without a full odds triple keep None there;
+        the value backtest skips them, so pre-odds seasons degrade rather than break.
+        """
+        rows = self._con.execute(
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
+            "       close_home_odds, close_draw_odds, close_away_odds "
+            "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
+            [season, division],
+        ).fetchall()
+        return [OddsRow(*r) for r in rows]
+
+    def odds_coverage(self, season: str, division: str) -> tuple[int, int]:
+        """(matches with a full closing-odds triple, total matches) for a slice."""
+        row = self._con.execute(
+            "SELECT COUNT(*) FILTER (WHERE close_home_odds IS NOT NULL "
+            "  AND close_draw_odds IS NOT NULL AND close_away_odds IS NOT NULL), COUNT(*) "
+            "FROM results WHERE season=? AND division=?",
+            [season, division],
+        ).fetchone()
+        return (row[0], row[1]) if row else (0, 0)
 
     # --- StatsBomb shots / xG -------------------------------------------------
 

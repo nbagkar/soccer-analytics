@@ -294,6 +294,25 @@ def forecast_slate(
     return compute_markets(names.get(hn, home), names.get(an, away), lam, mu, model.rho)
 
 
+def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
+    """Closing-line-value backtest for a slice, or None if no odds are loaded.
+
+    Uses the fast ratio-method (poisson) model by default so it can run interactively;
+    the CLI `soccer value` offers the slower Dixon-Coles fit. Returns a ValueReport.
+    """
+    with AnalyticsDB(analytics_db) as adb:
+        covered, _ = adb.odds_coverage(season, division)
+        if covered == 0:
+            return None
+        rows = adb.outcomes_with_odds(season, division)
+    from soccer.models.value import value_backtest
+
+    try:
+        return value_backtest(rows, model=model, min_history=60)
+    except ValueError:
+        return None
+
+
 def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
     """Player leaderboard (list[PlayerRow]) from ingested shots. [] if none."""
     if not Path(analytics_db).exists():

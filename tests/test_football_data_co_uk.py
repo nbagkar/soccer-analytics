@@ -108,6 +108,35 @@ class TestNewLeagueParser:
         assert {r.season for r in rows2} == {"2025"}
 
 
+class TestClosingOdds:
+    def test_prefers_pinnacle_closing(self) -> None:
+        # Both Pinnacle closing (PSC*) and Bet365 (B365*) present -> PSC wins.
+        csv = (
+            "Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,B365H,B365D,B365A,PSCH,PSCD,PSCA\n"
+            "01/01/2026,A,B,2,1,H,2.0,3.0,4.0,1.85,3.6,4.5\n"
+        )
+        r = parse_results_csv(csv, season="2526", division="E0")[0]
+        assert (r.close_home_odds, r.close_draw_odds, r.close_away_odds) == (1.85, 3.6, 4.5)
+
+    def test_falls_back_to_bet365_when_no_closing(self) -> None:
+        csv = (
+            "Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,B365H,B365D,B365A\n"
+            "01/01/2026,A,B,2,1,H,2.0,3.0,4.0\n"
+        )
+        r = parse_results_csv(csv, season="2526", division="E0")[0]
+        assert (r.close_home_odds, r.close_draw_odds, r.close_away_odds) == (2.0, 3.0, 4.0)
+
+    def test_missing_odds_are_none(self) -> None:
+        csv = "Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n01/01/2026,A,B,2,1,H\n"
+        r = parse_results_csv(csv, season="2526", division="E0")[0]
+        assert r.close_home_odds is None
+
+    def test_new_league_odds_parsed(self) -> None:
+        # The BRA schema carries PSCH/PSCD/PSCA closing odds too.
+        rows = parse_new_league_csv(NEW_CSV, division="BRA")
+        assert rows[0].close_home_odds == 1.75  # from the sample row's PSCH
+
+
 class TestAdapter:
     @pytest.fixture
     def raw(self, tmp_path: Path) -> RawStore:

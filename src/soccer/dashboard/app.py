@@ -28,6 +28,7 @@ from soccer.dashboard.data import (
     has_player_events,
     health_snapshot,
     live_snapshot,
+    market_edge,
     player_board,
     player_competitions,
     player_percentiles,
@@ -216,6 +217,14 @@ def _cached_analytics(db_path: str, season: str, division: str) -> AnalyticsSnap
     return analytics_snapshot(Path(db_path), season, division)
 
 
+@st.cache_data(show_spinner="Testing the model against the closing line…")
+def _cached_market_edge(db_path: str, season: str, division: str):
+    # The walk-forward value backtest is heavy; cache it per (path, season, division).
+    from pathlib import Path
+
+    return market_edge(Path(db_path), season, division)
+
+
 def _render_analytics(snap: AnalyticsSnapshot) -> None:
     st.subheader(f"Analytics — {snap.division} {snap.season}")
 
@@ -375,6 +384,71 @@ def _render_forecast(slate) -> None:
             unsafe_allow_html=True,
         )
     st.caption("Fair prices (no margin) from a Dixon-Coles model. Directional, not advice.")
+
+
+def _render_ev_calculator(slate) -> None:
+    """Model probabilities vs the odds a bookmaker is actually offering -> edge, EV, Kelly."""
+    from soccer.models.value import expected_value, implied_probabilities, kelly_fraction, overround
+
+    st.markdown("**Value calculator** — enter the odds you can get")
+    st.caption(
+        "There is no free feed of odds for upcoming matches, so bring your bookmaker's "
+        "decimal odds. Edge compares the model to the vig-free market; treat it sceptically."
+    )
+    result = {m.name: m.probability for m in slate.result}
+    names = [m.name for m in slate.result]  # [home, draw, away]
+    defaults = [round(1 / result[n], 2) if result[n] else 2.0 for n in names]
+
+    cols = st.columns(3)
+    odds = [
+        cols[i].number_input(f"{n} odds", min_value=1.01, value=float(defaults[i]), step=0.05)
+        for i, n in enumerate(names)
+    ]
+    market = implied_probabilities(*odds)
+
+    body = ""
+    for i, name in enumerate(names):
+        model_p = result[name]
+        ev = expected_value(model_p, odds[i])
+        kelly = kelly_fraction(model_p, odds[i])
+        colour = "#16a34a" if ev > 0 else "#8b8b8b"
+        cells = [
+            name,
+            f"{model_p:.0%}",
+            f"{market[i]:.0%}",
+            f'<span style="color:{colour}">{ev * 100:+.1f}%</span>',
+            f'<span style="color:{colour}">{kelly * 100:.1f}%</span>' if kelly > 0 else "—",
+        ]
+        tds = "".join(f'<td style="padding:3px 14px 3px 0">{c}</td>' for c in cells)
+        body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
+    head = "".join(
+        f'<th style="text-align:left;padding:4px 14px 4px 0">{h}</th>'
+        for h in ["Outcome", "Model", "Market", "Edge (EV)", "Kelly"]
+    )
+    st.markdown(
+        f'<table style="font-size:0.88rem;border-collapse:collapse">{head}{body}</table>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Bookmaker margin (overround): {overround(*odds) * 100:.1f}%. "
+        "Edge = model probability * odds - 1. Kelly = fraction of bankroll at that edge."
+    )
+
+
+def _render_market_edge(report) -> None:
+    """Honest 'does the model beat the closing line' summary for the league."""
+    beats = report.beats_market
+    verdict = "beats" if beats else "does not beat"
+    colour = "#16a34a" if beats else "#dc2626"
+    yld_colour = "#16a34a" if report.yield_pct > 0 else "#dc2626"
+    st.markdown(
+        f"<b>Model vs market</b> (closing line, {report.n_matches} past matches) — "
+        f'the model <span style="color:{colour}">{verdict}</span> the market on log loss '
+        f"({report.model_log_loss:.3f} vs {report.market_log_loss:.3f}); flat-staking its "
+        f'positive-edge picks yielded <span style="color:{yld_colour}">'
+        f"{report.yield_pct:+.1f}%</span> over {report.n_bets} bets.",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_players(rows) -> None:
@@ -764,6 +838,12 @@ def main() -> None:
                 st.info("Could not forecast that matchup.")
             else:
                 _render_forecast(slate)
+                st.divider()
+                _render_ev_calculator(slate)
+                report = _cached_market_edge(str(settings.analytics_db), season, division)
+                if report is not None:
+                    st.divider()
+                    _render_market_edge(report)
         return
 
     if page == "Analytics":

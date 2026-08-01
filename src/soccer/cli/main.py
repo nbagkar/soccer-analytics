@@ -781,6 +781,82 @@ def backtest(
 
 
 @app.command()
+def value(
+    season: str = typer.Option("2425", help="Season to evaluate."),
+    division: str = typer.Option("E0", help="Division to evaluate."),
+    model: str = typer.Option("dc", help="Forecast model: 'ratio' or 'dc' (Dixon-Coles MLE)."),
+    edge: float = typer.Option(0.0, help="Minimum EV to place a bet (0 = any positive edge)."),
+    history: str = typer.Option(
+        "", help="Comma-separated earlier seasons to also train on, e.g. 2324,2223."
+    ),
+) -> None:
+    """Market-edge analysis: does the model beat the closing line?
+
+    Walk-forward over a season, betting the model's positive-EV picks at the closing 1X2
+    odds from football-data.co.uk (Pinnacle's close preferred). Reports betting yield and
+    whether the model's log loss beats the vig-free market's. There is no free source of
+    odds for upcoming matches, so this is historical -- an honest edge test, not a tipster.
+    """
+    from soccer.models.value import value_backtest
+
+    settings = get_settings()
+    with AnalyticsDB(settings.analytics_db) as adb:
+        rows = adb.outcomes_with_odds(season, division)
+        covered, total = adb.odds_coverage(season, division)
+        prior: list = []
+        for s in history.split(","):
+            if s.strip():
+                prior.extend(adb.outcomes_with_odds(s.strip(), division))
+
+    if not rows:
+        console.print(f"[yellow]No results for {division} {season}.[/yellow]")
+        raise typer.Exit(code=1)
+    if covered == 0:
+        console.print(
+            f"[yellow]No closing odds for {division} {season}.[/yellow] "
+            "Re-run [bold]soccer ingest-history[/bold] to fetch the odds columns."
+        )
+        raise typer.Exit(code=1)
+
+    model_name = "dc" if model == "dc" else "poisson"
+    if model == "dc":
+        console.print("[dim]Fitting Dixon-Coles by MLE before each match; slower...[/dim]")
+    try:
+        report = value_backtest(
+            rows, model=model_name, min_history=0 if prior else 60, edge_threshold=edge, prior=prior
+        )
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1) from exc
+
+    beat_style = "green" if report.beats_market else "red"
+    yield_style = "green" if report.yield_pct > 0 else "red"
+    console.print(
+        f"\n[bold]Market edge - {division} {season}[/bold]  "
+        f"[dim]({report.n_matches} matches, odds {covered}/{total}, walk-forward)[/dim]\n"
+    )
+    console.print(
+        f"  Log loss   model [bold]{report.model_log_loss:.3f}[/bold]  vs  "
+        f"market {report.market_log_loss:.3f}  vs  baseline {report.baseline_log_loss:.3f}"
+    )
+    console.print(
+        f"  Model beats the closing line: "
+        f"[{beat_style}]{'yes' if report.beats_market else 'no'}[/{beat_style}] "
+        f"({report.market_edge:+.3f} nats vs market)"
+    )
+    console.print(
+        f"  Betting    {report.n_bets} bets, {report.staked:.0f}u staked  ->  "
+        f"[{yield_style}]{report.yield_pct:+.1f}% yield[/{yield_style}] "
+        f"({report.profit:+.1f}u)"
+    )
+    console.print(
+        "\n[dim]The closing line (especially Pinnacle) is very hard to beat: a model can "
+        "have real skill vs base rates yet still lose to the market. Treat any positive "
+        "yield with suspicion -- it is usually variance, not edge.[/dim]\n"
+    )
+
+
+@app.command()
 def simulate(
     season: str = typer.Option("2526", help="Season to simulate."),
     division: str = typer.Option("E0", help="Division to simulate."),

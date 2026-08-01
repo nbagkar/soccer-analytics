@@ -57,6 +57,43 @@ class MatchResult:
     home_reds: int | None
     away_reds: int | None
     referee: str | None
+    # Closing 1X2 decimal odds (best available), for market-edge analysis. Defaulted so
+    # existing constructions that predate odds still build.
+    close_home_odds: float | None = None
+    close_draw_odds: float | None = None
+    close_away_odds: float | None = None
+
+
+# Preference order for closing 1X2 odds: Pinnacle closing (sharpest) -> market-average
+# closing -> Bet365 closing -> opening lines as a last resort. The first fully-present
+# triple wins. Column names are shared between the mmz4281 and new-league schemas.
+_ODDS_KEYS = (
+    ("PSCH", "PSCD", "PSCA"),
+    ("AvgCH", "AvgCD", "AvgCA"),
+    ("B365CH", "B365CD", "B365CA"),
+    ("PSH", "PSD", "PSA"),
+    ("AvgH", "AvgD", "AvgA"),
+    ("B365H", "B365D", "B365A"),
+)
+
+
+def _float(row: dict[str, str], key: str) -> float | None:
+    raw = (row.get(key) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _best_close_odds(row: dict[str, str]) -> tuple[float | None, float | None, float | None]:
+    """The best available closing 1X2 odds triple, or (None, None, None) if none parse."""
+    for h_key, d_key, a_key in _ODDS_KEYS:
+        h, d, a = _float(row, h_key), _float(row, d_key), _float(row, a_key)
+        if h and d and a and h > 1 and d > 1 and a > 1:
+            return h, d, a
+    return None, None, None
 
 
 def _parse_date(value: str) -> date | None:
@@ -101,6 +138,7 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
             skipped += 1
             continue
 
+        close_h, close_d, close_a = _best_close_odds(row)
         results.append(
             MatchResult(
                 season=season,
@@ -126,6 +164,9 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
                 home_reds=_int(row, "HR"),
                 away_reds=_int(row, "AR"),
                 referee=(row.get("Referee") or "").strip() or None,
+                close_home_odds=close_h,
+                close_draw_odds=close_d,
+                close_away_odds=close_a,
             )
         )
 
@@ -171,6 +212,7 @@ def parse_new_league_csv(
             skipped += 1
             continue
 
+        close_h, close_d, close_a = _best_close_odds(row)
         results.append(
             MatchResult(
                 season=season,
@@ -196,6 +238,9 @@ def parse_new_league_csv(
                 home_reds=None,
                 away_reds=None,
                 referee=None,
+                close_home_odds=close_h,
+                close_draw_odds=close_d,
+                close_away_odds=close_a,
             )
         )
 
