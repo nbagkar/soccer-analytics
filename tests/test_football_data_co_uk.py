@@ -15,8 +15,10 @@ import pytest
 
 from soccer.sources.football_data_co_uk import (
     FootballDataCoUk,
+    division_name,
     parse_new_league_csv,
     parse_results_csv,
+    season_label,
 )
 from soccer.storage.raw import RawStore
 
@@ -106,6 +108,25 @@ class TestNewLeagueParser:
         rows2 = parse_new_league_csv(NEW_CSV, division="BRA", recent_seasons=2)
         # 2025 and 2026 kept; only 2025's row has a score.
         assert {r.season for r in rows2} == {"2025"}
+
+
+class TestLeagueNames:
+    def test_division_code_maps_to_league(self) -> None:
+        assert division_name("E0") == "Premier League"
+        assert division_name("SP1") == "La Liga"
+        assert division_name("BRA") == "Brazil Serie A"
+
+    def test_unknown_division_falls_back_to_code(self) -> None:
+        assert division_name("ZZ9") == "ZZ9"
+
+    def test_european_season_expands(self) -> None:
+        assert season_label("2526") == "2025/26"
+        assert season_label("2425") == "2024/25"
+
+    def test_calendar_year_season_kept(self) -> None:
+        # Brazil's calendar-year seasons are not consecutive halves -> left as-is.
+        assert season_label("2026") == "2026"
+        assert season_label("2024") == "2024"
 
 
 class TestClosingOdds:

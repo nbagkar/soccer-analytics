@@ -31,6 +31,58 @@ BASE_URL = "https://www.football-data.co.uk/mmz4281"
 # different schema: one file per country holding every season, no shot/card columns.
 NEW_LEAGUE_BASE = "https://www.football-data.co.uk/new"
 
+# football-data.co.uk division codes -> the leagues they actually are, for display. The
+# codes are the storage key everywhere; this maps them to human names at the edges (the
+# dashboard selectors, CLI titles). Unknown codes fall back to the code itself.
+DIVISION_NAMES = {
+    "E0": "Premier League",
+    "E1": "Championship",
+    "E2": "League One",
+    "E3": "League Two",
+    "EC": "National League",
+    "SC0": "Scottish Premiership",
+    "SC1": "Scottish Championship",
+    "SC2": "Scottish League One",
+    "SC3": "Scottish League Two",
+    "D1": "Bundesliga",
+    "D2": "2. Bundesliga",
+    "I1": "Serie A",
+    "I2": "Serie B",
+    "SP1": "La Liga",
+    "SP2": "La Liga 2",
+    "F1": "Ligue 1",
+    "F2": "Ligue 2",
+    "N1": "Eredivisie",
+    "B1": "Belgian Pro League",
+    "P1": "Primeira Liga",
+    "T1": "Super Lig",
+    "G1": "Super League Greece",
+    # "new leagues" country codes
+    "BRA": "Brazil Serie A",
+    "ARG": "Argentina Primera",
+    "USA": "MLS",
+    "MEX": "Liga MX",
+}
+
+
+def division_name(code: str) -> str:
+    """Human league name for a division code, or the code itself if unmapped."""
+    return DIVISION_NAMES.get(code, code)
+
+
+def season_label(season: str) -> str:
+    """Readable season: European "2526" -> "2025/26"; a calendar year "2026" stays as is.
+
+    football-data.co.uk's European files use a two-year code (consecutive halves), while
+    the extra-country files use a single calendar year. The consecutive-halves test tells
+    them apart without a per-division flag.
+    """
+    if len(season) == 4 and season.isdigit():
+        first, second = int(season[:2]), int(season[2:])
+        if (first + 1) % 100 == second:
+            return f"20{season[:2]}/{season[2:]}"
+    return season
+
 
 @dataclass(frozen=True)
 class MatchResult:

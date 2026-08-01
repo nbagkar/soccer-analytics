@@ -19,7 +19,7 @@ from soccer.config import get_settings
 from soccer.domain.aliases import AliasStore, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore
 from soccer.ingest.pipeline import IngestPipeline
-from soccer.sources.football_data_co_uk import FootballDataCoUk
+from soccer.sources.football_data_co_uk import FootballDataCoUk, division_name, season_label
 from soccer.sources.football_data_org import FootballDataOrg
 from soccer.sources.registry import SOURCES, Capability, SourceId, Trust, attributions, sources_for
 from soccer.sources.thesportsdb import (
@@ -577,7 +577,11 @@ def table(
         )
         return
 
-    tbl = Table(title=f"{division} {season}", header_style="bold", title_justify="left")
+    tbl = Table(
+        title=f"{division_name(division)} {season_label(season)}",
+        header_style="bold",
+        title_justify="left",
+    )
     tbl.add_column("#", justify="right")
     tbl.add_column("Team")
     for col in ("P", "W", "D", "L", "GF", "GA", "GD", "Pts"):
@@ -615,7 +619,10 @@ def power_rankings(
     if top > 0:
         ranking = ranking[:top]
 
-    tbl = Table(title=f"Elo power rankings — {division} {season}", header_style="bold")
+    tbl = Table(
+        title=f"Elo power rankings — {division_name(division)} {season_label(season)}",
+        header_style="bold",
+    )
     tbl.add_column("#", justify="right")
     tbl.add_column("Team")
     tbl.add_column("Elo", justify="right")
@@ -741,7 +748,7 @@ def backtest(
     skill_style = "green" if skill > 0 else "red"
     model_label = "Dixon-Coles MLE" if model == "dc" else "ratio-method Poisson"
     console.print(
-        f"\n[bold]Backtest - {division} {season}[/bold]  "
+        f"\n[bold]Backtest - {division_name(division)} {season_label(season)}[/bold]  "
         f"[dim]({result.n_predictions} forecasts, {model_label}, walk-forward)[/dim]\n"
     )
     console.print(
@@ -832,7 +839,7 @@ def value(
     beat_style = "green" if report.beats_market else "red"
     yield_style = "green" if report.yield_pct > 0 else "red"
     console.print(
-        f"\n[bold]Market edge - {division} {season}[/bold]  "
+        f"\n[bold]Market edge - {division_name(division)} {season_label(season)}[/bold]  "
         f"[dim]({report.n_matches} matches, odds {covered}/{total}, walk-forward)[/dim]\n"
     )
     console.print(
@@ -899,8 +906,9 @@ def simulate(
     )
 
     scope = f"rest of season from {after}" if cutoff else "full-season replay"
+    league = f"{division_name(division)} {season_label(season)}"
     tbl = Table(
-        title=f"Simulation - {division} {season} ({scope}, {sims:,} runs)",
+        title=f"Simulation - {league} ({scope}, {sims:,} runs)",
         header_style="bold",
     )
     tbl.add_column("Team")

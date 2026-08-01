@@ -38,6 +38,7 @@ from soccer.dashboard.data import (
     shot_matches,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
+from soccer.sources.football_data_co_uk import division_name, season_label
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
 from soccer.storage.live_db import LiveDB
 
@@ -226,7 +227,7 @@ def _cached_market_edge(db_path: str, season: str, division: str):
 
 
 def _render_analytics(snap: AnalyticsSnapshot) -> None:
-    st.subheader(f"Analytics — {snap.division} {snap.season}")
+    st.subheader(f"Analytics — {division_name(snap.division)} {season_label(snap.season)}")
 
     left, right = st.columns([3, 2])
     with left:
@@ -880,8 +881,10 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            labels = {f"{s} / {d}": (s, d) for s, d, n in available}
-            picked = st.selectbox("Season / division", list(labels))
+            options = sorted(available, key=lambda t: t[0], reverse=True)
+            options = sorted(options, key=lambda t: division_name(t[1]))
+            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            picked = st.selectbox("League / season", list(labels))
             season, division = labels[picked]
             teams = forecast_teams(settings.analytics_db, season, division)
             home = st.selectbox("Home", teams, index=0)
@@ -909,8 +912,12 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            labels = {f"{s} / {d}  ({n})": (s, d) for s, d, n in available}
-            picked = st.selectbox("Season / division", list(labels))
+            options = sorted(available, key=lambda t: t[0], reverse=True)
+            options = sorted(options, key=lambda t: division_name(t[1]))
+            labels = {
+                f"{division_name(d)} - {season_label(s)}  ({n})": (s, d) for s, d, n in options
+            }
+            picked = st.selectbox("League / season", list(labels))
         season, division = labels[picked]
         snap = _cached_analytics(str(settings.analytics_db), season, division)
         if snap is None:
