@@ -276,27 +276,84 @@ def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
 
 
 def _render_shot_map(data) -> None:
-    st.subheader(f"Shot map — {data.label}")
+    st.subheader(f"Match centre — {data.label}")
     st.caption("StatsBomb event data. Circle size ∝ xG; filled = goal. Both teams attack →")
 
     cols = st.columns(len(data.team_xg) or 1)
     for col, row in zip(cols, data.team_xg, strict=False):
         col.metric(f"{row.name} xG", f"{row.xg:.2f}", f"{row.goals} goals")
 
-    frame = pl.DataFrame(
-        {
-            "x": [s["x"] for s in data.shots if s["x"] is not None],
-            "y": [s["y"] for s in data.shots if s["x"] is not None],
-            "xg": [s["xg"] for s in data.shots if s["x"] is not None],
-            "team": [s["team"] for s in data.shots if s["x"] is not None],
-            "player": [s["player"] for s in data.shots if s["x"] is not None],
-            "outcome": [s["outcome"] for s in data.shots if s["x"] is not None],
-            "goal": [bool(s["is_goal"]) for s in data.shots if s["x"] is not None],
-        }
-    ).to_pandas()
+    tab_race, tab_map, tab_log = st.tabs(["xG timeline", "Shot map", "Shot log"])
 
-    st.altair_chart(_shot_chart(frame), width="stretch")
+    with tab_race:
+        st.altair_chart(_xg_race_chart(data.timeline), width="stretch")
+        st.caption(
+            "Cumulative xG over the match — the 'xG race'. A team above on xG but behind on "
+            "goals was wasteful or unlucky; steps are shots, dots are goals."
+        )
+    with tab_map:
+        frame = pl.DataFrame(
+            {
+                "x": [s["x"] for s in data.shots if s["x"] is not None],
+                "y": [s["y"] for s in data.shots if s["x"] is not None],
+                "xg": [s["xg"] for s in data.shots if s["x"] is not None],
+                "team": [s["team"] for s in data.shots if s["x"] is not None],
+                "player": [s["player"] for s in data.shots if s["x"] is not None],
+                "outcome": [s["outcome"] for s in data.shots if s["x"] is not None],
+                "goal": [bool(s["is_goal"]) for s in data.shots if s["x"] is not None],
+            }
+        ).to_pandas()
+        st.altair_chart(_shot_chart(frame), width="stretch")
+    with tab_log:
+        log = (
+            pl.DataFrame(
+                {
+                    "Min": [s["minute"] for s in data.shots],
+                    "Team": [s["team"] for s in data.shots],
+                    "Player": [s["player"] for s in data.shots],
+                    "xG": [round(s["xg"], 2) for s in data.shots],
+                    "Outcome": [s["outcome"] for s in data.shots],
+                }
+            )
+            .sort("Min")
+            .to_pandas()
+        )
+        st.dataframe(
+            log,
+            width="stretch",
+            hide_index=True,
+            column_config={"xG": st.column_config.NumberColumn("xG", format="%.2f")},
+            height=min(520, 60 + 32 * len(data.shots)),
+        )
     st.caption(ATTRIBUTION_STATSBOMB)
+
+
+def _xg_race_chart(timeline: list[dict]):
+    frame = pl.DataFrame(timeline).to_pandas()
+    line = (
+        alt.Chart(frame)
+        .mark_line(interpolate="step-after", strokeWidth=2)
+        .encode(
+            x=alt.X(
+                "minute:Q",
+                title="Minute",
+                scale=alt.Scale(domain=[0, max(95, frame["minute"].max())]),
+            ),
+            y=alt.Y("cum_xg:Q", title="Cumulative xG"),
+            color=alt.Color("team:N", legend=alt.Legend(title=None, orient="top")),
+        )
+    )
+    goals = (
+        alt.Chart(frame[frame["is_goal"]])
+        .mark_point(size=90, filled=True, opacity=0.9)
+        .encode(
+            x="minute:Q",
+            y="cum_xg:Q",
+            color=alt.Color("team:N", legend=None),
+            tooltip=["player", "team", alt.Tooltip("minute", title="min")],
+        )
+    )
+    return (line + goals).properties(height=300).configure_view(strokeWidth=0)
 
 
 def _shot_chart(frame):
@@ -868,7 +925,11 @@ def main() -> None:
             st.info("No event data yet. Run `soccer ingest-events --match <id>`, then reload.")
             return
         with st.sidebar:
-            labels = {f"{lbl} ({mid})": mid for mid, lbl in matches}
+            comps = sorted({comp for _mid, _lbl, comp in matches})
+            if len(comps) > 1:
+                chosen = st.selectbox("Competition", comps)
+                matches = [m for m in matches if m[2] == chosen]
+            labels = {f"{lbl}": mid for mid, lbl, _comp in matches}
             picked = st.selectbox("Match", list(labels))
         data = shot_map(settings.analytics_db, labels[picked])
         if data is None:

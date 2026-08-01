@@ -239,27 +239,61 @@ class ShotMapData:
     shots: list[dict]
     """Each: team, player, minute, x, y, xg, outcome, is_goal (StatsBomb 120x80 frame)."""
     team_xg: list[XgRow]
+    timeline: list[dict]
+    """Cumulative-xG points per team: team, minute, cum_xg, is_goal, player (a step chart)."""
 
 
-def shot_matches(analytics_db: Path) -> list[tuple[int, str]]:
-    """(match_id, label) for matches with StatsBomb shots loaded. [] if none."""
+def shot_matches(analytics_db: Path) -> list[tuple[int, str, str]]:
+    """(match_id, label, competition) for matches with StatsBomb shots. [] if none."""
     if not Path(analytics_db).exists():
         return []
     with AnalyticsDB(analytics_db) as adb:
-        return adb.shot_match_labels()
+        return [(mid, label, comp) for mid, label, comp, _date in adb.shot_matches_indexed()]
+
+
+def _xg_timeline(shots: list[dict]) -> list[dict]:
+    """Build per-team cumulative-xG points over match minutes, from a match's shots.
+
+    Each team starts at (0, 0) and steps up by a shot's xG at its minute -- the "xG race"
+    that shows how a scoreline compares to the balance of chances.
+    """
+    teams = sorted({s["team"] for s in shots})
+    cumulative = dict.fromkeys(teams, 0.0)
+    points = [
+        {"team": t, "minute": 0, "cum_xg": 0.0, "is_goal": False, "player": ""} for t in teams
+    ]
+    for shot in sorted(shots, key=lambda s: s["minute"]):
+        cumulative[shot["team"]] += shot["xg"]
+        points.append(
+            {
+                "team": shot["team"],
+                "minute": shot["minute"],
+                "cum_xg": round(cumulative[shot["team"]], 3),
+                "is_goal": shot["is_goal"],
+                "player": shot["player"],
+            }
+        )
+    return points
 
 
 def shot_map(analytics_db: Path, match_id: int) -> ShotMapData | None:
-    """Shots and per-team xG for one match, for the shot-map view. None if absent."""
+    """Shots, per-team xG and the cumulative-xG timeline for one match. None if absent."""
     with AnalyticsDB(analytics_db) as adb:
         shots = adb.shots_for(match_id)
         if not shots:
             return None
         team_xg = adb.team_xg(match_id)
-        label = next(
-            (lbl for mid, lbl in adb.shot_match_labels() if mid == match_id), str(match_id)
+        label = adb.match_label(match_id) or next(
+            (lbl for mid, lbl, _c, _d in adb.shot_matches_indexed() if mid == match_id),
+            str(match_id),
         )
-    return ShotMapData(match_id=match_id, label=label, shots=shots, team_xg=team_xg)
+    return ShotMapData(
+        match_id=match_id,
+        label=label,
+        shots=shots,
+        team_xg=team_xg,
+        timeline=_xg_timeline(shots),
+    )
 
 
 def forecast_teams(analytics_db: Path, season: str, division: str) -> list[str]:

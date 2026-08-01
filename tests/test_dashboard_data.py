@@ -399,6 +399,28 @@ class TestShotMap:
         self._seed_shots(path)
         assert shot_map(path, 999) is None
 
+    def test_xg_timeline_accumulates_per_team(self, tmp_path) -> None:
+        from soccer.dashboard.data import shot_map
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_shots(path)  # Messi/Argentina 0.35, Mbappé/France 0.76
+        data = shot_map(path, 1)
+        assert data.timeline[0]["cum_xg"] == 0.0  # each team starts at zero
+        finals = {}
+        for point in data.timeline:
+            finals[point["team"]] = point["cum_xg"]
+        assert finals["Argentina"] == pytest.approx(0.35)
+        assert finals["France"] == pytest.approx(0.76)
+
+    def test_shot_matches_carries_competition(self, tmp_path) -> None:
+        from soccer.dashboard.data import shot_matches
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_shots(path)
+        matches = shot_matches(path)
+        assert len(matches[0]) == 3  # (match_id, label, competition)
+        assert matches[0][2] == "Other"  # no metadata seeded -> falls back honestly
+
 
 class TestForecastData:
     def test_forecast_teams_lists_names(self, tmp_path) -> None:

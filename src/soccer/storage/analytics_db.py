@@ -569,6 +569,24 @@ class AnalyticsDB:
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def shot_matches_indexed(self) -> list[tuple[int, str, str, str | None]]:
+        """(match_id, label, competition, date) for matches with shots, metadata-aware.
+
+        Uses the real home/away and competition from match_meta when present, falling back
+        to the aggregated team names and 'Other' so matches ingested before metadata still
+        appear. Ordered by competition then date for a grouped selector.
+        """
+        rows = self._con.execute(
+            "SELECT s.match_id, "
+            "  COALESCE(m.home_team || ' v ' || m.away_team, "
+            "           string_agg(DISTINCT s.team, ' v ')) AS label, "
+            "  COALESCE(m.competition, 'Other') AS competition, m.match_date "
+            "FROM shots s LEFT JOIN match_meta m ON m.match_id = s.match_id "
+            "GROUP BY s.match_id, m.home_team, m.away_team, m.competition, m.match_date "
+            "ORDER BY competition, m.match_date NULLS FIRST, s.match_id"
+        ).fetchall()
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
+
     def player_leaderboard(
         self, *, limit: int = 20, min_shots: int = 3, order: str = "xg"
     ) -> list[PlayerRow]:
