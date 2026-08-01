@@ -88,3 +88,18 @@ class TestWalkForward:
     def test_too_little_history_raises(self) -> None:
         with pytest.raises(ValueError, match="no predictions"):
             backtest_poisson(build_league(n_rounds=1), min_history=10_000)
+
+
+class TestPriorHistory:
+    def test_prior_enables_cold_start_predictions(self) -> None:
+        # With an earlier "season" as prior, the target is predicted from match one --
+        # the warmup no longer has to be skipped, so more matches get forecast.
+        target = build_league(n_rounds=4)
+        prior = build_league(n_rounds=4)  # same teams, stands in for last season
+
+        without = backtest_poisson(target, min_history=30)
+        with_prior = backtest_poisson(target, min_history=0, prior=prior)
+
+        assert with_prior.n_predictions > without.n_predictions
+        # Still a valid, non-trivial evaluation (not perfect foresight).
+        assert with_prior.log_loss > 0.01

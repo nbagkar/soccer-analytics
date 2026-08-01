@@ -99,10 +99,14 @@ def _calibration(
 
 
 def backtest_poisson(
-    outcomes: list[DatedOutcome], *, min_history: int = 60, calibration_bins: int = 10
+    outcomes: list[DatedOutcome],
+    *,
+    min_history: int = 60,
+    calibration_bins: int = 10,
+    prior: list[DatedOutcome] | None = None,
 ) -> BacktestResult:
     """Walk-forward backtest of the ratio-method Poisson forecast."""
-    return _walk_forward(outcomes, fit_poisson, min_history, calibration_bins)
+    return _walk_forward(outcomes, fit_poisson, min_history, calibration_bins, prior or [])
 
 
 def backtest_dixon_coles(
@@ -111,18 +115,20 @@ def backtest_dixon_coles(
     min_history: int = 60,
     calibration_bins: int = 10,
     time_decay: float = 0.0,
+    prior: list[DatedOutcome] | None = None,
 ) -> BacktestResult:
     """Walk-forward backtest of the Dixon-Coles MLE forecast.
 
     Slower than the ratio-method backtest: it re-fits by maximum likelihood before every
-    prediction. `time_decay` (xi per day) weights recent form.
+    prediction. `time_decay` (xi per day) weights recent form. `prior` is earlier-season
+    history always included in training (for multi-season fits).
     """
     from soccer.models.dixon_coles import fit_dixon_coles
 
     def fit(played: list[Outcome]) -> object:
         return fit_dixon_coles(played, time_decay=time_decay)
 
-    return _walk_forward(outcomes, fit, min_history, calibration_bins)
+    return _walk_forward(outcomes, fit, min_history, calibration_bins, prior or [])
 
 
 def _walk_forward(
@@ -130,16 +136,19 @@ def _walk_forward(
     fit: Callable[[list[Outcome]], object],
     min_history: int,
     calibration_bins: int,
+    prior: list[DatedOutcome],
 ) -> BacktestResult:
     """Walk a season in date order, predicting each match from a model fit on earlier ones.
 
     `fit` maps the matches played so far to a model exposing `.forecast(home, away)`. A
     match is predicted only once both teams have appeared, after a `min_history` warmup.
-    Refits before each prediction -- O(n^2) but tiny at league-season scale.
+    `prior` is history from earlier seasons, always part of the training set and of the
+    "seen" teams -- so a target-season match can be predicted from match one. Refits
+    before each prediction -- O(n^2) but tiny at league-season scale.
     """
     chronological = sorted(outcomes, key=lambda o: o.match_date)
-    played: list[Outcome] = []
-    seen: set[str] = set()
+    played: list[Outcome] = list(prior)
+    seen: set[str] = {t for o in prior for t in (o.home_norm, o.away_norm)}
     predictions: list[tuple[tuple[float, float, float], int]] = []
 
     for o in chronological:

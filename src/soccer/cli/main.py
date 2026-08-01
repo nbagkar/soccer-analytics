@@ -681,11 +681,30 @@ def backtest(
     half_life: float = typer.Option(
         0.0, help="Time-decay half-life in days for the DC model (0 = no decay)."
     ),
+    history: str = typer.Option(
+        "",
+        help="Comma-separated earlier seasons to also train on, e.g. 2425,2324. "
+        "Eliminates the warmup so early-season matches can be forecast.",
+    ),
 ) -> None:
     """Walk-forward backtest of the forecast: log loss, Brier, and calibration."""
     from soccer.models.backtest import backtest_dixon_coles, backtest_poisson
 
     outcomes = _load_outcomes(season, division)
+    prior: list = []
+    if history:
+        with AnalyticsDB(get_settings().analytics_db) as adb:
+            for s in history.split(","):
+                prior.extend(adb.outcomes_for(s.strip(), division))
+        # With prior seasons providing the teams and warmup, predict from match one.
+        min_history = 0
+        if model != "dc" or half_life <= 0:
+            console.print(
+                "[yellow]Tip:[/yellow] older seasons weighted equally can drag the fit "
+                "toward stale form. Pair --history with [bold]--model dc --half-life 140[/bold] "
+                "so recency is weighted."
+            )
+
     try:
         if model == "dc":
             import math as _math
@@ -694,9 +713,11 @@ def backtest(
             console.print(
                 "[dim]Fitting Dixon-Coles by MLE before each match; this is slower...[/dim]"
             )
-            result = backtest_dixon_coles(outcomes, min_history=min_history, time_decay=xi)
+            result = backtest_dixon_coles(
+                outcomes, min_history=min_history, time_decay=xi, prior=prior
+            )
         else:
-            result = backtest_poisson(outcomes, min_history=min_history)
+            result = backtest_poisson(outcomes, min_history=min_history, prior=prior)
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/yellow]")
         raise typer.Exit(code=1) from exc
