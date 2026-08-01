@@ -919,13 +919,20 @@ def ingest_events(
     """
     from soccer.sources.registry import SourceId
     from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
-    from soccer.sources.statsbomb import StatsBomb, parse_player_stats, parse_shots
+    from soccer.sources.statsbomb import (
+        StatsBomb,
+        parse_match_meta,
+        parse_player_stats,
+        parse_shots,
+    )
+    from soccer.storage.analytics_db import MatchMeta
 
     settings = get_settings()
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
 
     with StatsBomb(raw) as sb, AnalyticsDB(settings.analytics_db) as adb:
+        metas: list[MatchMeta] = []
         if from_raw:
             match_ids = adb.matches_with_shots()
             if not match_ids:
@@ -935,19 +942,25 @@ def ingest_events(
         elif match:
             match_ids = [match]
         elif competition and season:
-            match_ids = [m["match_id"] for m in sb.matches(competition, season)]
+            listing = sb.matches(competition, season)
+            match_ids = [m["match_id"] for m in listing]
+            metas = [MatchMeta(**parse_match_meta(m)) for m in listing if m.get("match_id")]
             console.print(f"[dim]{len(match_ids)} matches in {competition}/{season}...[/dim]")
         else:
             console.print("[yellow]Provide --match, or --competition and --season.[/yellow]")
             raise typer.Exit(code=1)
 
+        if metas:
+            adb.load_match_meta(metas)
+
         total_shots, total_players = 0, 0
         for match_id in match_ids:
+            snapshot = raw.latest(SourceId.STATSBOMB, f"events_{match_id}")
             if from_raw:
-                snapshot = raw.latest(SourceId.STATSBOMB, f"events_{match_id}")
                 events = snapshot.payload if snapshot else []
             else:
-                events = sb.fetch_events(match_id)
+                # Static open data: reuse a snapshot if we have one, only fetch if not.
+                events = snapshot.payload if snapshot else sb.fetch_events(match_id)
             if not events:
                 continue
             shots = parse_shots(events, match_id)

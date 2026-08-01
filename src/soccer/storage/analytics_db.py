@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
     red_cards           INTEGER NOT NULL,
     touches             INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS match_meta (
+    match_id       INTEGER PRIMARY KEY,
+    competition    VARCHAR,
+    season         VARCHAR,
+    competition_id INTEGER,
+    season_id      INTEGER,
+    match_date     VARCHAR,
+    home_team      VARCHAR,
+    away_team      VARCHAR
+);
 """
 
 # Sortable expressions for the player-profile leaderboard, allowlisted so `order` can
@@ -115,39 +126,48 @@ _PROFILE_ORDER = {
     "touches": "p.touches",
 }
 
+
 # Full profile per player: event stats (pstat) LEFT JOINed onto shot aggregates (sh), so
 # a non-shooting defender still gets a row. Column order matches PlayerProfile's fields.
-_PROFILE_SELECT = """
-    WITH pstat AS (
-        SELECT player, mode(team) AS team, mode(position) AS position,
-               COUNT(DISTINCT match_id) AS matches, SUM(minutes) AS minutes,
-               SUM(assists) AS assists, SUM(xa) AS xa, SUM(key_passes) AS key_passes,
-               SUM(passes) AS passes, SUM(passes_completed) AS passes_completed,
-               SUM(progressive_passes) AS progressive_passes, SUM(carries) AS carries,
-               SUM(progressive_carries) AS progressive_carries, SUM(dribbles) AS dribbles,
-               SUM(dribbles_completed) AS dribbles_completed, SUM(tackles) AS tackles,
-               SUM(tackles_won) AS tackles_won, SUM(interceptions) AS interceptions,
-               SUM(blocks) AS blocks, SUM(clearances) AS clearances,
-               SUM(ball_recoveries) AS ball_recoveries, SUM(pressures) AS pressures,
-               SUM(fouls) AS fouls, SUM(fouled) AS fouled, SUM(yellow_cards) AS yellow_cards,
-               SUM(red_cards) AS red_cards, SUM(touches) AS touches
-        FROM player_match_stats GROUP BY player
-    ),
-    sh AS (
-        SELECT player, SUM(xg) AS xg,
-               COALESCE(SUM(xg) FILTER (WHERE NOT is_penalty), 0) AS npxg,
-               SUM(is_goal::INT) AS goals, COUNT(*) AS shots
-        FROM shots GROUP BY player
-    )
-    SELECT p.player, p.team, p.position, p.matches, p.minutes,
-           COALESCE(sh.goals, 0), COALESCE(sh.xg, 0.0), COALESCE(sh.npxg, 0.0),
-           COALESCE(sh.shots, 0), p.assists, p.xa, p.key_passes, p.passes,
-           p.passes_completed, p.progressive_passes, p.carries, p.progressive_carries,
-           p.dribbles, p.dribbles_completed, p.tackles, p.tackles_won, p.interceptions,
-           p.blocks, p.clearances, p.ball_recoveries, p.pressures, p.fouls, p.fouled,
-           p.yellow_cards, p.red_cards, p.touches
-    FROM pstat p LEFT JOIN sh ON sh.player = p.player
-"""
+# An optional competition filter restricts BOTH sides to one competition's matches, so
+# percentiles compare like with like (a league season, not a mix of tournaments).
+def _profile_select(competition: str | None) -> tuple[str, list]:
+    filt, params = "", []
+    if competition:
+        filt = "WHERE match_id IN (SELECT match_id FROM match_meta WHERE competition = ?)"
+        params = [competition, competition]  # one per CTE below
+    sql = f"""
+        WITH pstat AS (
+            SELECT player, mode(team) AS team, mode(position) AS position,
+                   COUNT(DISTINCT match_id) AS matches, SUM(minutes) AS minutes,
+                   SUM(assists) AS assists, SUM(xa) AS xa, SUM(key_passes) AS key_passes,
+                   SUM(passes) AS passes, SUM(passes_completed) AS passes_completed,
+                   SUM(progressive_passes) AS progressive_passes, SUM(carries) AS carries,
+                   SUM(progressive_carries) AS progressive_carries, SUM(dribbles) AS dribbles,
+                   SUM(dribbles_completed) AS dribbles_completed, SUM(tackles) AS tackles,
+                   SUM(tackles_won) AS tackles_won, SUM(interceptions) AS interceptions,
+                   SUM(blocks) AS blocks, SUM(clearances) AS clearances,
+                   SUM(ball_recoveries) AS ball_recoveries, SUM(pressures) AS pressures,
+                   SUM(fouls) AS fouls, SUM(fouled) AS fouled, SUM(yellow_cards) AS yellow_cards,
+                   SUM(red_cards) AS red_cards, SUM(touches) AS touches
+            FROM player_match_stats {filt} GROUP BY player
+        ),
+        sh AS (
+            SELECT player, SUM(xg) AS xg,
+                   COALESCE(SUM(xg) FILTER (WHERE NOT is_penalty), 0) AS npxg,
+                   SUM(is_goal::INT) AS goals, COUNT(*) AS shots
+            FROM shots {filt} GROUP BY player
+        )
+        SELECT p.player, p.team, p.position, p.matches, p.minutes,
+               COALESCE(sh.goals, 0), COALESCE(sh.xg, 0.0), COALESCE(sh.npxg, 0.0),
+               COALESCE(sh.shots, 0), p.assists, p.xa, p.key_passes, p.passes,
+               p.passes_completed, p.progressive_passes, p.carries, p.progressive_carries,
+               p.dribbles, p.dribbles_completed, p.tackles, p.tackles_won, p.interceptions,
+               p.blocks, p.clearances, p.ball_recoveries, p.pressures, p.fouls, p.fouled,
+               p.yellow_cards, p.red_cards, p.touches
+        FROM pstat p LEFT JOIN sh ON sh.player = p.player
+    """
+    return sql, params
 
 
 @dataclass(frozen=True)
@@ -267,6 +287,24 @@ class ResultRow:
     away_norm: str
     fthg: int
     ftag: int
+
+
+@dataclass(frozen=True)
+class MatchMeta:
+    """StatsBomb match identity: what competition/season a match_id belongs to."""
+
+    match_id: int
+    competition: str
+    season: str
+    competition_id: int | None
+    season_id: int | None
+    match_date: str | None
+    home_team: str
+    away_team: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.home_team} v {self.away_team}"
 
 
 class AnalyticsDB:
@@ -552,22 +590,71 @@ class AnalyticsDB:
         ).fetchone()[0]
 
     def player_profiles(
-        self, *, limit: int = 30, min_minutes: int = 90, order: str = "contributions"
+        self,
+        *,
+        limit: int = 30,
+        min_minutes: int = 90,
+        order: str = "contributions",
+        competition: str | None = None,
     ) -> list[PlayerProfile]:
-        """Full player profiles across all loaded matches, ranked by `order`.
+        """Full player profiles across loaded matches, ranked by `order`.
 
         `order` is one of the keys in `_PROFILE_ORDER` (goals, xg, assists, xa,
-        contributions, progressive, defensive, ...). `min_minutes` drops cameos.
+        contributions, progressive, defensive, ...). `min_minutes` drops cameos;
+        `competition` restricts to one competition's matches (comparable percentiles).
         """
         order_expr = _PROFILE_ORDER.get(order, _PROFILE_ORDER["contributions"])
+        select, params = _profile_select(competition)
         rows = self._con.execute(
-            f"{_PROFILE_SELECT} WHERE p.minutes >= ? "
+            f"{select} WHERE p.minutes >= ? "
             f"ORDER BY {order_expr} DESC, p.minutes DESC LIMIT ?",  # order_expr is allowlisted
-            [min_minutes, limit],
+            [*params, min_minutes, limit],
         ).fetchall()
         return [PlayerProfile(*r) for r in rows]
 
-    def player_profile(self, player: str) -> PlayerProfile | None:
+    def player_profile(
+        self, player: str, *, competition: str | None = None
+    ) -> PlayerProfile | None:
         """One player's full profile, or None if they have no event stats loaded."""
-        rows = self._con.execute(f"{_PROFILE_SELECT} WHERE p.player = ?", [player]).fetchall()
+        select, params = _profile_select(competition)
+        rows = self._con.execute(f"{select} WHERE p.player = ?", [*params, player]).fetchall()
         return PlayerProfile(*rows[0]) if rows else None
+
+    # --- StatsBomb match metadata ---------------------------------------------
+
+    def load_match_meta(self, metas: list[MatchMeta]) -> int:
+        """Upsert match identities so player stats can be filtered by competition."""
+        if not metas:
+            return 0
+        frame = pl.DataFrame([asdict(m) for m in metas])
+        self._con.register("incoming_meta", frame)
+        try:
+            self._con.execute("BEGIN")
+            for meta in metas:
+                self._con.execute("DELETE FROM match_meta WHERE match_id = ?", [meta.match_id])
+            self._con.execute("INSERT INTO match_meta BY NAME SELECT * FROM incoming_meta")
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        finally:
+            self._con.unregister("incoming_meta")
+        return len(metas)
+
+    def competitions_loaded(self) -> list[tuple[str, int]]:
+        """(competition, matches with player stats) for the loaded-competition filter."""
+        return self._con.execute(
+            "SELECT m.competition, COUNT(DISTINCT p.match_id) "
+            "FROM player_match_stats p JOIN match_meta m ON m.match_id = p.match_id "
+            "GROUP BY m.competition ORDER BY COUNT(DISTINCT p.match_id) DESC"
+        ).fetchall()
+
+    def match_label(self, match_id: int) -> str | None:
+        """'Home v Away (competition season)' for a match, if its metadata is loaded."""
+        row = self._con.execute(
+            "SELECT home_team, away_team, competition, season FROM match_meta WHERE match_id = ?",
+            [match_id],
+        ).fetchone()
+        if not row:
+            return None
+        return f"{row[0]} v {row[1]} ({row[2]} {row[3]})"

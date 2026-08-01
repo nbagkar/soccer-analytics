@@ -29,6 +29,7 @@ from soccer.dashboard.data import (
     health_snapshot,
     live_snapshot,
     player_board,
+    player_competitions,
     player_percentiles,
     player_profile,
     player_profiles,
@@ -463,11 +464,12 @@ _RANK_OPTIONS = {
 }
 
 
-def _render_player_leaderboard(profiles, *, per90: bool) -> None:
+def _render_player_leaderboard(profiles, *, per90: bool, pool_label: str = "") -> None:
     st.subheader("Player leaderboard")
     mode = "per 90 minutes" if per90 else "totals"
+    scope = f"{pool_label} · " if pool_label and pool_label != "All competitions" else ""
     st.caption(
-        f"StatsBomb event data across all ingested matches, shown as {mode}. "
+        f"{scope}StatsBomb event data across all ingested matches, shown as {mode}. "
         "Sort any column by clicking its header."
     )
 
@@ -517,7 +519,7 @@ _CATEGORY_COLOURS = {
 }
 
 
-def _render_player_profile(profile, percentiles) -> None:
+def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> None:
     pos = f" · {profile.position}" if profile.position else ""
     st.subheader(f"{profile.player}")
     st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
@@ -533,7 +535,8 @@ def _render_player_profile(profile, percentiles) -> None:
         st.info("Not enough minutes for a percentile fingerprint at this threshold.")
         return
 
-    st.markdown("**Percentile rank** — vs all qualifying players (per 90)")
+    pool_note = pool_label if pool_label and pool_label != "All competitions" else "all loaded"
+    st.markdown(f"**Percentile rank** — vs {pool_note} players (per 90)")
     order = [mp.label for mp in percentiles]
     frame = pl.DataFrame(
         {
@@ -688,6 +691,14 @@ def main() -> None:
             return
 
         with st.sidebar:
+            comps = player_competitions(settings.analytics_db)
+            comp_choice = "All competitions"
+            if len(comps) > 1:
+                labels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
+                comp_choice = st.selectbox("Competition", list(labels))
+                competition = labels[comp_choice]
+            else:
+                competition = None
             view = st.segmented_control(
                 "View", ["Leaderboard", "Player profile"], default="Leaderboard"
             )
@@ -695,7 +706,11 @@ def main() -> None:
 
         if view == "Player profile":
             pool = player_profiles(
-                settings.analytics_db, top=100_000, min_minutes=min_minutes, order="contributions"
+                settings.analytics_db,
+                top=100_000,
+                min_minutes=min_minutes,
+                order="contributions",
+                competition=competition,
             )
             if not pool:
                 st.info("No players clear that minutes threshold. Lower it in the sidebar.")
@@ -703,12 +718,14 @@ def main() -> None:
             with st.sidebar:
                 names = [p.player for p in pool]
                 picked = st.selectbox("Player", names)
-            profile = player_profile(settings.analytics_db, picked)
-            pcts = player_percentiles(settings.analytics_db, picked, min_minutes=min_minutes)
+            profile = player_profile(settings.analytics_db, picked, competition=competition)
+            pcts = player_percentiles(
+                settings.analytics_db, picked, min_minutes=min_minutes, competition=competition
+            )
             if profile is None:
                 st.info("No profile for that player.")
             else:
-                _render_player_profile(profile, pcts)
+                _render_player_profile(profile, pcts, pool_label=comp_choice)
         else:
             with st.sidebar:
                 rank_label = st.selectbox("Rank by", list(_RANK_OPTIONS))
@@ -718,11 +735,12 @@ def main() -> None:
                 top=40,
                 min_minutes=min_minutes,
                 order=_RANK_OPTIONS[rank_label],
+                competition=competition,
             )
             if not profiles:
                 st.info("No players clear that minutes threshold. Lower it in the sidebar.")
             else:
-                _render_player_leaderboard(profiles, per90=per90)
+                _render_player_leaderboard(profiles, per90=per90, pool_label=comp_choice)
         return
 
     if page == "Forecast":

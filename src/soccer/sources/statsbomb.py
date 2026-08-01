@@ -289,6 +289,28 @@ def parse_player_stats(events: list[dict], match_id: int) -> list[PlayerMatchSta
     return rows
 
 
+def parse_match_meta(match: dict) -> dict:
+    """Flatten a StatsBomb match listing into the fields the match_meta table stores.
+
+    Tolerant of the nested shape (`home_team.home_team_name`, `competition.
+    competition_name`, ...) and of missing pieces, so a sparse listing still yields a row.
+    """
+    competition = match.get("competition", {})
+    season = match.get("season", {})
+    home = match.get("home_team", {})
+    away = match.get("away_team", {})
+    return {
+        "match_id": match.get("match_id"),
+        "competition": competition.get("competition_name", "Unknown"),
+        "season": season.get("season_name", "Unknown"),
+        "competition_id": competition.get("competition_id"),
+        "season_id": season.get("season_id"),
+        "match_date": match.get("match_date"),
+        "home_team": home.get("home_team_name", "Unknown"),
+        "away_team": away.get("away_team_name", "Unknown"),
+    }
+
+
 class StatsBomb:
     def __init__(
         self,

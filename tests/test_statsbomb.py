@@ -19,6 +19,7 @@ from soccer.storage.raw import RawStore
 def adb(tmp_path) -> AnalyticsDB:
     return AnalyticsDB(tmp_path / "a.duckdb")
 
+
 EVENTS = [
     {"type": {"name": "Pass"}, "team": {"name": "A"}},  # not a shot
     {
@@ -312,3 +313,84 @@ class TestPlayerProfiles:
         # 1 interception in 70 minutes -> ~1.29 per 90.
         assert p1.per90(p1.interceptions) == pytest.approx(90 / 70)
         assert adb.player_profile("Nobody") is None
+
+
+class TestMatchMeta:
+    def test_metadata_and_competition_filter(self, adb: AnalyticsDB) -> None:
+        from soccer.sources.statsbomb import PlayerMatchStats, parse_match_meta
+        from soccer.storage.analytics_db import MatchMeta
+
+        # Two matches, two competitions; one player appears in each.
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        other = [
+            PlayerMatchStats(
+                match_id=2,
+                player="P1",
+                team="A",
+                position="CM",
+                minutes=90,
+                passes=10,
+                passes_completed=9,
+                key_passes=0,
+                assists=0,
+                xa=0.0,
+                progressive_passes=0,
+                carries=0,
+                progressive_carries=0,
+                dribbles=0,
+                dribbles_completed=0,
+                tackles=9,
+                tackles_won=9,
+                interceptions=0,
+                blocks=0,
+                clearances=0,
+                ball_recoveries=0,
+                pressures=0,
+                fouls=0,
+                fouled=0,
+                yellow_cards=0,
+                red_cards=0,
+                touches=10,
+            )
+        ]
+        adb.load_player_stats(other)
+        adb.load_match_meta(
+            [
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 1,
+                            "competition": {"competition_name": "World Cup", "competition_id": 43},
+                            "season": {"season_name": "2022", "season_id": 106},
+                            "home_team": {"home_team_name": "A"},
+                            "away_team": {"away_team_name": "B"},
+                            "match_date": "2022-12-18",
+                        }
+                    )
+                ),
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 2,
+                            "competition": {"competition_name": "La Liga"},
+                            "season": {"season_name": "2020/2021"},
+                            "home_team": {"home_team_name": "A"},
+                            "away_team": {"away_team_name": "C"},
+                        }
+                    )
+                ),
+            ]
+        )
+
+        assert dict(adb.competitions_loaded()) == {"World Cup": 1, "La Liga": 1}
+        assert adb.match_label(1) == "A v B (World Cup 2022)"
+
+        # Filtered to La Liga, P1's tackles come only from match 2 (9), not match 1.
+        laliga = adb.player_profile("P1", competition="La Liga")
+        assert laliga is not None
+        assert laliga.tackles == 9 and laliga.matches == 1
+        wc = adb.player_profile("P1", competition="World Cup")
+        assert wc.tackles == 1  # only match 1's single tackle
+
+    def test_unknown_match_label_is_none(self, adb: AnalyticsDB) -> None:
+        assert adb.match_label(999) is None
