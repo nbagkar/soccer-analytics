@@ -667,6 +667,64 @@ def forecast(
 
 
 @app.command()
+def backtest(
+    season: str = typer.Option("2526", help="Season to backtest on."),
+    division: str = typer.Option("E0", help="Division to backtest on."),
+    min_history: int = typer.Option(60, help="Matches of warmup before the first forecast."),
+) -> None:
+    """Walk-forward backtest of the forecast: log loss, Brier, and calibration."""
+    from soccer.models.backtest import backtest_poisson
+
+    outcomes = _load_outcomes(season, division)
+    try:
+        result = backtest_poisson(outcomes, min_history=min_history)
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1) from exc
+
+    skill = result.log_loss_skill
+    skill_style = "green" if skill > 0 else "red"
+    console.print(
+        f"\n[bold]Backtest - {division} {season}[/bold]  "
+        f"[dim]({result.n_predictions} forecasts, walk-forward)[/dim]\n"
+    )
+    console.print(
+        f"  Log loss   model [bold]{result.log_loss:.3f}[/bold]  vs  "
+        f"baseline {result.baseline_log_loss:.3f}   "
+        f"([{skill_style}]{skill:+.1%} skill[/{skill_style}])"
+    )
+    console.print(
+        f"  Brier      model [bold]{result.brier:.3f}[/bold]  vs  "
+        f"baseline {result.baseline_brier:.3f}"
+    )
+
+    cal = Table(
+        title="\nCalibration (home-win probability)",
+        title_justify="left",
+        header_style="bold",
+    )
+    cal.add_column("Predicted band")
+    cal.add_column("Mean pred", justify="right")
+    cal.add_column("Observed", justify="right")
+    cal.add_column("N", justify="right")
+    for b in result.calibration:
+        # Colour observed vs predicted agreement: close = good calibration.
+        gap = abs(b.mean_predicted - b.observed_rate)
+        style = "green" if gap < 0.1 else "yellow" if gap < 0.2 else "red"
+        cal.add_row(
+            f"{b.lower:.0%}-{b.upper:.0%}",
+            f"{b.mean_predicted:.0%}",
+            Text(f"{b.observed_rate:.0%}", style=style),
+            str(b.count),
+        )
+    console.print(cal)
+    console.print(
+        "\n[dim]Lower log loss is better; positive skill beats predicting the league's "
+        "base rates. Well-calibrated = observed tracks predicted.[/dim]\n"
+    )
+
+
+@app.command()
 def simulate(
     season: str = typer.Option("2526", help="Season to simulate."),
     division: str = typer.Option("E0", help="Division to simulate."),

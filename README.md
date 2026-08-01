@@ -32,10 +32,16 @@ Working end-to-end today: source adapters → immutable raw snapshots → canoni
 entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
 league tables, Elo power rankings, Poisson/Dixon-Coles match forecasting, Monte Carlo
-league simulations, and a read-only Streamlit dashboard. **241 passing tests.**
+league simulations, walk-forward forecast backtesting, and a read-only Streamlit
+dashboard. **247 passing tests.**
 
-Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), forecast calibration
-backtests, MCP interface.
+The forecasting is evaluated honestly rather than assumed good: on real 2025/26 Premier
+League data the walk-forward backtest shows the model beats a base-rate baseline by only
+~3% log-loss skill and is somewhat over-confident on medium-strong home favourites —
+modest, real, and the concrete motivation for the documented Dixon-Coles-MLE refinement.
+
+Not yet built: StatsBomb/Wyscout event analytics (xG, shot maps), full Dixon-Coles MLE
+fitting, MCP interface.
 
 ## Quickstart
 
@@ -70,6 +76,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer power-rankings` | Elo power rankings from historical results |
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
 | `soccer simulate` | Monte Carlo league simulation — title, top-N, relegation odds |
+| `soccer backtest` | Walk-forward forecast evaluation — log loss, Brier, calibration |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |
