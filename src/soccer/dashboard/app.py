@@ -34,6 +34,7 @@ from soccer.dashboard.data import (
     player_percentiles,
     player_profile,
     player_profiles,
+    player_seasons,
     shot_map,
     shot_matches,
 )
@@ -824,13 +825,20 @@ def main() -> None:
 
         with st.sidebar:
             comps = player_competitions(settings.analytics_db)
-            comp_choice = "All competitions"
+            competition, season, scope = None, None, "All competitions"
             if len(comps) > 1:
-                labels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
-                comp_choice = st.selectbox("Competition", list(labels))
-                competition = labels[comp_choice]
-            else:
-                competition = None
+                clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
+                comp_choice = st.selectbox("Competition", list(clabels))
+                competition = clabels[comp_choice]
+                if competition:
+                    scope = competition
+            if competition:
+                seasons = player_seasons(settings.analytics_db, competition)
+                if len(seasons) > 1:
+                    slabels = {"All seasons": None} | {f"{s}  ({n})": s for s, n in seasons}
+                    season = slabels[st.selectbox("Season", list(slabels))]
+                    if season:
+                        scope = f"{competition} {season}"
             view = st.segmented_control(
                 "View", ["Leaderboard", "Player profile"], default="Leaderboard"
             )
@@ -843,6 +851,7 @@ def main() -> None:
                 min_minutes=min_minutes,
                 order="contributions",
                 competition=competition,
+                season=season,
             )
             if not pool:
                 st.info("No players clear that minutes threshold. Lower it in the sidebar.")
@@ -850,14 +859,20 @@ def main() -> None:
             with st.sidebar:
                 names = [p.player for p in pool]
                 picked = st.selectbox("Player", names)
-            profile = player_profile(settings.analytics_db, picked, competition=competition)
+            profile = player_profile(
+                settings.analytics_db, picked, competition=competition, season=season
+            )
             pcts = player_percentiles(
-                settings.analytics_db, picked, min_minutes=min_minutes, competition=competition
+                settings.analytics_db,
+                picked,
+                min_minutes=min_minutes,
+                competition=competition,
+                season=season,
             )
             if profile is None:
                 st.info("No profile for that player.")
             else:
-                _render_player_profile(profile, pcts, pool_label=comp_choice)
+                _render_player_profile(profile, pcts, pool_label=scope)
         else:
             with st.sidebar:
                 rank_label = st.selectbox("Rank by", list(_RANK_OPTIONS))
@@ -868,11 +883,12 @@ def main() -> None:
                 min_minutes=min_minutes,
                 order=_RANK_OPTIONS[rank_label],
                 competition=competition,
+                season=season,
             )
             if not profiles:
                 st.info("No players clear that minutes threshold. Lower it in the sidebar.")
             else:
-                _render_player_leaderboard(profiles, per90=per90, pool_label=comp_choice)
+                _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
         return
 
     if page == "Forecast":
@@ -932,11 +948,15 @@ def main() -> None:
             st.info("No event data yet. Run `soccer ingest-events --match <id>`, then reload.")
             return
         with st.sidebar:
-            comps = sorted({comp for _mid, _lbl, comp in matches})
+            comps = sorted({comp for _mid, _lbl, comp, _s in matches})
             if len(comps) > 1:
                 chosen = st.selectbox("Competition", comps)
                 matches = [m for m in matches if m[2] == chosen]
-            labels = {f"{lbl}": mid for mid, lbl, _comp in matches}
+            seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
+            if len(seasons) > 1:
+                chosen_season = st.selectbox("Season", seasons)
+                matches = [m for m in matches if m[3] == chosen_season]
+            labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
             picked = st.selectbox("Match", list(labels))
         data = shot_map(settings.analytics_db, labels[picked])
         if data is None:

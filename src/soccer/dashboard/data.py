@@ -243,12 +243,15 @@ class ShotMapData:
     """Cumulative-xG points per team: team, minute, cum_xg, is_goal, player (a step chart)."""
 
 
-def shot_matches(analytics_db: Path) -> list[tuple[int, str, str]]:
-    """(match_id, label, competition) for matches with StatsBomb shots. [] if none."""
+def shot_matches(analytics_db: Path) -> list[tuple[int, str, str, str]]:
+    """(match_id, label, competition, season) for matches with StatsBomb shots. [] if none."""
     if not Path(analytics_db).exists():
         return []
     with AnalyticsDB(analytics_db) as adb:
-        return [(mid, label, comp) for mid, label, comp, _date in adb.shot_matches_indexed()]
+        return [
+            (mid, label, comp, season)
+            for mid, label, comp, season, _date in adb.shot_matches_indexed()
+        ]
 
 
 def _xg_timeline(shots: list[dict]) -> list[dict]:
@@ -284,7 +287,7 @@ def shot_map(analytics_db: Path, match_id: int) -> ShotMapData | None:
             return None
         team_xg = adb.team_xg(match_id)
         label = adb.match_label(match_id) or next(
-            (lbl for mid, lbl, _c, _d in adb.shot_matches_indexed() if mid == match_id),
+            (lbl for mid, lbl, _c, _s, _d in adb.shot_matches_indexed() if mid == match_id),
             str(match_id),
         )
     return ShotMapData(
@@ -364,6 +367,7 @@ def player_profiles(
     min_minutes: int = 180,
     order: str = "contributions",
     competition: str | None = None,
+    season: str | None = None,
 ):
     """Full player profiles (list[PlayerProfile]) from ingested events. [] if none loaded."""
     if not Path(analytics_db).exists():
@@ -372,16 +376,22 @@ def player_profiles(
         if adb.player_stats_count() == 0:
             return []
         return adb.player_profiles(
-            limit=top, min_minutes=min_minutes, order=order, competition=competition
+            limit=top,
+            min_minutes=min_minutes,
+            order=order,
+            competition=competition,
+            season=season,
         )
 
 
-def player_profile(analytics_db: Path, player: str, *, competition: str | None = None):
+def player_profile(
+    analytics_db: Path, player: str, *, competition: str | None = None, season: str | None = None
+):
     """One player's full profile (PlayerProfile) or None."""
     if not Path(analytics_db).exists():
         return None
     with AnalyticsDB(analytics_db) as adb:
-        return adb.player_profile(player, competition=competition)
+        return adb.player_profile(player, competition=competition, season=season)
 
 
 def player_competitions(analytics_db: Path) -> list[tuple[str, int]]:
@@ -390,6 +400,14 @@ def player_competitions(analytics_db: Path) -> list[tuple[str, int]]:
         return []
     with AnalyticsDB(analytics_db) as adb:
         return adb.competitions_loaded()
+
+
+def player_seasons(analytics_db: Path, competition: str) -> list[tuple[str, int]]:
+    """(season, match count) within one competition, newest first. [] if none."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.competition_seasons(competition)
 
 
 def has_player_events(analytics_db: Path) -> bool:
@@ -432,17 +450,27 @@ _PERCENTILE_METRICS = [
 
 
 def player_percentiles(
-    analytics_db: Path, player: str, *, min_minutes: int = 200, competition: str | None = None
+    analytics_db: Path,
+    player: str,
+    *,
+    min_minutes: int = 200,
+    competition: str | None = None,
+    season: str | None = None,
 ) -> list[MetricPercentile]:
     """A player's per-90 rates and their percentile rank within the qualifying pool.
 
     The FBref-style scouting fingerprint: for each metric, what fraction of players
     (with at least `min_minutes`) this player is at or above. [] if the player is not in
-    the pool. `competition` keeps the comparison within one league season, where
-    percentiles are far more meaningful than across a mix of tournaments.
+    the pool. `competition`/`season` keep the comparison within one league season, where
+    percentiles are far more meaningful than across a mix of tournaments and eras.
     """
     profiles = player_profiles(
-        analytics_db, top=100_000, min_minutes=min_minutes, order="minutes", competition=competition
+        analytics_db,
+        top=100_000,
+        min_minutes=min_minutes,
+        order="minutes",
+        competition=competition,
+        season=season,
     )
     target = next((p for p in profiles if p.player == player), None)
     if target is None or not profiles:

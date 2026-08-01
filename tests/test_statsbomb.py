@@ -392,5 +392,12 @@ class TestMatchMeta:
         wc = adb.player_profile("P1", competition="World Cup")
         assert wc.tackles == 1  # only match 1's single tackle
 
+        # Season filter narrows further within a competition.
+        assert dict(adb.competition_seasons("World Cup")) == {"2022": 1}
+        wc_2022 = adb.player_profiles(min_minutes=1, competition="World Cup", season="2022")
+        assert {p.player for p in wc_2022} >= {"P1"}
+        # A season that does not exist yields no rows.
+        assert adb.player_profile("P1", competition="World Cup", season="1900") is None
+
     def test_unknown_match_label_is_none(self, adb: AnalyticsDB) -> None:
         assert adb.match_label(999) is None

@@ -418,8 +418,9 @@ class TestShotMap:
         path = tmp_path / "analytics.duckdb"
         self._seed_shots(path)
         matches = shot_matches(path)
-        assert len(matches[0]) == 3  # (match_id, label, competition)
+        assert len(matches[0]) == 4  # (match_id, label, competition, season)
         assert matches[0][2] == "Other"  # no metadata seeded -> falls back honestly
+        assert matches[0][3] == ""  # season blank without metadata
 
 
 class TestForecastData:

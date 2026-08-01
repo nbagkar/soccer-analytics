@@ -132,13 +132,23 @@ _PROFILE_ORDER = {
 
 # Full profile per player: event stats (pstat) LEFT JOINed onto shot aggregates (sh), so
 # a non-shooting defender still gets a row. Column order matches PlayerProfile's fields.
-# An optional competition filter restricts BOTH sides to one competition's matches, so
-# percentiles compare like with like (a league season, not a mix of tournaments).
-def _profile_select(competition: str | None) -> tuple[str, list]:
-    filt, params = "", []
+# Optional competition/season filters restrict BOTH sides to matching matches, so
+# percentiles compare like with like (one league season, not a mix of eras).
+def _profile_select(competition: str | None, season: str | None = None) -> tuple[str, list]:
+    conditions, meta_params = [], []
     if competition:
-        filt = "WHERE match_id IN (SELECT match_id FROM match_meta WHERE competition = ?)"
-        params = [competition, competition]  # one per CTE below
+        conditions.append("competition = ?")
+        meta_params.append(competition)
+    if season:
+        conditions.append("season = ?")
+        meta_params.append(season)
+    if conditions:
+        filt = (
+            f"WHERE match_id IN (SELECT match_id FROM match_meta WHERE {' AND '.join(conditions)})"
+        )
+        params = meta_params + meta_params  # the filter appears in both CTEs below
+    else:
+        filt, params = "", []
     sql = f"""
         WITH pstat AS (
             SELECT player, mode(team) AS team, mode(position) AS position,
@@ -569,23 +579,24 @@ class AnalyticsDB:
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
-    def shot_matches_indexed(self) -> list[tuple[int, str, str, str | None]]:
-        """(match_id, label, competition, date) for matches with shots, metadata-aware.
+    def shot_matches_indexed(self) -> list[tuple[int, str, str, str, str | None]]:
+        """(match_id, label, competition, season, date) for matches with shots.
 
-        Uses the real home/away and competition from match_meta when present, falling back
-        to the aggregated team names and 'Other' so matches ingested before metadata still
-        appear. Ordered by competition then date for a grouped selector.
+        Uses the real home/away, competition and season from match_meta when present,
+        falling back to the aggregated team names, 'Other' and '' so matches ingested
+        before metadata still appear. Ordered by competition then season then date.
         """
         rows = self._con.execute(
             "SELECT s.match_id, "
             "  COALESCE(m.home_team || ' v ' || m.away_team, "
             "           string_agg(DISTINCT s.team, ' v ')) AS label, "
-            "  COALESCE(m.competition, 'Other') AS competition, m.match_date "
+            "  COALESCE(m.competition, 'Other') AS competition, "
+            "  COALESCE(m.season, '') AS season, m.match_date "
             "FROM shots s LEFT JOIN match_meta m ON m.match_id = s.match_id "
-            "GROUP BY s.match_id, m.home_team, m.away_team, m.competition, m.match_date "
-            "ORDER BY competition, m.match_date NULLS FIRST, s.match_id"
+            "GROUP BY s.match_id, m.home_team, m.away_team, m.competition, m.season, m.match_date "
+            "ORDER BY competition, season DESC, m.match_date NULLS FIRST, s.match_id"
         ).fetchall()
-        return [(r[0], r[1], r[2], r[3]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def player_leaderboard(
         self, *, limit: int = 20, min_shots: int = 3, order: str = "xg"
@@ -671,15 +682,16 @@ class AnalyticsDB:
         min_minutes: int = 90,
         order: str = "contributions",
         competition: str | None = None,
+        season: str | None = None,
     ) -> list[PlayerProfile]:
         """Full player profiles across loaded matches, ranked by `order`.
 
         `order` is one of the keys in `_PROFILE_ORDER` (goals, xg, assists, xa,
         contributions, progressive, defensive, ...). `min_minutes` drops cameos;
-        `competition` restricts to one competition's matches (comparable percentiles).
+        `competition`/`season` restrict the pool so percentiles stay era-comparable.
         """
         order_expr = _PROFILE_ORDER.get(order, _PROFILE_ORDER["contributions"])
-        select, params = _profile_select(competition)
+        select, params = _profile_select(competition, season)
         rows = self._con.execute(
             f"{select} WHERE p.minutes >= ? "
             f"ORDER BY {order_expr} DESC, p.minutes DESC LIMIT ?",  # order_expr is allowlisted
@@ -688,10 +700,10 @@ class AnalyticsDB:
         return [PlayerProfile(*r) for r in rows]
 
     def player_profile(
-        self, player: str, *, competition: str | None = None
+        self, player: str, *, competition: str | None = None, season: str | None = None
     ) -> PlayerProfile | None:
         """One player's full profile, or None if they have no event stats loaded."""
-        select, params = _profile_select(competition)
+        select, params = _profile_select(competition, season)
         rows = self._con.execute(f"{select} WHERE p.player = ?", [*params, player]).fetchall()
         return PlayerProfile(*rows[0]) if rows else None
 
@@ -722,6 +734,15 @@ class AnalyticsDB:
             "SELECT m.competition, COUNT(DISTINCT p.match_id) "
             "FROM player_match_stats p JOIN match_meta m ON m.match_id = p.match_id "
             "GROUP BY m.competition ORDER BY COUNT(DISTINCT p.match_id) DESC"
+        ).fetchall()
+
+    def competition_seasons(self, competition: str) -> list[tuple[str, int]]:
+        """(season, match count) for one competition's player-stat matches, newest first."""
+        return self._con.execute(
+            "SELECT m.season, COUNT(DISTINCT p.match_id) "
+            "FROM player_match_stats p JOIN match_meta m ON m.match_id = p.match_id "
+            "WHERE m.competition = ? GROUP BY m.season ORDER BY m.season DESC",
+            [competition],
         ).fetchall()
 
     def match_label(self, match_id: int) -> str | None:
