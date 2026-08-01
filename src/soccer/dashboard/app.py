@@ -22,6 +22,8 @@ from soccer.dashboard.data import (
     LiveSnapshot,
     analytics_available,
     analytics_snapshot,
+    forecast_slate,
+    forecast_teams,
     health_snapshot,
     live_snapshot,
     shot_map,
@@ -314,6 +316,60 @@ def _shot_chart(frame):
     return (pitch + misses + goals).properties(height=380).configure_view(strokeWidth=0)
 
 
+def _market_table(title: str, markets, *, odds: bool = True) -> str:
+    rows = []
+    for m in markets:
+        cells = f"<td>{m.name}</td><td style='text-align:right'>{m.probability:.0%}</td>"
+        if odds:
+            cells += f"<td style='text-align:right;color:#8b8b8b'>{m.fair_odds:.2f}</td>"
+        rows.append(f"<tr>{cells}</tr>")
+    head = f"<b>{title}</b>"
+    return f"{head}<table style='width:100%;font-size:0.88rem'>{''.join(rows)}</table>"
+
+
+def _render_forecast(slate) -> None:
+    st.subheader(f"{slate.home} vs {slate.away}")
+    c = st.columns(3)
+    c[0].metric(f"{slate.home} xG", f"{slate.home_expected:.2f}")
+    c[1].metric(f"{slate.away} xG", f"{slate.away_expected:.2f}")
+    x, y, p = slate.most_likely_score
+    c[2].metric("Most likely score", f"{x}-{y}", f"{p:.0%}")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(_market_table("Result (1X2)", slate.result), unsafe_allow_html=True)
+        st.markdown(_market_table("Double chance", slate.double_chance), unsafe_allow_html=True)
+        st.markdown(_market_table("Both teams to score", slate.btts), unsafe_allow_html=True)
+    with col2:
+        ou_rows = "".join(
+            f"<tr><td>Over/Under {ou.line}</td>"
+            f"<td style='text-align:right'>{ou.over:.0%}</td>"
+            f"<td style='text-align:right'>{ou.under:.0%}</td></tr>"
+            for ou in slate.over_under
+        )
+        st.markdown(
+            f"<b>Total goals lines</b><table style='width:100%;font-size:0.88rem'>"
+            f"<tr><td></td><td style='text-align:right'>Over</td>"
+            f"<td style='text-align:right'>Under</td></tr>{ou_rows}</table>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(_market_table("Clean sheet", slate.clean_sheet), unsafe_allow_html=True)
+        st.markdown(_market_table("Win to nil", slate.win_to_nil), unsafe_allow_html=True)
+    with col3:
+        st.markdown(
+            _market_table("Total goals", slate.total_goals, odds=False), unsafe_allow_html=True
+        )
+        cs_rows = "".join(
+            f"<tr><td>{x}-{y}</td><td style='text-align:right'>{p:.0%}</td></tr>"
+            for x, y, p in slate.correct_scores
+        )
+        st.markdown(
+            f"<b>Correct score</b><table style='width:100%;font-size:0.88rem'>{cs_rows}</table>",
+            unsafe_allow_html=True,
+        )
+    st.caption("Fair prices (no margin) from a Dixon-Coles model. Directional, not advice.")
+
+
 def main() -> None:
     st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
     st.title("⚽ Soccer Analytics")
@@ -323,10 +379,33 @@ def main() -> None:
         st.header("View")
         page = st.radio(
             "Page",
-            ["Live Centre", "Analytics", "Shot Map", "Data Health"],
+            ["Live Centre", "Analytics", "Forecast", "Shot Map", "Data Health"],
             label_visibility="collapsed",
         )
         st.button("↻ Refresh")
+
+    if page == "Forecast":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            return
+        with st.sidebar:
+            labels = {f"{s} / {d}": (s, d) for s, d, n in available}
+            picked = st.selectbox("Season / division", list(labels))
+            season, division = labels[picked]
+            teams = forecast_teams(settings.analytics_db, season, division)
+            home = st.selectbox("Home", teams, index=0)
+            away = st.selectbox("Away", teams, index=min(1, len(teams) - 1))
+            mle = st.toggle("Dixon-Coles model", value=True)
+        if home == away:
+            st.info("Pick two different teams.")
+        else:
+            slate = forecast_slate(settings.analytics_db, season, division, home, away, mle=mle)
+            if slate is None:
+                st.info("Could not forecast that matchup.")
+            else:
+                _render_forecast(slate)
+        return
 
     if page == "Analytics":
         available = analytics_available(settings.analytics_db)

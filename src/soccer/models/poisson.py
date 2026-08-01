@@ -99,6 +99,22 @@ class PoissonModel:
         return scoreline_forecast(home, away, lam, mu, self.rho, top_n=top_n)
 
 
+def score_grid(lam: float, mu: float, rho: float) -> dict[tuple[int, int], float]:
+    """Normalized probability of every scoreline (home_goals, away_goals).
+
+    The full joint distribution the forecast is built from. Every betting market -- 1X2,
+    over/under, both-teams-to-score, correct score -- is a sum over cells of this grid,
+    so exposing it lets `models/markets.py` derive them all without re-deriving the model.
+    """
+    grid: dict[tuple[int, int], float] = {}
+    for x in range(MAX_GOALS + 1):
+        for y in range(MAX_GOALS + 1):
+            p = _poisson_pmf(x, lam) * _poisson_pmf(y, mu) * _dc_tau(x, y, lam, mu, rho)
+            grid[(x, y)] = max(p, 0.0)  # tau can push tiny cells slightly negative
+    total = sum(grid.values())
+    return {k: v / total for k, v in grid.items()}  # renormalize after tau
+
+
 def scoreline_forecast(
     home: str, away: str, lam: float, mu: float, rho: float, *, top_n: int = 5
 ) -> MatchForecast:
@@ -107,14 +123,7 @@ def scoreline_forecast(
     Shared by the ratio-method Poisson model and the Dixon-Coles MLE model so both turn
     (lambda, mu, rho) into a forecast identically.
     """
-    grid: dict[tuple[int, int], float] = {}
-    for x in range(MAX_GOALS + 1):
-        for y in range(MAX_GOALS + 1):
-            p = _poisson_pmf(x, lam) * _poisson_pmf(y, mu) * _dc_tau(x, y, lam, mu, rho)
-            grid[(x, y)] = max(p, 0.0)  # tau can push tiny cells slightly negative
-
-    total = sum(grid.values())
-    grid = {k: v / total for k, v in grid.items()}  # renormalize after tau
+    grid = score_grid(lam, mu, rho)
 
     prob_home = sum(p for (x, y), p in grid.items() if x > y)
     prob_draw = sum(p for (x, y), p in grid.items() if x == y)

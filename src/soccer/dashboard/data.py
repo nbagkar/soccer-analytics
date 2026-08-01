@@ -259,3 +259,35 @@ def shot_map(analytics_db: Path, match_id: int) -> ShotMapData | None:
             (lbl for mid, lbl in adb.shot_match_labels() if mid == match_id), str(match_id)
         )
     return ShotMapData(match_id=match_id, label=label, shots=shots, team_xg=team_xg)
+
+
+def forecast_teams(analytics_db: Path, season: str, division: str) -> list[str]:
+    """Display names available to forecast in a season/division, for the selectors."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        outcomes = adb.outcomes_for(season, division)
+    names = {o.home for o in outcomes} | {o.away for o in outcomes}
+    return sorted(names)
+
+
+def forecast_slate(
+    analytics_db: Path, season: str, division: str, home: str, away: str, *, mle: bool = True
+):
+    """Full market slate for a matchup, or None if a team is unknown. mle -> Dixon-Coles."""
+    from soccer.domain.names import normalize_name
+    from soccer.models.dixon_coles import fit_dixon_coles
+    from soccer.models.markets import compute_markets
+    from soccer.models.poisson import fit_poisson
+
+    with AnalyticsDB(analytics_db) as adb:
+        outcomes = adb.outcomes_for(season, division)
+    if not outcomes:
+        return None
+    names = {o.home_norm: o.home for o in outcomes} | {o.away_norm: o.away for o in outcomes}
+    model = fit_dixon_coles(outcomes) if mle else fit_poisson(outcomes)
+    hn, an = normalize_name(home), normalize_name(away)
+    if hn not in model.strengths or an not in model.strengths:
+        return None
+    lam, mu = model.expected_goals(hn, an)
+    return compute_markets(names.get(hn, home), names.get(an, away), lam, mu, model.rho)

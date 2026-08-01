@@ -286,6 +286,35 @@ class TestShotMap:
         assert shot_map(path, 999) is None
 
 
+class TestForecastData:
+    def test_forecast_teams_lists_names(self, tmp_path) -> None:
+        from soccer.dashboard.data import forecast_teams
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        teams = forecast_teams(path, "2526", "E0")
+        assert "Arsenal" in teams and "Brentford" in teams
+
+    def test_forecast_slate_returns_markets(self, tmp_path) -> None:
+        from soccer.dashboard.data import forecast_slate
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        slate = forecast_slate(path, "2526", "E0", "Arsenal", "Brentford")
+        assert slate is not None
+        assert sum(m.probability for m in slate.result) == pytest.approx(1.0, abs=1e-6)
+        # Arsenal (strong) favoured over Brentford (weak).
+        result = {m.name: m.probability for m in slate.result}
+        assert result["Arsenal"] > result["Brentford"]
+
+    def test_forecast_slate_unknown_team_is_none(self, tmp_path) -> None:
+        from soccer.dashboard.data import forecast_slate
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        assert forecast_slate(path, "2526", "E0", "Arsenal", "Nobody") is None
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -339,6 +368,9 @@ class TestAppSmoke:
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Analytics").run()
             assert not at.exception, f"Analytics raised: {at.exception}"
+
+            at.radio[0].set_value("Forecast").run()
+            assert not at.exception, f"Forecast raised: {at.exception}"
 
             # Shot Map page needs shots; seed and visit.
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
