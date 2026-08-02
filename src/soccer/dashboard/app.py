@@ -463,22 +463,27 @@ def _render_season(briefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
-def _league_season_pickers(available: list[tuple[str, str, int]]) -> tuple[str, str]:
-    """Two dependent sidebar selectors — league, then season — returning (season, division).
+def _league_season_pickers(available: list[tuple[str, str, int]], *, extra: int = 0) -> tuple:
+    """Dependent League + Season selectors laid out as a row on the page.
 
-    The season list follows the chosen league, newest first, with its latest entry tagged
-    'latest'. Shared widget keys let the choice persist as you move between pages.
+    Returns (season, division). Pass `extra` to reserve that many trailing columns for a
+    page's own controls (the returned tuple then also yields those columns). The season
+    list follows the chosen league, newest first with its latest entry tagged; shared
+    widget keys persist the choice across pages.
     """
     by_league: dict[str, list] = {}
     for season, division, _n in available:
         entry = by_league.setdefault(division_name(division), [division, []])
         entry[1].append(season)
 
-    league = st.selectbox("League", sorted(by_league), key="ls_league")
+    cols = st.columns(2 + extra)
+    league = cols[0].selectbox("League", sorted(by_league), key="ls_league")
     division, seasons = by_league[league]
     seasons = sorted(set(seasons), reverse=True)
     tagged = {f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)}
-    season = tagged[st.selectbox("Season", list(tagged), key="ls_season")]
+    season = tagged[cols[1].selectbox("Season", list(tagged), key="ls_season")]
+    if extra:
+        return season, division, cols[2:]
     return season, division
 
 
@@ -1245,26 +1250,30 @@ def main() -> None:
                 )
             return
 
-        with st.sidebar:
-            comps = player_competitions(settings.analytics_db)
-            competition, season, scope = None, None, "All competitions"
-            if len(comps) > 1:
-                clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
-                comp_choice = st.selectbox("Competition", list(clabels))
-                competition = clabels[comp_choice]
-                if competition:
-                    scope = competition
+        comps = player_competitions(settings.analytics_db)
+        competition, season, scope = None, None, "All competitions"
+        row = st.columns(4)
+        slot = 0
+        if len(comps) > 1:
+            clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
+            comp_choice = row[slot].selectbox("Competition", list(clabels))
+            slot += 1
+            competition = clabels[comp_choice]
             if competition:
-                seasons = player_seasons(settings.analytics_db, competition)
-                if len(seasons) > 1:
-                    slabels = {"All seasons": None} | {f"{s}  ({n})": s for s, n in seasons}
-                    season = slabels[st.selectbox("Season", list(slabels))]
-                    if season:
-                        scope = f"{competition} {season}"
-            view = st.segmented_control(
-                "View", ["Leaderboard", "Player profile"], default="Leaderboard"
-            )
-            min_minutes = st.slider("Min minutes", 90, 900, 270, step=30)
+                scope = competition
+        if competition:
+            seasons = player_seasons(settings.analytics_db, competition)
+            if len(seasons) > 1:
+                slabels = {"All seasons": None} | {f"{s}  ({n})": s for s, n in seasons}
+                season = slabels[row[slot].selectbox("Season", list(slabels))]
+                slot += 1
+                if season:
+                    scope = f"{competition} {season}"
+        view = row[slot].segmented_control(
+            "View", ["Leaderboard", "Player profile"], default="Leaderboard"
+        )
+        slot += 1
+        min_minutes = row[slot].slider("Min minutes", 90, 900, 270, step=30)
 
         if view == "Player profile":
             pool = player_profiles(
@@ -1276,11 +1285,10 @@ def main() -> None:
                 season=season,
             )
             if not pool:
-                st.info("No players clear that minutes threshold. Lower it in the sidebar.")
+                st.info("No players clear that minutes threshold. Lower it above.")
                 return
-            with st.sidebar:
-                names = [p.player for p in pool]
-                picked = st.selectbox("Player", names)
+            names = [p.player for p in pool]
+            picked = st.selectbox("Player", names)
             profile = player_profile(
                 settings.analytics_db, picked, competition=competition, season=season
             )
@@ -1296,9 +1304,9 @@ def main() -> None:
             else:
                 _render_player_profile(profile, pcts, pool_label=scope)
         else:
-            with st.sidebar:
-                rank_label = st.selectbox("Rank by", list(_RANK_OPTIONS))
-                per90 = st.toggle("Per 90 minutes", value=False)
+            rc = st.columns([3, 1])
+            rank_label = rc[0].selectbox("Rank by", list(_RANK_OPTIONS))
+            per90 = rc[1].toggle("Per 90 minutes", value=False)
             profiles = player_profiles(
                 settings.analytics_db,
                 top=40,
@@ -1308,7 +1316,7 @@ def main() -> None:
                 season=season,
             )
             if not profiles:
-                st.info("No players clear that minutes threshold. Lower it in the sidebar.")
+                st.info("No players clear that minutes threshold. Lower it above.")
             else:
                 _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
         return
@@ -1325,12 +1333,12 @@ def main() -> None:
             "Explore any matchup from a completed season (the latest is the freshest data). "
             "For the upcoming season's real fixtures, see the **Fixtures** page."
         )
-        with st.sidebar:
-            season, division = _league_season_pickers(available)
-            teams = forecast_teams(settings.analytics_db, season, division)
-            home = st.selectbox("Home", teams, index=0)
-            away = st.selectbox("Away", teams, index=min(1, len(teams) - 1))
-            mle = st.toggle("Dixon-Coles model", value=True)
+        season, division = _league_season_pickers(available)
+        teams = forecast_teams(settings.analytics_db, season, division)
+        fc = st.columns([2, 2, 1])
+        home = fc[0].selectbox("Home", teams, index=0)
+        away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
+        mle = fc[2].toggle("Dixon-Coles model", value=True)
         if home == away:
             st.info("Pick two different teams.")
         else:
@@ -1355,8 +1363,7 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        with st.sidebar:
-            season, division = _league_season_pickers(available)
+        season, division = _league_season_pickers(available)
         snap = _cached_analytics(str(settings.analytics_db), season, division)
         if snap is None:
             st.info("No results for that selection.")
@@ -1372,9 +1379,8 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        with st.sidebar:
-            season, division = _league_season_pickers(available)
-            last_n = st.slider("Form window (matches)", 3, 10, 5)
+        season, division, extra = _league_season_pickers(available, extra=1)
+        last_n = extra[0].slider("Form window (matches)", 3, 10, 5)
         forms = team_form(settings.analytics_db, season, division, last_n=last_n)
         if not forms:
             st.info("No results for that selection.")
@@ -1390,8 +1396,7 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        with st.sidebar:
-            season, division = _league_season_pickers(available)
+        season, division = _league_season_pickers(available)
         records = season_records(settings.analytics_db, season, division)
         if records is None:
             st.info("No results for that selection.")
@@ -1407,9 +1412,8 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        with st.sidebar:
-            # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
-            season, division = _league_season_pickers(available)
+        # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
+        season, division = _league_season_pickers(available)
         briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
         if briefing is None:
             st.info("No results for that selection.")
@@ -1425,17 +1429,17 @@ def main() -> None:
                 icon=":material/groups:",
             )
             return
-        with st.sidebar:
-            comps = sorted({comp for _mid, _lbl, comp, _s in matches})
-            if len(comps) > 1:
-                chosen = st.selectbox("Competition", comps)
-                matches = [m for m in matches if m[2] == chosen]
-            seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
-            if len(seasons) > 1:
-                chosen_season = st.selectbox("Season", seasons)
-                matches = [m for m in matches if m[3] == chosen_season]
-            labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
-            picked = st.selectbox("Match", list(labels))
+        comps = sorted({comp for _mid, _lbl, comp, _s in matches})
+        fcols = st.columns([1, 1, 2])
+        if len(comps) > 1:
+            chosen = fcols[0].selectbox("Competition", comps)
+            matches = [m for m in matches if m[2] == chosen]
+        seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
+        if len(seasons) > 1:
+            chosen_season = fcols[1].selectbox("Season", seasons)
+            matches = [m for m in matches if m[3] == chosen_season]
+        labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
+        picked = fcols[2].selectbox("Match", list(labels))
         data = shot_map(settings.analytics_db, labels[picked])
         if data is None:
             st.info("No shots for that match.")
@@ -1453,10 +1457,10 @@ def main() -> None:
     with LiveDB(settings.live_db) as db:
         if page == "Live Centre":
             snap = live_snapshot(db)  # unfiltered KPIs; filters applied below
-            with st.sidebar:
-                comps = sorted({c for c, _ in snap.competition_counts})
-                only_live = st.toggle("In play only", value=False)
-                chosen = st.selectbox("Competition", ["All", *comps])
+            comps = sorted({c for c, _ in snap.competition_counts})
+            fcols = st.columns([1, 2])
+            only_live = fcols[0].toggle("In play only", value=False)
+            chosen = fcols[1].selectbox("Competition", ["All", *comps])
             _render_live(
                 live_snapshot(
                     db,
