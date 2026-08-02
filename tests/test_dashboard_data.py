@@ -452,6 +452,72 @@ class TestDataActions:
             "upcoming": 0,
         }
 
+    def test_load_full_history_honours_depth_and_is_idempotent(self, tmp_path, monkeypatch) -> None:
+        # A fake source with history for one league only: every requested season yields one
+        # match, other leagues 404 (return []). Proves the depth flows through and that a
+        # second run replaces units rather than duplicating them.
+        from datetime import date
+
+        from soccer.config import Settings
+        from soccer.dashboard import actions
+        from soccer.domain.names import normalize_name
+        from soccer.sources.football_data_co_uk import MatchResult
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        def mr(season: str) -> MatchResult:
+            return MatchResult(
+                season=season,
+                division="E0",
+                match_date=date(2020, 1, 1),
+                home="Arsenal",
+                away="Chelsea",
+                home_norm=normalize_name("Arsenal"),
+                away_norm=normalize_name("Chelsea"),
+                fthg=2,
+                ftag=0,
+                ftr="H",
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=None,
+                away_shots_target=None,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
+            )
+
+        class _FakeSource:
+            def __init__(self, *a, **k) -> None: ...
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a) -> bool:
+                return False
+
+            def fetch_division(self, season, division):
+                return [mr(season)] if division == "E0" else []
+
+            def fetch_new_league(self, code, *, recent_seasons):
+                return []
+
+        monkeypatch.setattr(actions, "FootballDataCoUk", _FakeSource)
+        settings = Settings(data_dir=tmp_path)
+
+        actions.load_full_history(settings, seasons=6)
+        with AnalyticsDB(settings.analytics_db) as adb:
+            loaded = adb.seasons_loaded()
+        assert len({s for s, d, _n in loaded if d == "E0"}) == 6  # depth honoured
+        assert sum(n for _s, _d, n in loaded) == 6  # one match per season, no others
+
+        actions.load_full_history(settings, seasons=6)  # re-run
+        with AnalyticsDB(settings.analytics_db) as adb:
+            assert sum(n for _s, _d, n in adb.seasons_loaded()) == 6  # idempotent, not 12
+
 
 class TestShotMap:
     def _seed_shots(self, path) -> None:

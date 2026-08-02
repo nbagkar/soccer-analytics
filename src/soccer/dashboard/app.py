@@ -158,6 +158,17 @@ def _render_data_manager(settings) -> None:
         if st.button("Download recent seasons", key="add_league"):
             with st.spinner(f"Downloading {choice}…"):
                 st.success(actions.add_league_history(settings, actions.LEAGUE_CHOICES[choice]))
+        st.caption(
+            f"Or go deep: every league's results back to the 1990s "
+            f"(~{actions.FULL_HISTORY_SEASONS} seasons). Richer tables, forecasts and records."
+        )
+        if st.button("Load full history (all leagues)", key="add_full_history"):
+            bar = st.progress(0.0, "Starting…")
+            msg = actions.load_full_history(
+                settings, on_progress=lambda d, t: bar.progress(d / t, f"league {d}/{t}")
+            )
+            bar.empty()
+            st.success(msg)
 
     with st.expander("Add player data (StatsBomb events)", icon=":material/groups:"):
         st.caption(

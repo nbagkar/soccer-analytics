@@ -118,19 +118,19 @@ def _recent_seasons(n: int = 3) -> list[str]:
     return [f"{(start - i) % 100:02d}{(start - i + 1) % 100:02d}" for i in range(n)]
 
 
-def add_league_history(settings: Settings, division: str) -> str:
+def add_league_history(settings: Settings, division: str, *, seasons: int = 3) -> str:
     """Download recent seasons of a league's results (football-data.co.uk) into the store."""
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
     total = 0
     with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
         if division in NEW_LEAGUE_CODES:
-            results = source.fetch_new_league(division, recent_seasons=3)
+            results = source.fetch_new_league(division, recent_seasons=seasons)
             if results:
                 adb.load_results(results)
                 total += len(results)
         else:
-            for season in _recent_seasons(3):
+            for season in _recent_seasons(seasons):
                 results = source.fetch_division(season, division)
                 if results:
                     adb.load_results(results)
@@ -138,6 +138,41 @@ def add_league_history(settings: Settings, division: str) -> str:
     if not total:
         return f"No data available yet for {division_name(division)}."
     return f"Added {total} matches for {division_name(division)}."
+
+
+# football-data.co.uk carries the major leagues back to 1993/94; deeper history means richer
+# tables, forecasts, form and records. (Shot/event data is separately capped by StatsBomb.)
+FULL_HISTORY_SEASONS = 30
+
+
+def load_full_history(
+    settings: Settings, *, seasons: int = FULL_HISTORY_SEASONS, on_progress: Callable | None = None
+) -> str:
+    """Backfill up to `seasons` of results for every starter league, idempotently.
+
+    Each (season, division) unit is replaced on load, so re-running never duplicates. A
+    season a league did not yet have simply 404s and is skipped -- so this reaches as far
+    back as each league's data actually goes.
+    """
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+    total = 0
+    with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
+        for i, division in enumerate(STARTER_LEAGUES, 1):
+            if division in NEW_LEAGUE_CODES:
+                results = source.fetch_new_league(division, recent_seasons=seasons)
+                if results:
+                    adb.load_results(results)
+                    total += len(results)
+            else:
+                for season in _recent_seasons(seasons):
+                    results = source.fetch_division(season, division)
+                    if results:
+                        adb.load_results(results)
+                        total += len(results)
+            if on_progress:
+                on_progress(i, len(STARTER_LEAGUES))
+    return f"Loaded {total} matches of history across {len(STARTER_LEAGUES)} leagues."
 
 
 def remove_league(settings: Settings, division: str) -> str:
