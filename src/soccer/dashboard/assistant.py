@@ -84,8 +84,8 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         return _help()
     if not Path(analytics_db).exists():
         return Reply(
-            "I don't have any data loaded yet. Head to the **Home** page and use "
-            "**Update data** to download some — no terminal needed."
+            "I don't have any data loaded yet. Head to the **Home** page to download "
+            "some — no terminal needed."
         )
 
     for handler in (
@@ -255,8 +255,8 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
     with AnalyticsDB(analytics_db) as adb:
         if adb.player_stats_count() == 0:
             return Reply(
-                "I don't have per-player data loaded yet. On the **Home** page, use "
-                "**Update data → Load player data** to add some."
+                "I don't have per-player data loaded yet. Go to "
+                "**Home → Add player data** to add some."
             )
         competition = _resolve_statsbomb_competition(q, adb)
         profiles = adb.player_profiles(
@@ -483,9 +483,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     ):
         return None
     if live_db is None or not Path(live_db).exists():
-        return Reply(
-            "No fixtures loaded yet. On the **Home** page use **Update data → Update fixtures**."
-        )
+        return Reply("No fixtures loaded yet. Go to **Home → Update fixtures**.")
 
     from soccer.dashboard.data import fixture_forecasts
 
@@ -493,9 +491,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         f for f in fixture_forecasts(live_db, analytics_db, limit=200) if f.slate is not None
     ]
     if not fixtures:
-        return Reply(
-            "No upcoming fixtures with a forecast yet — try **Update data → Update fixtures**."
-        )
+        return Reply("No upcoming fixtures with a forecast yet — try **Home → Update fixtures**.")
     rows = []
     for f in fixtures[:8]:
         x, y, _ = f.slate.most_likely_score

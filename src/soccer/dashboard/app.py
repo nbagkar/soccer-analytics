@@ -76,6 +76,72 @@ def _marker(view: MatchView) -> tuple[str, str]:
     return colour, label
 
 
+def _go(page: str) -> None:
+    """Switch the sidebar navigation to a page (used by call-to-action buttons)."""
+    st.session_state.nav = page
+    st.rerun()
+
+
+def _render_home(settings) -> None:
+    from soccer.dashboard import actions
+
+    st.markdown(
+        "Welcome! This is your local football intelligence centre — everything runs on "
+        "your machine. Ask questions in plain English, browse forecasts, tables, form and "
+        "player stats, and top up the data below. **No terminal needed.**"
+    )
+    status = actions.data_status(settings)
+    c = st.columns(4)
+    c[0].metric("Leagues", status["leagues"], border=True)
+    c[1].metric("History matches", f"{status['history_matches']:,}", border=True)
+    c[2].metric("Player datasets", status["player_competitions"], border=True)
+    c[3].metric("Upcoming fixtures", status["upcoming"], border=True)
+
+    left, right = st.columns(2)
+    with left, st.container(border=True):
+        st.markdown("#### :material/rocket_launch: Start here")
+        if st.button("Ask the assistant", icon=":material/chat:", width="stretch", type="primary"):
+            _go("Assistant")
+        if st.button("See upcoming fixtures", icon=":material/event_upcoming:", width="stretch"):
+            _go("Fixtures")
+        if st.button("Season predictions", icon=":material/emoji_events:", width="stretch"):
+            _go("Season")
+    with right, st.container(border=True):
+        st.markdown("#### :material/refresh: Keep it current")
+        if st.button("Refresh live scores", icon=":material/bolt:", width="stretch"):
+            with st.spinner("Fetching the latest scores…"):
+                st.toast(actions.refresh_scores(settings), icon="✅")
+            _go("Home")
+        if st.button("Update fixtures", icon=":material/event:", width="stretch"):
+            with st.spinner("Fetching upcoming fixtures…"):
+                st.toast(actions.update_fixtures(settings), icon="✅")
+            _go("Home")
+
+    with st.expander("Add a league (results & forecasts)", icon=":material/add_circle:"):
+        choice = st.selectbox("Which league?", list(actions.LEAGUE_CHOICES))
+        if st.button("Download recent seasons", key="add_league"):
+            with st.spinner(f"Downloading {choice}…"):
+                st.success(actions.add_league_history(settings, actions.LEAGUE_CHOICES[choice]))
+
+    with st.expander("Add player data (StatsBomb events)", icon=":material/groups:"):
+        st.caption(
+            "StatsBomb open data — free for research, logo attribution required. "
+            "Larger packs take a few minutes."
+        )
+        pack = st.selectbox("Which dataset?", list(actions.EVENT_PACKS))
+        if st.button("Load player data", key="add_events"):
+            comp_id, season_id, _n = actions.EVENT_PACKS[pack]
+            bar = st.progress(0.0, "Starting…")
+            msg = actions.load_event_pack(
+                settings,
+                comp_id,
+                season_id,
+                on_progress=lambda d, t: bar.progress(d / t, f"{d}/{t} matches"),
+            )
+            bar.empty()
+            st.success(msg)
+
+
 def _render_assistant(settings) -> None:
     from soccer.dashboard.assistant import answer as assistant_answer
 
@@ -142,7 +208,10 @@ def _render_live(snap: LiveSnapshot) -> None:
             icon="⚠️",
         )
     if k.total == 0:
-        st.info("No matches stored yet. Run `soccer ingest`, then refresh.")
+        st.info(
+            "No scores yet. Go to **Home** → **Refresh live scores** to fetch them.",
+            icon=":material/bolt:",
+        )
         return
 
     rows = []
@@ -987,8 +1056,9 @@ def _render_fixtures(fixtures) -> None:
     )
     if not forecastable:
         st.info(
-            "No forecastable fixtures yet. Run `soccer ingest` for fixtures and "
-            "`soccer ingest-history` to fit the league models."
+            "No forecastable fixtures yet. Go to **Home** to update fixtures and add a "
+            "league, then check back.",
+            icon=":material/event_upcoming:",
         )
         return
 
@@ -1048,7 +1118,11 @@ def _pct_cell(p: float, is_max: bool) -> str:
 # Per-page identity: a Material Symbol icon and a one-line description, for a consistent
 # header on every page and cleaner navigation.
 _PAGE_META = {
-    "Assistant": (":material/chat:", "Ask questions about your football data in plain English."),
+    "Home": (":material/home:", "Your starting point — status, quick actions, and data setup."),
+    "Assistant": (
+        ":material/chat:",
+        "Ask questions about your football data in plain English.",
+    ),
     "Live Centre": (
         ":material/bolt:",
         "Live and recent scores across every ingested competition.",
@@ -1093,6 +1167,7 @@ def main() -> None:
         page = st.radio(
             "Page",
             [
+                "Home",
                 "Assistant",
                 "Live Centre",
                 "Fixtures",
@@ -1106,9 +1181,14 @@ def main() -> None:
                 "Data Health",
             ],
             label_visibility="collapsed",
+            key="nav",
         )
 
     _page_header(page)
+
+    if page == "Home":
+        _render_home(settings)
+        return
 
     if page == "Assistant":
         _render_assistant(settings)
@@ -1126,8 +1206,8 @@ def main() -> None:
                 _render_players(rows)
             else:
                 st.info(
-                    "No event data yet. Run `soccer ingest-events --competition 43 --season 106`, "
-                    "then `soccer ingest-events --from-raw`, and reload."
+                    "No player data yet. Go to **Home** → **Add player data** to load some.",
+                    icon=":material/groups:",
                 )
             return
 
@@ -1202,7 +1282,10 @@ def main() -> None:
     if page == "Forecast":
         available = analytics_available(settings.analytics_db)
         if not available:
-            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            st.info(
+                "No league data yet. Go to **Home** → **Add a league** to download some.",
+                icon=":material/download:",
+            )
             return
         st.caption(
             "Explore any matchup from a completed season (the latest is the freshest data). "
@@ -1233,7 +1316,10 @@ def main() -> None:
     if page == "Analytics":
         available = analytics_available(settings.analytics_db)
         if not available:
-            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            st.info(
+                "No league data yet. Go to **Home** → **Add a league** to download some.",
+                icon=":material/download:",
+            )
             return
         with st.sidebar:
             season, division = _league_season_pickers(available)
@@ -1247,7 +1333,10 @@ def main() -> None:
     if page == "Trends":
         available = analytics_available(settings.analytics_db)
         if not available:
-            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            st.info(
+                "No league data yet. Go to **Home** → **Add a league** to download some.",
+                icon=":material/download:",
+            )
             return
         with st.sidebar:
             season, division = _league_season_pickers(available)
@@ -1262,7 +1351,10 @@ def main() -> None:
     if page == "Records":
         available = analytics_available(settings.analytics_db)
         if not available:
-            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            st.info(
+                "No league data yet. Go to **Home** → **Add a league** to download some.",
+                icon=":material/download:",
+            )
             return
         with st.sidebar:
             season, division = _league_season_pickers(available)
@@ -1276,7 +1368,10 @@ def main() -> None:
     if page == "Season":
         available = analytics_available(settings.analytics_db)
         if not available:
-            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            st.info(
+                "No league data yet. Go to **Home** → **Add a league** to download some.",
+                icon=":material/download:",
+            )
             return
         with st.sidebar:
             # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
@@ -1291,7 +1386,10 @@ def main() -> None:
     if page == "Shot Map":
         matches = shot_matches(settings.analytics_db)
         if not matches:
-            st.info("No event data yet. Run `soccer ingest-events --match <id>`, then reload.")
+            st.info(
+                "No match data yet. Go to **Home** → **Add player data** to load some.",
+                icon=":material/groups:",
+            )
             return
         with st.sidebar:
             comps = sorted({comp for _mid, _lbl, comp, _s in matches})
@@ -1312,7 +1410,10 @@ def main() -> None:
         return
 
     if not settings.live_db.exists():
-        st.info("No live database yet. Run `soccer ingest` to populate it, then reload.")
+        st.info(
+            "No data yet. Go to **Home** → **Refresh live scores** to get started.",
+            icon=":material/bolt:",
+        )
         return
 
     with LiveDB(settings.live_db) as db:

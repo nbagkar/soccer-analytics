@@ -428,6 +428,31 @@ class TestSeasonRecords:
         assert season_records(path, "9999", "ZZ") is None
 
 
+class TestDataActions:
+    def test_status_counts_loaded_leagues(self, tmp_path) -> None:
+        from soccer.config import Settings
+        from soccer.dashboard.actions import data_status
+
+        settings = Settings(data_dir=tmp_path)
+        seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea"])
+        status = data_status(settings)
+        assert status["leagues"] == 1
+        assert status["history_matches"] == 2  # two teams, home and away
+        assert status["player_competitions"] == 0
+
+    def test_status_empty_when_nothing_loaded(self, tmp_path) -> None:
+        from soccer.config import Settings
+        from soccer.dashboard.actions import data_status
+
+        status = data_status(Settings(data_dir=tmp_path / "empty"))
+        assert status == {
+            "leagues": 0,
+            "history_matches": 0,
+            "player_competitions": 0,
+            "upcoming": 0,
+        }
+
+
 class TestShotMap:
     def _seed_shots(self, path) -> None:
         from soccer.sources.statsbomb import Shot
@@ -702,7 +727,7 @@ class TestAppSmoke:
             app_path = str(files("soccer.dashboard") / "app.py")
             # Generous timeout: the first Streamlit run in a process pays cold-start.
             at = AppTest.from_file(app_path, default_timeout=120).run()
-            assert not at.exception, f"Assistant (default) raised: {at.exception}"
+            assert not at.exception, f"Home (default) raised: {at.exception}"
 
             at.radio[0].set_value("Live Centre").run()
             assert not at.exception, f"Live Centre raised: {at.exception}"
