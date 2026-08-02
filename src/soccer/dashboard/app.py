@@ -291,6 +291,22 @@ def _render_season(briefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
+def _league_season_options(available: list[tuple[str, str, int]]) -> dict:
+    """Selector labels for league/season slices: grouped by league, newest first, and the
+    most-recent season of each league tagged 'latest' so it never reads as stale."""
+    latest: dict[str, str] = {}
+    for season, division, _n in available:
+        if division not in latest or season > latest[division]:
+            latest[division] = season
+    ordered = sorted(available, key=lambda t: t[0], reverse=True)
+    ordered = sorted(ordered, key=lambda t: division_name(t[1]))
+    labels: dict = {}
+    for season, division, _n in ordered:
+        tag = " · latest" if season == latest[division] else ""
+        labels[f"{division_name(division)} - {season_label(season)}{tag}"] = (season, division)
+    return labels
+
+
 def _render_records(records) -> None:
     st.subheader("Records & streaks")
     st.caption(
@@ -1072,10 +1088,12 @@ def main() -> None:
         if not available:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
+        st.caption(
+            "Explore any matchup from a completed season (the latest is the freshest data). "
+            "For the upcoming season's real fixtures, see the **Fixtures** page."
+        )
         with st.sidebar:
-            options = sorted(available, key=lambda t: t[0], reverse=True)
-            options = sorted(options, key=lambda t: division_name(t[1]))
-            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            labels = _league_season_options(available)
             picked = st.selectbox("League / season", list(labels))
             season, division = labels[picked]
             teams = forecast_teams(settings.analytics_db, season, division)
@@ -1104,11 +1122,7 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            options = sorted(available, key=lambda t: t[0], reverse=True)
-            options = sorted(options, key=lambda t: division_name(t[1]))
-            labels = {
-                f"{division_name(d)} - {season_label(s)}  ({n})": (s, d) for s, d, n in options
-            }
+            labels = _league_season_options(available)
             picked = st.selectbox("League / season", list(labels))
         season, division = labels[picked]
         snap = _cached_analytics(str(settings.analytics_db), season, division)
@@ -1124,9 +1138,7 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            options = sorted(available, key=lambda t: t[0], reverse=True)
-            options = sorted(options, key=lambda t: division_name(t[1]))
-            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            labels = _league_season_options(available)
             picked = st.selectbox("League / season", list(labels))
             last_n = st.slider("Form window (matches)", 3, 10, 5)
         season, division = labels[picked]
@@ -1143,9 +1155,7 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            options = sorted(available, key=lambda t: t[0], reverse=True)
-            options = sorted(options, key=lambda t: division_name(t[1]))
-            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            labels = _league_season_options(available)
             picked = st.selectbox("League / season", list(labels))
         season, division = labels[picked]
         records = season_records(settings.analytics_db, season, division)
@@ -1162,9 +1172,7 @@ def main() -> None:
             return
         with st.sidebar:
             # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
-            options = sorted(available, key=lambda t: t[0], reverse=True)
-            options = sorted(options, key=lambda t: division_name(t[1]))
-            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            labels = _league_season_options(available)
             picked = st.selectbox("League / season", list(labels))
         season, division = labels[picked]
         briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
