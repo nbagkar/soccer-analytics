@@ -129,8 +129,8 @@ def _render_home(settings) -> None:
             _go("Assistant")
         if st.button("See upcoming fixtures", icon=":material/event_upcoming:", width="stretch"):
             _go("Fixtures")
-        if st.button("Season predictions", icon=":material/emoji_events:", width="stretch"):
-            _go("Season")
+        if st.button("Predict scores & tables", icon=":material/insights:", width="stretch"):
+            _go("Predictor")
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
         if st.button("Refresh live scores", icon=":material/bolt:", width="stretch"):
@@ -1175,8 +1175,7 @@ _NAV = [
     ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Fixtures", "Upcoming matches", ":material/event_upcoming:", "Fixtures with predicted scores"),
-    ("Forecast", "Match predictor", ":material/insights:", "Odds and a likely score for a matchup"),
-    ("Season", "Season predictor", ":material/emoji_events:", "Title, top-four, relegation odds"),
+    ("Predictor", "Predictor", ":material/insights:", "Match scores and season odds"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, power rank, title odds"),
     ("Trends", "Form guide", ":material/trending_up:", "Who's hot and who's cold right now"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
@@ -1321,7 +1320,7 @@ def main() -> None:
                 _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
         return
 
-    if page == "Forecast":
+    if page == "Predictor":
         available = analytics_available(settings.analytics_db)
         if not available:
             st.info(
@@ -1329,30 +1328,44 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        st.caption(
-            "Explore any matchup from a completed season (the latest is the freshest data). "
-            "For the upcoming season's real fixtures, see the **Fixtures** page."
-        )
+        # One league/season pick drives both views; the tabs just change the question.
         season, division = _league_season_pickers(available)
-        teams = forecast_teams(settings.analytics_db, season, division)
-        fc = st.columns([2, 2, 1])
-        home = fc[0].selectbox("Home", teams, index=0)
-        away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
-        mle = fc[2].toggle("Dixon-Coles model", value=True)
-        if home == away:
-            st.info("Pick two different teams.")
-        else:
-            slate = forecast_slate(settings.analytics_db, season, division, home, away, mle=mle)
-            if slate is None:
-                st.info("Could not forecast that matchup.")
+        match_tab, season_tab = st.tabs(["Match", "Season"])
+
+        with match_tab:
+            st.caption(
+                "Odds and a likely score for any matchup in this slice. "
+                "For the upcoming season's real fixtures, see **Upcoming matches**."
+            )
+            teams = forecast_teams(settings.analytics_db, season, division)
+            fc = st.columns([2, 2, 1])
+            home = fc[0].selectbox("Home", teams, index=0)
+            away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
+            mle = fc[2].toggle("Dixon-Coles model", value=True)
+            if home == away:
+                st.info("Pick two different teams.")
             else:
-                _render_forecast(slate)
-                st.divider()
-                _render_ev_calculator(slate)
-                report = _cached_market_edge(str(settings.analytics_db), season, division)
-                if report is not None:
+                slate = forecast_slate(settings.analytics_db, season, division, home, away, mle=mle)
+                if slate is None:
+                    st.info("Could not forecast that matchup.")
+                else:
+                    _render_forecast(slate)
                     st.divider()
-                    _render_market_edge(report)
+                    _render_ev_calculator(slate)
+                    report = _cached_market_edge(str(settings.analytics_db), season, division)
+                    if report is not None:
+                        st.divider()
+                        _render_market_edge(report)
+
+        with season_tab:
+            st.caption(
+                "Title, top-four and relegation odds from simulating the rest of the season."
+            )
+            briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
+            if briefing is None:
+                st.info("No results for that selection.")
+            else:
+                _render_season(briefing)
         return
 
     if page == "Analytics":
@@ -1402,23 +1415,6 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_records(records)
-        return
-
-    if page == "Season":
-        available = analytics_available(settings.analytics_db)
-        if not available:
-            st.info(
-                "No league data yet. Go to **Home** → **Add a league** to download some.",
-                icon=":material/download:",
-            )
-            return
-        # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
-        season, division = _league_season_pickers(available)
-        briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
-        if briefing is None:
-            st.info("No results for that selection.")
-        else:
-            _render_season(briefing)
         return
 
     if page == "Shot Map":

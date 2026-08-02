@@ -763,14 +763,13 @@ class TestAppSmoke:
             at.radio[0].set_value("Form guide").run()
             assert not at.exception, f"Trends raised: {at.exception}"
 
-            at.radio[0].set_value("Season predictor").run()
-            assert not at.exception, f"Season raised: {at.exception}"
+            # Predictor merges match + season into one page (two tabs); AppTest executes
+            # both tab bodies, so a single visit covers the forecast slate and the sim.
+            at.radio[0].set_value("Predictor").run()
+            assert not at.exception, f"Predictor raised: {at.exception}"
 
             at.radio[0].set_value("Records").run()
             assert not at.exception, f"Records raised: {at.exception}"
-
-            at.radio[0].set_value("Match predictor").run()
-            assert not at.exception, f"Forecast raised: {at.exception}"
 
             # Players page: seed full-event stats so the rich leaderboard + profile render.
             seed_player_events(tmp_path / "analytics.duckdb")
