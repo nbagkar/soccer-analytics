@@ -12,6 +12,8 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 
 from __future__ import annotations
 
+import html
+
 import altair as alt
 import polars as pl
 import streamlit as st
@@ -275,10 +277,10 @@ def _render_live(snap: LiveSnapshot) -> None:
         rows.append(
             {
                 "": f'<span style="color:{colour};font-weight:600">{text}</span>',
-                "Home": v.home,
-                "Score": f"<b>{v.score}</b>",
-                "Away": v.away,
-                "Competition": f'<span style="color:#8b8b8b">{v.competition}</span>',
+                "Home": _esc(v.home),
+                "Score": f"<b>{_esc(v.score)}</b>",
+                "Away": _esc(v.away),
+                "Competition": f'<span style="color:#8b8b8b">{_esc(v.competition)}</span>',
                 "Source": f'<span style="color:#8b8b8b">{source}</span>',
             }
         )
@@ -369,6 +371,13 @@ def _render_health(snap: HealthSnapshot) -> None:
     st.divider()
     for line in snap.attributions:
         st.caption(line)
+
+
+def _esc(value: object) -> str:
+    """Escape a data value (team/player/competition name, etc.) for safe interpolation
+    into the HTML we render with unsafe_allow_html. Content-only, so quotes are left as-is
+    -- keeps apostrophes readable ("Nott'm Forest") while neutralising & < >."""
+    return html.escape(str(value), quote=False)
 
 
 def _html_table(rows: list[dict]) -> str:
@@ -515,7 +524,7 @@ def _render_records(records) -> None:
     st.markdown("**Active streaks**")
     rows = [
         {
-            "Team": s.team,
+            "Team": _esc(s.team),
             "Unbeaten": _streak_span(s.unbeaten, good=True),
             "Winning": _streak_span(s.winning, good=True),
             "Winless": _streak_span(s.winless, good=False),
@@ -551,7 +560,7 @@ def _match_record_list(matches, *, tag: str) -> str:
         extra = f"{m.margin}" if tag == "margin" else f"{m.total} goals"
         items += (
             f'<div style="padding:2px 0;font-size:0.9rem">'
-            f"{m.home} <b>{m.score}</b> {m.away} "
+            f"{_esc(m.home)} <b>{_esc(m.score)}</b> {_esc(m.away)} "
             f'<span style="color:#8b8b8b">· {extra}</span></div>'
         )
     return items
@@ -598,7 +607,7 @@ def _render_trends(forms, *, last_n: int) -> None:
 
     rows = [
         {
-            "Team": f.team,
+            "Team": _esc(f.team),
             "Form": _form_html(f.recent_form),
             "Recent ppg": f"{f.recent_ppg:.2f}",
             "Season ppg": f'<span style="color:#8b8b8b">{f.ppg:.2f}</span>',
@@ -624,7 +633,7 @@ def _render_analytics(snap: AnalyticsSnapshot, forms=None, *, last_n: int = 5) -
         for r in snap.table:
             row = {
                 "#": r.position,
-                "Team": r.team,
+                "Team": _esc(r.team),
                 "P": r.played,
                 "GD": f"{r.goal_difference:+d}",
                 "Pts": f"<b>{r.points}</b>",
@@ -644,7 +653,11 @@ def _render_analytics(snap: AnalyticsSnapshot, forms=None, *, last_n: int = 5) -
 
         st.markdown("**Elo power ranking**")
         elo_rows = [
-            {"#": r.position, "Team": snap.names.get(r.team, r.team), "Elo": f"{r.rating:.0f}"}
+            {
+                "#": r.position,
+                "Team": _esc(snap.names.get(r.team, r.team)),
+                "Elo": f"{r.rating:.0f}",
+            }
             for r in snap.power[:8]
         ]
         st.markdown(_html_table(elo_rows), unsafe_allow_html=True)
@@ -818,7 +831,7 @@ def _market_table(title: str, markets, *, odds: bool = True) -> str:
         rows.append(
             f"<div style='display:flex;align-items:center;justify-content:space-between;"
             f"background:{bar};border-radius:6px;padding:5px 10px;margin:3px 0'>"
-            f"<span>{m.name}</span>"
+            f"<span>{_esc(m.name)}</span>"
             f"<span style='font-variant-numeric:tabular-nums'>"
             f"<b style='color:{_YES if lead else _MUTE}'>"
             f"{_cents(m.probability)}</b>{tail}</span></div>"
@@ -839,7 +852,7 @@ def _price_tiles(markets) -> str:
             f"<div style='flex:1;border:1px solid {border};border-radius:10px;"
             f"padding:12px 14px;background:{bg}'>"
             f"<div style='color:{_MUTE};font-size:0.82rem;white-space:nowrap;overflow:hidden;"
-            f"text-overflow:ellipsis'>{m.name}</div>"
+            f"text-overflow:ellipsis'>{_esc(m.name)}</div>"
             f"<div style='font-size:1.9rem;font-weight:700;line-height:1.15;"
             f"font-variant-numeric:tabular-nums;color:{color}'>{_cents(m.probability)}</div>"
             f"<div style='color:{_MUTE};font-size:0.72rem'>{m.fair_odds:.2f} fair</div></div>"
@@ -1007,8 +1020,8 @@ def _render_players(rows) -> None:
     table_rows = [
         {
             "#": i,
-            "Player": r.player,
-            "Team": f'<span style="color:#8b8b8b">{r.team}</span>',
+            "Player": _esc(r.player),
+            "Team": f'<span style="color:#8b8b8b">{_esc(r.team)}</span>',
             "xG": f"{r.xg:.1f}",
             "npxG": f"{r.npxg:.1f}",
             "G": f"<b>{r.goals}</b>",
@@ -1203,15 +1216,15 @@ def _render_fixtures(fixtures) -> None:
         fav = f.home if home_p >= away_p else f.away
         cells = [
             f.kickoff_utc.strftime("%m-%d %H:%M"),
-            f'<span style="color:#8b8b8b">{f.competition}</span>',
-            f"{f.home} v {f.away}",
+            f'<span style="color:#8b8b8b">{_esc(f.competition)}</span>',
+            f"{_esc(f.home)} v {_esc(f.away)}",
             f"<b>{x}-{y}</b>",
             _pct_cell(home_p, home_p >= max(draw_p, away_p)),
             _pct_cell(draw_p, draw_p >= max(home_p, away_p)),
             _pct_cell(away_p, away_p >= max(home_p, draw_p)),
             _pct_cell(over25, over25 >= 0.5),
             _pct_cell(btts_yes, btts_yes >= 0.5),
-            f'<span style="color:{_YES}">{fav}</span>',
+            f'<span style="color:{_YES}">{_esc(fav)}</span>',
         ]
         tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
         body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
@@ -1233,7 +1246,7 @@ def _render_fixtures(fixtures) -> None:
                 "".join(
                     f'<div style="font-size:0.85rem;padding:1px 0">'
                     f'<span style="color:#8b8b8b">{f.kickoff_utc.strftime("%m-%d")} · '
-                    f"{f.competition}</span> &nbsp; {f.home} v {f.away}</div>"
+                    f"{_esc(f.competition)}</span> &nbsp; {_esc(f.home)} v {_esc(f.away)}</div>"
                     for f in uncovered
                 ),
                 unsafe_allow_html=True,
