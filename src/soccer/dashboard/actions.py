@@ -31,16 +31,13 @@ LEAGUE_CHOICES = {
     "Bundesliga (Germany)": "D1",
     "Serie A (Italy)": "I1",
     "Ligue 1 (France)": "F1",
-    "Eredivisie (Netherlands)": "N1",
-    "Primeira Liga (Portugal)": "P1",
-    "Brazil Série A": "BRA",
+    "MLS (USA)": "USA",
 }
 
-# The set a fresh install downloads itself on first launch, so it "just works" without
-# any clicks -- fast, token-free league results that power tables, forecasts, trends,
-# records, the season oracle and most assistant questions. All the leagues we know how to
-# fetch, so nothing is left to pick by hand.
-STARTER_LEAGUES = ["E0", "E1", "SP1", "D1", "I1", "F1", "N1", "P1", "BRA"]
+# The set a fresh install downloads itself on first launch, so it "just works" without any
+# clicks -- fast, token-free league results that power tables, forecasts, trends, records
+# and the season oracle. Kept to the leagues actually wanted.
+STARTER_LEAGUES = ["E0", "E1", "SP1", "D1", "I1", "F1", "USA"]
 
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
 EVENT_PACKS = {
@@ -141,6 +138,15 @@ def add_league_history(settings: Settings, division: str) -> str:
     if not total:
         return f"No data available yet for {division_name(division)}."
     return f"Added {total} matches for {division_name(division)}."
+
+
+def remove_league(settings: Settings, division: str) -> str:
+    """Delete a league's results so it no longer appears in the dashboard."""
+    if not settings.analytics_db.exists():
+        return "Nothing to remove."
+    with AnalyticsDB(settings.analytics_db) as adb:
+        removed = adb.delete_division(division)
+    return f"Removed {division_name(division)} ({removed} matches)."
 
 
 def starter_setup(settings: Settings, *, on_progress: Callable | None = None) -> str:

@@ -40,13 +40,6 @@ _LEAGUE_ALIASES = {
     "laliga": "SP1",
     "spain": "SP1",
     "spanish": "SP1",
-    "eredivisie": "N1",
-    "dutch": "N1",
-    "netherlands": "N1",
-    "holland": "N1",
-    "primeira": "P1",
-    "portugal": "P1",
-    "portuguese": "P1",
     "bundesliga": "D1",
     "germany": "D1",
     "german": "D1",
@@ -56,9 +49,10 @@ _LEAGUE_ALIASES = {
     "ligue 1": "F1",
     "france": "F1",
     "french": "F1",
-    "brazil": "BRA",
-    "brazilian": "BRA",
-    "brasileiro": "BRA",
+    "mls": "USA",
+    "usa": "USA",
+    "america": "USA",
+    "major league soccer": "USA",
 }
 
 # Common team nicknames -> the football-data.co.uk spelling, for name resolution.
@@ -144,7 +138,7 @@ def _resolve_league(q: str, loaded: dict[str, str]) -> str | None:
 
 
 def _default_league(loaded: dict[str, str]) -> str | None:
-    for preferred in ("E0", "SP1", "N1", "P1", "E1", "BRA"):
+    for preferred in ("E0", "SP1", "D1", "I1", "F1", "E1", "USA"):
         if preferred in loaded:
             return preferred
     return next(iter(loaded), None)

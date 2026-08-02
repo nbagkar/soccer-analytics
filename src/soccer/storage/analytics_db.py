@@ -648,6 +648,12 @@ class AnalyticsDB:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self._con.execute(f"SELECT COUNT(*) FROM results{where}", params).fetchone()[0]
 
+    def delete_division(self, division: str) -> int:
+        """Remove all results for a division. Returns the number of rows removed."""
+        removed = self.result_count(division=division)
+        self._con.execute("DELETE FROM results WHERE division = ?", [division])
+        return removed
+
     def seasons_loaded(self) -> list[tuple[str, str, int]]:
         """(season, division, match count) for everything loaded, newest season first."""
         return self._con.execute(
