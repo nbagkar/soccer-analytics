@@ -112,6 +112,13 @@ CREATE TABLE IF NOT EXISTS entity_alias (
 """
 
 
+# Columns added to an existing table after its first release, as (table, column, "type ...").
+# Registered here so _migrate reconciles them onto already-created databases via ALTER TABLE
+# (a bare CREATE TABLE IF NOT EXISTS cannot). Empty today -- the mechanism is the safeguard;
+# bump SCHEMA_VERSION and add an entry here whenever you add a column to an existing table.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+
+
 class LiveDB:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -141,8 +148,19 @@ class LiveDB:
                 f"Database at {self.path} is schema v{current}, newer than this code "
                 f"(v{SCHEMA_VERSION}). Refusing to run against a future schema."
             )
-        self._conn.executescript(_SCHEMA)
+        self._conn.executescript(_SCHEMA)  # new tables / indexes
+        # A bare CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so a column
+        # added by editing _SCHEMA would never reach already-created databases -- while
+        # user_version still advanced, leaving the DB "current" but missing the column.
+        # Reconcile such columns explicitly (SQLite's ADD COLUMN has no IF NOT EXISTS).
+        for table, column, ddl in _ADDED_COLUMNS:
+            self._ensure_column(table, column, ddl)
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     @property
     def connection(self) -> sqlite3.Connection:
