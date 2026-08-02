@@ -417,14 +417,32 @@ class MatchMeta:
 
 
 class AnalyticsDB:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, connect_retries: int = 6) -> None:
         self.path = Path(path)
         if self.path.parent != Path():
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = duckdb.connect(str(self.path))
+        self._con = self._connect(connect_retries)
         self._con.execute("SET enable_progress_bar = false")  # keep CLI output clean
         self._con.execute(_SCHEMA)
         self._migrate()
+
+    def _connect(self, retries: int):
+        """Open the database, retrying briefly if another process holds the write lock.
+
+        DuckDB is single-writer: while `soccer serve` writes its 6-hourly refresh, a
+        dashboard read would otherwise raise. The write window is milliseconds, so a short
+        backoff lets the two run side by side instead of erroring the page.
+        """
+        import time
+
+        for attempt in range(retries):
+            try:
+                return duckdb.connect(str(self.path))
+            except (duckdb.IOException, duckdb.ConnectionException):
+                if attempt == retries - 1:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     def _migrate(self) -> None:
         """Idempotent column additions for databases created before a column existed."""
