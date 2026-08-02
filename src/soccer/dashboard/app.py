@@ -1200,6 +1200,8 @@ def _page_header(page: str) -> None:
 
 def _render_match_analysis(settings) -> None:
     """Analysis > Match tab: xG timeline and shot map for a chosen StatsBomb match."""
+    from collections import Counter
+
     matches = shot_matches(settings.analytics_db)
     if not matches:
         st.info(
@@ -1207,14 +1209,23 @@ def _render_match_analysis(settings) -> None:
             icon=":material/groups:",
         )
         return
-    comps = sorted({comp for _mid, _lbl, comp, _s in matches})
+    st.caption(
+        "Shot data is StatsBomb open data: a fixed historical set, not the live season. "
+        "Fullest coverage is 2015/16 (Premier League, La Liga, Serie A, Ligue 1), World "
+        "Cups and Euros. Match counts are shown in brackets."
+    )
+    comp_counts = Counter(comp for _mid, _lbl, comp, _s in matches)
+    comps = [c for c, _ in comp_counts.most_common()]  # richest competition first
     fcols = st.columns([1, 1, 2])
     if len(comps) > 1:
-        chosen = fcols[0].selectbox("Competition", comps, key="ma_comp")
+        clabels = {f"{c} ({comp_counts[c]})": c for c in comps}
+        chosen = clabels[fcols[0].selectbox("Competition", list(clabels), key="ma_comp")]
         matches = [m for m in matches if m[2] == chosen]
-    seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
+    season_counts = Counter(s for _mid, _lbl, _c, s in matches if s)
+    seasons = sorted(season_counts, key=lambda s: (season_counts[s], s), reverse=True)
     if len(seasons) > 1:
-        chosen_season = fcols[1].selectbox("Season", seasons, key="ma_season")
+        slabels = {f"{s} ({season_counts[s]})": s for s in seasons}
+        chosen_season = slabels[fcols[1].selectbox("Season", list(slabels), key="ma_season")]
         matches = [m for m in matches if m[3] == chosen_season]
     labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
     picked = fcols[2].selectbox("Match", list(labels), key="ma_match")
