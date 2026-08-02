@@ -140,9 +140,10 @@ def add_league_history(settings: Settings, division: str, *, seasons: int = 3) -
     return f"Added {total} matches for {division_name(division)}."
 
 
-# football-data.co.uk carries the major leagues back to 1993/94; deeper history means richer
-# tables, forecasts, form and records. (Shot/event data is separately capped by StatsBomb.)
-FULL_HISTORY_SEASONS = 30
+# football-data.co.uk carries the major European leagues back to 1993/94 (its earliest); 34
+# reaches that from the current season, deeper history meaning richer tables, forecasts, form
+# and records. (Shot/event data is separately capped by StatsBomb's catalog.)
+FULL_HISTORY_SEASONS = 34
 
 
 def load_full_history(
