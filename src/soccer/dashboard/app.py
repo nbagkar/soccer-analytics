@@ -299,20 +299,25 @@ def _render_season(briefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
-def _league_season_options(available: list[tuple[str, str, int]]) -> dict:
-    """Selector labels for league/season slices: grouped by league, newest first, and the
-    most-recent season of each league tagged 'latest' so it never reads as stale."""
-    latest: dict[str, str] = {}
+def _league_season_pickers(available: list[tuple[str, str, int]]) -> tuple[str, str]:
+    """Two dependent sidebar selectors — league, then season — returning (season, division).
+
+    The season list follows the chosen league, newest first, with its latest entry tagged
+    'latest'. Shared widget keys let the choice persist as you move between pages.
+    """
+    by_league: dict[str, list] = {}
     for season, division, _n in available:
-        if division not in latest or season > latest[division]:
-            latest[division] = season
-    ordered = sorted(available, key=lambda t: t[0], reverse=True)
-    ordered = sorted(ordered, key=lambda t: division_name(t[1]))
-    labels: dict = {}
-    for season, division, _n in ordered:
-        tag = " · latest" if season == latest[division] else ""
-        labels[f"{division_name(division)} - {season_label(season)}{tag}"] = (season, division)
-    return labels
+        entry = by_league.setdefault(division_name(division), [division, []])
+        entry[1].append(season)
+
+    league = st.selectbox("League", sorted(by_league), key="ls_league")
+    division, seasons = by_league[league]
+    seasons = sorted(set(seasons), reverse=True)
+    tagged = {
+        f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)
+    }
+    season = tagged[st.selectbox("Season", list(tagged), key="ls_season")]
+    return season, division
 
 
 def _render_records(records) -> None:
@@ -1147,9 +1152,7 @@ def main() -> None:
             "For the upcoming season's real fixtures, see the **Fixtures** page."
         )
         with st.sidebar:
-            labels = _league_season_options(available)
-            picked = st.selectbox("League / season", list(labels))
-            season, division = labels[picked]
+            season, division = _league_season_pickers(available)
             teams = forecast_teams(settings.analytics_db, season, division)
             home = st.selectbox("Home", teams, index=0)
             away = st.selectbox("Away", teams, index=min(1, len(teams) - 1))
@@ -1176,9 +1179,7 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            labels = _league_season_options(available)
-            picked = st.selectbox("League / season", list(labels))
-        season, division = labels[picked]
+            season, division = _league_season_pickers(available)
         snap = _cached_analytics(str(settings.analytics_db), season, division)
         if snap is None:
             st.info("No results for that selection.")
@@ -1192,10 +1193,8 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            labels = _league_season_options(available)
-            picked = st.selectbox("League / season", list(labels))
+            season, division = _league_season_pickers(available)
             last_n = st.slider("Form window (matches)", 3, 10, 5)
-        season, division = labels[picked]
         forms = team_form(settings.analytics_db, season, division, last_n=last_n)
         if not forms:
             st.info("No results for that selection.")
@@ -1209,9 +1208,7 @@ def main() -> None:
             st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
             return
         with st.sidebar:
-            labels = _league_season_options(available)
-            picked = st.selectbox("League / season", list(labels))
-        season, division = labels[picked]
+            season, division = _league_season_pickers(available)
         records = season_records(settings.analytics_db, season, division)
         if records is None:
             st.info("No results for that selection.")
@@ -1226,9 +1223,7 @@ def main() -> None:
             return
         with st.sidebar:
             # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
-            labels = _league_season_options(available)
-            picked = st.selectbox("League / season", list(labels))
-        season, division = labels[picked]
+            season, division = _league_season_pickers(available)
         briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
         if briefing is None:
             st.info("No results for that selection.")
