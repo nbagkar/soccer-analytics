@@ -84,6 +84,25 @@ def season_label(season: str) -> str:
     return season
 
 
+# football-data.co.uk "new leagues" country codes (the /new/ path), distinct from the
+# European division codes (E0, SP1, ...). Used to route a loaded division to the right
+# fetcher when refreshing the current season.
+NEW_LEAGUE_CODES = frozenset(
+    {"ARG", "AUT", "BRA", "CHN", "DNK", "FIN", "IRL", "JPN", "MEX", "NOR", "POL", "ROU", "USA"}
+)
+
+
+def current_season_code(today: date) -> str:
+    """The football-data.co.uk season code for the European season current on `today`.
+
+    Seasons span August->May, so from July onward the *new* season's code applies (its
+    file may 404 until the season actually starts -- callers treat that as a no-op). E.g.
+    2026-08-01 -> "2627"; 2026-03-01 -> "2526".
+    """
+    start = today.year if today.month >= 7 else today.year - 1
+    return f"{start % 100:02d}{(start + 1) % 100:02d}"
+
+
 @dataclass(frozen=True)
 class MatchResult:
     season: str

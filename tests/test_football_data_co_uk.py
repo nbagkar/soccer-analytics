@@ -15,6 +15,7 @@ import pytest
 
 from soccer.sources.football_data_co_uk import (
     FootballDataCoUk,
+    current_season_code,
     division_name,
     parse_new_league_csv,
     parse_results_csv,
@@ -127,6 +128,14 @@ class TestLeagueNames:
         # Brazil's calendar-year seasons are not consecutive halves -> left as-is.
         assert season_label("2026") == "2026"
         assert season_label("2024") == "2024"
+
+    def test_current_season_code_by_month(self) -> None:
+        # From July onward the new season's code applies; before July, the ongoing one.
+        assert current_season_code(date(2026, 8, 1)) == "2627"  # season about to start
+        assert current_season_code(date(2026, 7, 1)) == "2627"  # July cutover
+        assert current_season_code(date(2026, 3, 1)) == "2526"  # mid-season
+        assert current_season_code(date(2025, 12, 31)) == "2526"
+        assert current_season_code(date(2000, 1, 1)) == "9900"  # century wrap
 
 
 class TestClosingOdds:

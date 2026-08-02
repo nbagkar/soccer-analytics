@@ -102,7 +102,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
-| `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, housekeeping) |
+| `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, current-season history auto-refresh, housekeeping) |
 | `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |

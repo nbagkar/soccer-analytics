@@ -1113,17 +1113,26 @@ def xg(match: int = typer.Argument(..., help="StatsBomb match_id.")) -> None:
 def serve(
     live_interval: int = typer.Option(60, help="Seconds between live-score ingests."),
     fixtures_interval: int = typer.Option(3600, help="Seconds between fixture ingests."),
+    history_interval: int = typer.Option(
+        21600, help="Seconds between historical-results refreshes (current season)."
+    ),
     once: bool = typer.Option(False, "--once", help="Run all due jobs once and exit."),
 ) -> None:
-    """Run ingestion unattended on a cadence: live scores, fixtures, and housekeeping.
+    """Run ingestion unattended on a cadence: live scores, fixtures, history, housekeeping.
 
-    A failing source is logged and retried next interval, never crashes the loop. Stop
-    with Ctrl-C.
+    A failing source is logged and retried next interval, never crashes the loop. The
+    history job re-fetches the CURRENT season for every already-loaded league, so when the
+    new season's file first appears it is picked up automatically and forecasts self-update.
+    Stop with Ctrl-C.
     """
     import time
     from datetime import timedelta
 
     from soccer.ingest.scheduler import Job, JobResult, Scheduler
+    from soccer.sources.football_data_co_uk import (
+        NEW_LEAGUE_CODES,
+        current_season_code,
+    )
 
     settings = get_settings()
     settings.ensure_dirs()
@@ -1160,6 +1169,42 @@ def serve(
 
         return asyncio.run(run_it())
 
+    def history_job() -> str:
+        """Refresh the current season for every already-loaded league.
+
+        Re-fetching the current-season file keeps it fresh as matches are played, and the
+        moment the *new* season's file appears (a 404 until then) it is loaded, so the
+        latest season and the forecasts advance on their own. Only leagues already in the
+        store are touched -- serve keeps what you have current, it does not decide scope.
+        """
+        if not settings.analytics_db.exists():
+            return "skipped (no analytics DB yet)"
+        with AnalyticsDB(settings.analytics_db) as adb:
+            divisions = sorted({d for _s, d, _n in adb.seasons_loaded()})
+        if not divisions:
+            return "skipped (no leagues loaded)"
+
+        season = current_season_code(datetime.now(UTC).date())
+        european = [d for d in divisions if d not in NEW_LEAGUE_CODES]
+        countries = [d for d in divisions if d in NEW_LEAGUE_CODES]
+        slices, total = 0, 0
+        with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
+            for division in european:
+                results = source.fetch_division(season, division)
+                if results:
+                    adb.load_results(results)
+                    slices += 1
+                    total += len(results)
+            for code in countries:
+                results = source.fetch_new_league(code)
+                if results:
+                    adb.load_results(results)
+                    slices += 1
+                    total += len(results)
+        if not slices:
+            return f"no new results (European season {season} not started, no in-season extras)"
+        return f"refreshed {total} results across {slices} league slice(s) (season {season})"
+
     def prune_job() -> str:
         removed = raw.prune(SourceId.THESPORTSDB, "livescore", keep_days=7)
         return f"pruned {removed} old live snapshot(s)"
@@ -1168,6 +1213,7 @@ def serve(
         jobs=[
             Job("live", timedelta(seconds=live_interval), live_job),
             Job("fixtures", timedelta(seconds=fixtures_interval), fixtures_job),
+            Job("history", timedelta(seconds=history_interval), history_job),
             Job("prune", timedelta(days=1), prune_job),
         ]
     )
@@ -1186,7 +1232,7 @@ def serve(
 
     console.print(
         f"[green]Serving[/green] — live every {live_interval}s, fixtures every "
-        f"{fixtures_interval}s. Ctrl-C to stop.\n"
+        f"{fixtures_interval}s, history every {history_interval // 3600}h. Ctrl-C to stop.\n"
     )
     tick = max(1, min(live_interval, 15))
     try:
