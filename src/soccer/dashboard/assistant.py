@@ -12,10 +12,10 @@ render over `answer()`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from soccer.domain.names import normalize_name
 from soccer.sources.football_data_co_uk import division_name, season_label
 from soccer.storage.analytics_db import AnalyticsDB
 
@@ -80,9 +80,19 @@ _STOP = {"fc", "afc", "cf", "real", "the", "de", "city", "united", "town", "club
 
 
 def _norm(text: str) -> str:
-    # The project's canonical normalizer folds accents (Mbappé -> mbappe) and lowercases,
-    # so a user's plain spelling matches StatsBomb's full legal names.
-    return normalize_name(text)
+    """Light normalization for both questions and names: lowercase, fold accents, drop
+    punctuation -- but KEEP every word.
+
+    The team-name normalizer is too aggressive here: it strips stopwords ("of", "the") and
+    splits "who's" into "who s", which breaks keyword matching on a full sentence. This
+    folds "Mbappé"->"mbappe" and "who's"->"whos" while leaving the sentence structure
+    intact, so intent keywords survive and entity names still match.
+    """
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))  # fold accents
+    text = text.lower().replace("'", "").replace("\u2019", "")  # straight and smart apostrophes
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)  # other punctuation -> space
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Reply:

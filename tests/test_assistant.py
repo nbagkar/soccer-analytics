@@ -29,6 +29,12 @@ class TestRouting:
         assert "Arsenal" in reply.text  # strongest seeded team leads
         assert reply.table and reply.table[0]["#"] == 1
 
+    def test_standings_with_apostrophe_and_no_question_mark(self, tmp_path) -> None:
+        # "who's" (apostrophe) and no trailing "?" must still reach standings.
+        reply = answer("who's top of the Premier League", _seed(tmp_path))
+        assert "Arsenal" in reply.text
+        assert reply.table
+
     def test_team_position(self, tmp_path) -> None:
         reply = answer("where are brentford in the table", _seed(tmp_path))
         assert "Brentford" in reply.text
