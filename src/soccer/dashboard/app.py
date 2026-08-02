@@ -601,22 +601,26 @@ def _render_trends(forms, *, last_n: int) -> None:
     st.markdown(_html_table(rows), unsafe_allow_html=True)
 
 
-def _render_analytics(snap: AnalyticsSnapshot) -> None:
+def _render_analytics(snap: AnalyticsSnapshot, forms=None, *, last_n: int = 5) -> None:
     st.subheader(f"{division_name(snap.division)} {season_label(snap.season)}", anchor=False)
 
+    form_by_team = {f.team: f.recent_form for f in (forms or [])}
     left, right = st.columns([3, 2])
     with left:
-        st.markdown("**League table**")
-        rows = [
-            {
+        label = f"**League table** (form = last {last_n})" if form_by_team else "**League table**"
+        st.markdown(label)
+        rows = []
+        for r in snap.table:
+            row = {
                 "#": r.position,
                 "Team": r.team,
                 "P": r.played,
                 "GD": f"{r.goal_difference:+d}",
                 "Pts": f"<b>{r.points}</b>",
             }
-            for r in snap.table
-        ]
+            if form_by_team:
+                row["Form"] = _form_html(form_by_team.get(r.team, ""))
+            rows.append(row)
         st.markdown(_html_table(rows), unsafe_allow_html=True)
 
     with right:
@@ -1176,8 +1180,7 @@ _NAV = [
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Fixtures", "Upcoming matches", ":material/event_upcoming:", "Fixtures with predicted scores"),
     ("Predictor", "Predictor", ":material/insights:", "Match scores and season odds"),
-    ("Analytics", "League tables", ":material/table_chart:", "Standings, power rank, title odds"),
-    ("Trends", "Form guide", ":material/trending_up:", "Who's hot and who's cold right now"),
+    ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
     ("Shot Map", "Match analysis", ":material/sports_soccer:", "xG timelines and shot maps"),
     ("Players", "Players", ":material/person:", "Player stats and scouting profiles"),
@@ -1376,29 +1379,21 @@ def main() -> None:
                 icon=":material/download:",
             )
             return
-        season, division = _league_season_pickers(available)
+        season, division, extra = _league_season_pickers(available, extra=1)
+        last_n = extra[0].slider("Form window (matches)", 3, 10, 5)
         snap = _cached_analytics(str(settings.analytics_db), season, division)
         if snap is None:
             st.info("No results for that selection.")
-        else:
-            _render_analytics(snap)
-        return
-
-    if page == "Trends":
-        available = analytics_available(settings.analytics_db)
-        if not available:
-            st.info(
-                "No league data yet. Go to **Home** → **Add a league** to download some.",
-                icon=":material/download:",
-            )
             return
-        season, division, extra = _league_season_pickers(available, extra=1)
-        last_n = extra[0].slider("Form window (matches)", 3, 10, 5)
         forms = team_form(settings.analytics_db, season, division, last_n=last_n)
-        if not forms:
-            st.info("No results for that selection.")
-        else:
-            _render_trends(forms, last_n=last_n)
+        table_tab, form_tab = st.tabs(["Table", "Form guide"])
+        with table_tab:
+            _render_analytics(snap, forms=forms, last_n=last_n)
+        with form_tab:
+            if forms:
+                _render_trends(forms, last_n=last_n)
+            else:
+                st.info("No results for that selection.")
         return
 
     if page == "Records":

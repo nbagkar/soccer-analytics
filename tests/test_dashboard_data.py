@@ -749,19 +749,22 @@ class TestAppSmoke:
             at.radio[0].set_value("Upcoming matches").run()
             assert not at.exception, f"Fixtures raised: {at.exception}"
 
-            # Analytics page needs an analytics DB; seed one and visit it.
+            # League tables now folds the form guide in as a second tab, and adds a Form
+            # column to the table itself. AppTest executes both tab bodies on one visit, so
+            # this single navigation covers the standings render and the trends render.
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("League tables").run()
-            assert not at.exception, f"Analytics raised: {at.exception}"
+            assert not at.exception, f"League tables raised: {at.exception}"
+            # The form guide is folded in as a Form column on the standings table itself.
+            assert any(">Form</th>" in (m.value or "") for m in at.markdown), (
+                "League table is missing its Form column"
+            )
 
             # Assistant answers a real question now that data is present.
             at.radio[0].set_value("Ask a question").run()
             assert not at.exception, f"Assistant raised: {at.exception}"
             at.chat_input[0].set_value("who is top of the premier league?").run()
             assert not at.exception, f"Assistant query raised: {at.exception}"
-
-            at.radio[0].set_value("Form guide").run()
-            assert not at.exception, f"Trends raised: {at.exception}"
 
             # Predictor merges match + season into one page (two tabs); AppTest executes
             # both tab bodies, so a single visit covers the forecast slate and the sim.
