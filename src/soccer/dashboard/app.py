@@ -142,6 +142,19 @@ def _render_home(settings) -> None:
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _go("Home")
 
+    st.caption(
+        "Everything's loaded and ready — nothing to add. To pull in an extra league or "
+        "more player data later, see **About & sources**."
+    )
+
+
+def _render_data_manager(settings) -> None:
+    """Optional data top-ups, tucked away from the main flow -- most users never need it."""
+    from soccer.dashboard import actions
+
+    st.markdown("#### :material/tune: Manage data")
+    st.caption("Your data is already loaded; this is only for adding extras.")
+
     with st.expander("Add a league (results & forecasts)", icon=":material/add_circle:"):
         choice = st.selectbox("Which league?", list(actions.LEAGUE_CHOICES))
         if st.button("Download recent seasons", key="add_league"):
@@ -153,17 +166,14 @@ def _render_home(settings) -> None:
             "StatsBomb open data — free for personal/research use, logo attribution "
             "required. Loading everything takes a few minutes."
         )
-        if st.button("Load all player data", key="add_all_events", type="primary"):
+        if st.button("Load all player data", key="add_all_events"):
             bar = st.progress(0.0, "Starting…")
             msg = actions.load_all_events(
                 settings, on_progress=lambda d, t: bar.progress(d / t, f"dataset {d}/{t}")
             )
             bar.empty()
             st.success(msg)
-        st.caption("Or pick a single dataset:")
-        pack = st.selectbox(
-            "Which dataset?", list(actions.EVENT_PACKS), label_visibility="collapsed"
-        )
+        pack = st.selectbox("Or a single dataset", list(actions.EVENT_PACKS))
         if st.button("Load this one", key="add_events"):
             comp_id, season_id, _n = actions.EVENT_PACKS[pack]
             bar = st.progress(0.0, "Starting…")
@@ -1456,6 +1466,8 @@ def main() -> None:
             )
         else:
             _render_health(health_snapshot(settings, db))
+            st.divider()
+            _render_data_manager(settings)
 
 
 if __name__ == "__main__":
