@@ -1,8 +1,9 @@
 """Streamlit dashboard -- a thin render over `dashboard/data.py`.
 
-Read-only. It shows only surfaces the ingested data can actually fill (a Live Centre and
-a Data Health panel); there is deliberately no Match Centre or Player Hub, because
-nothing ingests lineups or player events yet -- an empty surface reads as broken.
+Read-only. Every page is a consistent header (Material icon + one-line blurb) over data
+the store can actually fill; a surface with no data says so rather than showing an empty
+frame. Theme lives in `.streamlit/config.toml` (loaded because `soccer dashboard` runs
+streamlit from this directory).
 
 Status is shown as a reserved palette that always carries a text label, never colour
 alone: live is green, delayed/postponed amber, cancelled red, concluded a muted grey.
@@ -77,14 +78,12 @@ def _marker(view: MatchView) -> tuple[str, str]:
 
 def _render_live(snap: LiveSnapshot) -> None:
     k = snap.kpis
-    st.subheader("Live Centre")
-
     cols = st.columns(5)
-    cols[0].metric("Matches", k.total)
-    cols[1].metric("In play", k.in_play)
-    cols[2].metric("Competitions", k.competitions)
-    cols[3].metric("Sources", k.sources)
-    cols[4].metric("Updated", k.freshness_label)
+    cols[0].metric("Matches", k.total, border=True)
+    cols[1].metric("In play", k.in_play, border=True)
+    cols[2].metric("Competitions", k.competitions, border=True)
+    cols[3].metric("Sources", k.sources, border=True)
+    cols[4].metric("Updated", k.freshness_label, border=True)
 
     if k.any_stale:
         st.warning(
@@ -130,7 +129,6 @@ def _render_coverage_chart(counts: list[tuple[str, int]]) -> None:
 
 
 def _render_health(snap: HealthSnapshot) -> None:
-    st.subheader("Data Health")
     st.caption(
         "Free coverage is patchy by nature — this panel makes the gaps explicit so "
         "missing data never looks like a bug."
@@ -239,7 +237,7 @@ def _cached_season_briefing(db_path: str, season: str, division: str):
 
 def _render_season(briefing) -> None:
     st.subheader(
-        f"Season oracle — {division_name(briefing.division)} {season_label(briefing.season)}"
+        f"{division_name(briefing.division)} {season_label(briefing.season)}", anchor=False
     )
     st.caption(
         f"{briefing.n_sims:,} Monte Carlo seasons from the recency-weighted model, every team "
@@ -253,10 +251,20 @@ def _render_season(briefing) -> None:
     drop = max(projs, key=lambda p: p.relegation_pct)
     tightest = min(projs, key=lambda p: abs(p.title_pct - 0.5))
     k = st.columns(3)
-    k[0].metric("Title favourite", names.get(fav.team, fav.team), f"{fav.title_pct:.0%}")
-    k[1].metric("Most at risk", names.get(drop.team, drop.team), f"{drop.relegation_pct:.0%} down")
+    k[0].metric(
+        "Title favourite", names.get(fav.team, fav.team), f"{fav.title_pct:.0%}", border=True
+    )
+    k[1].metric(
+        "Most at risk",
+        names.get(drop.team, drop.team),
+        f"{drop.relegation_pct:.0%} down",
+        border=True,
+    )
     k[2].metric(
-        "On the bubble", names.get(tightest.team, tightest.team), f"{tightest.title_pct:.0%} title"
+        "On the bubble",
+        names.get(tightest.team, tightest.team),
+        f"{tightest.title_pct:.0%} title",
+        border=True,
     )
 
     frame = pl.DataFrame(
@@ -308,7 +316,6 @@ def _league_season_options(available: list[tuple[str, str, int]]) -> dict:
 
 
 def _render_records(records) -> None:
-    st.subheader("Records & streaks")
     st.caption(
         "Active runs counted back from each team's most recent match, plus the season's "
         "standout results. Streaks are the records to watch."
@@ -318,9 +325,9 @@ def _render_records(records) -> None:
     unbeaten = streaks[0]  # already sorted by active unbeaten
     struggling = max(streaks, key=lambda s: s.winless)
     k = st.columns(3)
-    k[0].metric("Longest unbeaten", unbeaten.team, f"{unbeaten.unbeaten} games")
-    k[1].metric("Hot streak", on_fire.team, f"{on_fire.winning} wins")
-    k[2].metric("Winless run", struggling.team, f"{struggling.winless} games")
+    k[0].metric("Longest unbeaten", unbeaten.team, f"{unbeaten.unbeaten} games", border=True)
+    k[1].metric("Hot streak", on_fire.team, f"{on_fire.winning} wins", border=True)
+    k[2].metric("Winless run", struggling.team, f"{struggling.winless} games", border=True)
 
     st.markdown("**Active streaks**")
     rows = [
@@ -385,7 +392,6 @@ def _trend_span(trend: float) -> str:
 
 
 def _render_trends(forms, *, last_n: int) -> None:
-    st.subheader("Form & trends")
     st.caption(
         f"Last {last_n} matches vs the season baseline. ▲ rising, ▼ sliding. "
         "O2.5 = share of a team's games with over 2.5 goals; BTTS = both teams scored."
@@ -393,9 +399,19 @@ def _render_trends(forms, *, last_n: int) -> None:
     hottest, coldest = forms[0], forms[-1]
     goalfest = max(forms, key=lambda f: f.over25_rate)
     k = st.columns(3)
-    k[0].metric("Hottest", hottest.team, f"{hottest.recent_form} · {hottest.recent_ppg:.2f} ppg")
-    k[1].metric("Coldest", coldest.team, f"{coldest.recent_form} · {coldest.recent_ppg:.2f} ppg")
-    k[2].metric("Most goals", goalfest.team, f"{goalfest.over25_rate:.0%} over 2.5")
+    k[0].metric(
+        "Hottest",
+        hottest.team,
+        f"{hottest.recent_form} · {hottest.recent_ppg:.2f} ppg",
+        border=True,
+    )
+    k[1].metric(
+        "Coldest",
+        coldest.team,
+        f"{coldest.recent_form} · {coldest.recent_ppg:.2f} ppg",
+        border=True,
+    )
+    k[2].metric("Most goals", goalfest.team, f"{goalfest.over25_rate:.0%} over 2.5", border=True)
 
     rows = [
         {
@@ -414,7 +430,7 @@ def _render_trends(forms, *, last_n: int) -> None:
 
 
 def _render_analytics(snap: AnalyticsSnapshot) -> None:
-    st.subheader(f"Analytics — {division_name(snap.division)} {season_label(snap.season)}")
+    st.subheader(f"{division_name(snap.division)} {season_label(snap.season)}", anchor=False)
 
     left, right = st.columns([3, 2])
     with left:
@@ -464,12 +480,12 @@ def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
 
 
 def _render_shot_map(data) -> None:
-    st.subheader(f"Match centre — {data.label}")
+    st.subheader(data.label, anchor=False)
     st.caption("StatsBomb event data. Circle size ∝ xG; filled = goal. Both teams attack →")
 
     cols = st.columns(len(data.team_xg) or 1)
     for col, row in zip(cols, data.team_xg, strict=False):
-        col.metric(f"{row.name} xG", f"{row.xg:.2f}", f"{row.goals} goals")
+        col.metric(f"{row.name} xG", f"{row.xg:.2f}", f"{row.goals} goals", border=True)
 
     tab_race, tab_map, tab_log = st.tabs(["xG timeline", "Shot map", "Shot log"])
 
@@ -589,12 +605,12 @@ def _market_table(title: str, markets, *, odds: bool = True) -> str:
 
 
 def _render_forecast(slate) -> None:
-    st.subheader(f"{slate.home} vs {slate.away}")
+    st.subheader(f"{slate.home} vs {slate.away}", anchor=False)
     c = st.columns(3)
-    c[0].metric(f"{slate.home} xG", f"{slate.home_expected:.2f}")
-    c[1].metric(f"{slate.away} xG", f"{slate.away_expected:.2f}")
+    c[0].metric(f"{slate.home} xG", f"{slate.home_expected:.2f}", border=True)
+    c[1].metric(f"{slate.away} xG", f"{slate.away_expected:.2f}", border=True)
     x, y, p = slate.most_likely_score
-    c[2].metric("Most likely score", f"{x}-{y}", f"{p:.0%}")
+    c[2].metric("Most likely score", f"{x}-{y}", f"{p:.0%}", border=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -700,16 +716,17 @@ def _render_market_edge(report) -> None:
 
 
 def _render_players(rows) -> None:
-    st.subheader("Player leaderboard")
     st.caption(
         "StatsBomb shots across all ingested matches. G-xG > 0 = clinical finishing. "
         "Points above the diagonal outscored their chances."
     )
     c = st.columns(3)
-    c[0].metric("Players", len(rows))
-    c[1].metric("Top xG", f"{rows[0].xg:.1f}", rows[0].player.split()[-1])
+    c[0].metric("Players", len(rows), border=True)
+    c[1].metric("Top xG", f"{rows[0].xg:.1f}", rows[0].player.split()[-1], border=True)
     clinical = max(rows, key=lambda r: r.xg_diff)
-    c[2].metric("Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1])
+    c[2].metric(
+        "Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1], border=True
+    )
 
     frame = pl.DataFrame(
         {
@@ -787,7 +804,6 @@ _RANK_OPTIONS = {
 
 
 def _render_player_leaderboard(profiles, *, per90: bool, pool_label: str = "") -> None:
-    st.subheader("Player leaderboard")
     mode = "per 90 minutes" if per90 else "totals"
     scope = f"{pool_label} · " if pool_label and pool_label != "All competitions" else ""
     st.caption(
@@ -797,12 +813,14 @@ def _render_player_leaderboard(profiles, *, per90: bool, pool_label: str = "") -
 
     top = profiles[0]
     kpi = st.columns(4)
-    kpi[0].metric("Players", len(profiles))
-    kpi[1].metric("Most G+A", top.goal_contributions, top.player.split()[-1])
+    kpi[0].metric("Players", len(profiles), border=True)
+    kpi[1].metric("Most G+A", top.goal_contributions, top.player.split()[-1], border=True)
     clinical = max(profiles, key=lambda p: p.xg_diff)
-    kpi[2].metric("Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1])
+    kpi[2].metric(
+        "Best finisher (G-xG)", f"{clinical.xg_diff:+.1f}", clinical.player.split()[-1], border=True
+    )
     creator = max(profiles, key=lambda p: p.xa)
-    kpi[3].metric("Top xA", f"{creator.xa:.1f}", creator.player.split()[-1])
+    kpi[3].metric("Top xA", f"{creator.xa:.1f}", creator.player.split()[-1], border=True)
 
     data = {
         "Player": [p.player for p in profiles],
@@ -843,15 +861,17 @@ _CATEGORY_COLOURS = {
 
 def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> None:
     pos = f" · {profile.position}" if profile.position else ""
-    st.subheader(f"{profile.player}")
+    st.subheader(f"{profile.player}", anchor=False)
     st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
 
     row = st.columns(5)
-    row[0].metric("Goals", profile.goals, f"xG {profile.xg:.1f}")
-    row[1].metric("Assists", profile.assists, f"xA {profile.xa:.1f}")
-    row[2].metric("Shots", profile.shots, f"{profile.per90(profile.shots):.1f}/90")
-    row[3].metric("Pass %", f"{profile.pass_pct:.0f}%", f"{profile.passes} att")
-    row[4].metric("Prog. actions", profile.progressive_passes + profile.progressive_carries)
+    row[0].metric("Goals", profile.goals, f"xG {profile.xg:.1f}", border=True)
+    row[1].metric("Assists", profile.assists, f"xA {profile.xa:.1f}", border=True)
+    row[2].metric("Shots", profile.shots, f"{profile.per90(profile.shots):.1f}/90", border=True)
+    row[3].metric("Pass %", f"{profile.pass_pct:.0f}%", f"{profile.passes} att", border=True)
+    row[4].metric(
+        "Prog. actions", profile.progressive_passes + profile.progressive_carries, border=True
+    )
 
     if not percentiles:
         st.info("Not enough minutes for a percentile fingerprint at this threshold.")
@@ -906,7 +926,6 @@ def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> Non
 
 
 def _render_fixtures(fixtures) -> None:
-    st.subheader("Fixtures & forecasts")
     forecastable = [f for f in fixtures if f.slate is not None]
     uncovered = [f for f in fixtures if f.slate is None]
     st.caption(
@@ -973,13 +992,47 @@ def _pct_cell(p: float, is_max: bool) -> str:
     return f"<b>{p:.0%}</b>" if is_max else f"{p:.0%}"
 
 
+# Per-page identity: a Material Symbol icon and a one-line description, for a consistent
+# header on every page and cleaner navigation.
+_PAGE_META = {
+    "Live Centre": (":material/bolt:", "Live and recent scores across every ingested competition."),
+    "Fixtures": (
+        ":material/event_upcoming:",
+        "Upcoming matches with model-projected scores and odds.",
+    ),
+    "Season": (":material/emoji_events:", "Monte Carlo projection of the whole season ahead."),
+    "Analytics": (":material/table_chart:", "League table, power ranking and title odds."),
+    "Trends": (":material/trending_up:", "Who's hot and who's sliding, right now."),
+    "Records": (":material/military_tech:", "Active streaks and the season's standout results."),
+    "Forecast": (
+        ":material/insights:",
+        "Full market slate and a value calculator for any matchup.",
+    ),
+    "Shot Map": (":material/sports_soccer:", "Match centre — xG timeline, shot map and shot log."),
+    "Players": (":material/person:", "Full-event leaderboard and percentile scouting profiles."),
+    "Data Health": (":material/health_and_safety:", "Sources, coverage and licensing at a glance."),
+}
+
+
+def _page_header(page: str) -> None:
+    icon, blurb = _PAGE_META.get(page, (":material/dashboard:", ""))
+    st.header(f"{icon} {page}", anchor=False)
+    if blurb:
+        st.caption(blurb)
+
+
 def main() -> None:
-    st.set_page_config(page_title="Soccer Analytics", page_icon="⚽", layout="wide")
-    st.title("⚽ Soccer Analytics")
+    st.set_page_config(
+        page_title="Soccer Analytics",
+        page_icon=":material/sports_soccer:",
+        layout="wide",
+    )
 
     settings = get_settings()
     with st.sidebar:
-        st.header("View")
+        st.markdown("### :material/sports_soccer: Soccer Analytics")
+        st.caption("Local-first football intelligence")
+        st.space("small")
         page = st.radio(
             "Page",
             [
@@ -996,7 +1049,8 @@ def main() -> None:
             ],
             label_visibility="collapsed",
         )
-        st.button("↻ Refresh")
+
+    _page_header(page)
 
     if page == "Fixtures":
         _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))

@@ -1,0 +1,32 @@
+# Dashboard theme -- a clean, sporty light palette. Shipped with the package; the
+# `soccer dashboard` command runs streamlit from this directory so this file is picked up.
+[theme]
+base = "light"
+primaryColor = "#16a34a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f8fa"
+textColor = "#111827"
+linkColor = "#15803d"
+borderColor = "#e6e8eb"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+baseFontSize = 15
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+chartCategoricalColors = ["#16a34a", "#2563eb", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#64748b"]
+grayColor = "#64748b"
+greenColor = "#16a34a"
+redColor = "#dc2626"
+blueColor = "#2563eb"
+orangeColor = "#d97706"
+
+[theme.sidebar]
+backgroundColor = "#f8fafc"
+secondaryBackgroundColor = "#eef2f6"
+borderColor = "#e6e8eb"
+
+[server]
+# The dashboard is read-only; no need to watch for edits in production use.
+fileWatcherType = "auto"

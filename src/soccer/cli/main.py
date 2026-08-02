@@ -497,10 +497,12 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
 
     # files() imports only the (empty) package __init__, not app.py, so this does not
     # require streamlit to be importable at CLI load time.
-    app_path = str(files("soccer.dashboard") / "app.py")
+    app_path = files("soccer.dashboard") / "app.py"
     console.print(f"[green]Starting dashboard[/green] on http://localhost:{port}")
     subprocess.run(
-        [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(port)],
+        [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)],
+        # Run from the dashboard package dir so its .streamlit/config.toml (theme) loads.
+        cwd=str(app_path.parent),
         check=False,
     )
 
