@@ -20,6 +20,7 @@ from soccer.sources.football_data_co_uk import (
     parse_new_league_csv,
     parse_results_csv,
     season_label,
+    season_sort_key,
 )
 from soccer.storage.raw import RawStore
 
@@ -129,6 +130,17 @@ class TestLeagueNames:
         assert season_label("9394") == "1993/94"
         assert season_label("9900") == "1999/00"
         assert season_label("0001") == "2000/01"
+
+    def test_season_sort_key_is_chronological(self) -> None:
+        # Lexically "9900" > "2526"; chronologically 1999/2000 is far older.
+        assert season_sort_key("9900") < season_sort_key("0001") < season_sort_key("2526")
+        assert sorted(["2526", "9394", "0001", "9900"], key=season_sort_key) == [
+            "9394",
+            "9900",
+            "0001",
+            "2526",
+        ]
+        assert season_sort_key("2026") == 2026  # calendar-year (extra-country) code
 
     def test_calendar_year_season_kept(self) -> None:
         # Brazil's calendar-year seasons are not consecutive halves -> left as-is.

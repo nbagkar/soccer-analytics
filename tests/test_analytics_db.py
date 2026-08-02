@@ -68,6 +68,30 @@ class TestLoad:
         assert adb.load_results([]) == 0
 
 
+class TestSeasonOrdering:
+    """Season codes must order chronologically, not lexically ("9900" is 1999/2000).
+
+    Regression for the bug the deep-history backfill exposed: once pre-2000 seasons are
+    present, lexical MAX(season) picks "9900" as "latest", so the live forecast silently
+    trained on 1990s matches.
+    """
+
+    def test_latest_season_is_chronological(self, adb: AnalyticsDB) -> None:
+        adb.load_results([result("A", "B", 1, 0, season=s) for s in ("9900", "0001", "2526")])
+        assert adb.latest_season("E0") == "2526"  # lexical MAX would wrongly be "9900"
+
+    def test_recent_window_takes_newest_seasons_not_lexical(self, adb: AnalyticsDB) -> None:
+        for s in ("9900", "0001", "2526"):
+            adb.load_results([result("A", "B", 1, 0, season=s), result("C", "D", 2, 1, season=s)])
+        outs = adb.recent_outcomes_through("E0", "2526", n_seasons=2)
+        # Two most-recent seasons are 2025/26 and 2000/01 (4 matches); 1999/2000 excluded.
+        assert len(outs) == 4
+
+    def test_seasons_loaded_newest_first(self, adb: AnalyticsDB) -> None:
+        adb.load_results([result("A", "B", 1, 0, season=s) for s in ("9900", "2526", "0001")])
+        assert [s for s, _d, _n in adb.seasons_loaded()] == ["2526", "0001", "9900"]
+
+
 class TestLeagueTable:
     def test_table_computation(self, adb: AnalyticsDB) -> None:
         # A 3-team round: A beats B, A beats C, B draws C.

@@ -19,7 +19,7 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from soccer.sources.football_data_co_uk import MatchResult
+from soccer.sources.football_data_co_uk import MatchResult, season_sort_key
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -656,22 +656,25 @@ class AnalyticsDB:
 
     def seasons_loaded(self) -> list[tuple[str, str, int]]:
         """(season, division, match count) for everything loaded, newest season first."""
-        return self._con.execute(
-            "SELECT season, division, COUNT(*) FROM results "
-            "GROUP BY season, division ORDER BY season DESC, division"
+        rows = self._con.execute(
+            "SELECT season, division, COUNT(*) FROM results GROUP BY season, division"
         ).fetchall()
+        # Order in Python: season codes must sort chronologically, not lexically (a 1990s
+        # code like "9900" is lexically greater than "2526" but chronologically earlier).
+        return sorted(rows, key=lambda r: (-season_sort_key(r[0]), r[1]))
 
     def latest_season(self, division: str) -> str | None:
         """The most-recent loaded season for a division, or None if it has no results.
 
         Lets forecasting fit on whatever a division's newest data is without hardcoding a
-        season string -- European files use "2526", the extra-country files use calendar
-        years like "2026", and both sort most-recent-last lexically.
+        season string. Uses a chronological key, not lexical MAX -- once pre-2000 history
+        is loaded, "9900" (1999/2000) is lexically the largest but chronologically oldest.
         """
-        row = self._con.execute(
-            "SELECT MAX(season) FROM results WHERE division = ?", [division]
-        ).fetchone()
-        return row[0] if row and row[0] else None
+        rows = self._con.execute(
+            "SELECT DISTINCT season FROM results WHERE division = ?", [division]
+        ).fetchall()
+        seasons = [r[0] for r in rows]
+        return max(seasons, key=season_sort_key) if seasons else None
 
     def outcomes_for(self, season: str, division: str) -> list[ResultRow]:
         """Results for one (season, division) in date order, for the models to fit on."""
@@ -689,16 +692,20 @@ class AnalyticsDB:
 
         Combined and date-ordered, for a recency-weighted fit: pairing this with a
         time-decay Dixon-Coles blends last season as a prior while letting recent form
-        dominate. Seasons sort correctly whether European ("2526") or calendar ("2026").
+        dominate. Season windows are chosen chronologically (not by lexical string order).
         """
-        seasons = [
+        all_seasons = [
             r[0]
             for r in self._con.execute(
-                "SELECT DISTINCT season FROM results WHERE division=? AND season<=? "
-                "ORDER BY season DESC LIMIT ?",
-                [division, season, n_seasons],
+                "SELECT DISTINCT season FROM results WHERE division=?", [division]
             ).fetchall()
         ]
+        cutoff = season_sort_key(season)
+        seasons = sorted(
+            (s for s in all_seasons if season_sort_key(s) <= cutoff),
+            key=season_sort_key,
+            reverse=True,
+        )[:n_seasons]
         if not seasons:
             return []
         placeholders = ",".join("?" * len(seasons))

@@ -43,7 +43,7 @@ from soccer.dashboard.data import (
     team_form,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
-from soccer.sources.football_data_co_uk import division_name, season_label
+from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
 from soccer.storage.live_db import LiveDB
 
@@ -490,7 +490,7 @@ def _league_season_pickers(
     cols = st.columns(2 + extra)
     league = cols[0].selectbox("League", sorted(by_league), key=f"{key}_league")
     division, seasons = by_league[league]
-    seasons = sorted(set(seasons), reverse=True)
+    seasons = sorted(set(seasons), key=season_sort_key, reverse=True)
     tagged = {f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)}
     season = tagged[cols[1].selectbox("Season", list(tagged), key=f"{key}_season")]
     if extra:
