@@ -37,6 +37,7 @@ from soccer.dashboard.data import (
     player_seasons,
     shot_map,
     shot_matches,
+    team_form,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.sources.football_data_co_uk import division_name, season_label
@@ -225,6 +226,52 @@ def _cached_market_edge(db_path: str, season: str, division: str):
     from pathlib import Path
 
     return market_edge(Path(db_path), season, division)
+
+
+def _form_html(form: str) -> str:
+    """Colour a W/D/L form string: win green, draw grey, loss red."""
+    colour = {"W": "#16a34a", "D": "#8b8b8b", "L": "#dc2626"}
+    letters = "".join(
+        f'<span style="color:{colour.get(c, "#8b8b8b")};font-weight:700">{c}</span>' for c in form
+    )
+    return f'<span style="letter-spacing:1px">{letters}</span>'
+
+
+def _trend_span(trend: float) -> str:
+    if trend > 0.15:
+        return f'<span style="color:#16a34a">▲ {trend:+.2f}</span>'
+    if trend < -0.15:
+        return f'<span style="color:#dc2626">▼ {trend:+.2f}</span>'
+    return f'<span style="color:#8b8b8b">{trend:+.2f}</span>'
+
+
+def _render_trends(forms, *, last_n: int) -> None:
+    st.subheader("Form & trends")
+    st.caption(
+        f"Last {last_n} matches vs the season baseline. ▲ rising, ▼ sliding. "
+        "O2.5 = share of a team's games with over 2.5 goals; BTTS = both teams scored."
+    )
+    hottest, coldest = forms[0], forms[-1]
+    goalfest = max(forms, key=lambda f: f.over25_rate)
+    k = st.columns(3)
+    k[0].metric("Hottest", hottest.team, f"{hottest.recent_form} · {hottest.recent_ppg:.2f} ppg")
+    k[1].metric("Coldest", coldest.team, f"{coldest.recent_form} · {coldest.recent_ppg:.2f} ppg")
+    k[2].metric("Most goals", goalfest.team, f"{goalfest.over25_rate:.0%} over 2.5")
+
+    rows = [
+        {
+            "Team": f.team,
+            "Form": _form_html(f.recent_form),
+            "Recent ppg": f"{f.recent_ppg:.2f}",
+            "Season ppg": f'<span style="color:#8b8b8b">{f.ppg:.2f}</span>',
+            "Trend": _trend_span(f.trend),
+            "GF-GA": f'<span style="color:#8b8b8b">{f.goals_for}-{f.goals_against}</span>',
+            "O2.5": f"{f.over25_rate:.0%}",
+            "BTTS": f"{f.btts_rate:.0%}",
+        }
+        for f in forms
+    ]
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
 
 
 def _render_analytics(snap: AnalyticsSnapshot) -> None:
@@ -800,6 +847,7 @@ def main() -> None:
                 "Live Centre",
                 "Fixtures",
                 "Analytics",
+                "Trends",
                 "Forecast",
                 "Shot Map",
                 "Players",
@@ -943,6 +991,25 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_analytics(snap)
+        return
+
+    if page == "Trends":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            return
+        with st.sidebar:
+            options = sorted(available, key=lambda t: t[0], reverse=True)
+            options = sorted(options, key=lambda t: division_name(t[1]))
+            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            picked = st.selectbox("League / season", list(labels))
+            last_n = st.slider("Form window (matches)", 3, 10, 5)
+        season, division = labels[picked]
+        forms = team_form(settings.analytics_db, season, division, last_n=last_n)
+        if not forms:
+            st.info("No results for that selection.")
+        else:
+            _render_trends(forms, last_n=last_n)
         return
 
     if page == "Shot Map":

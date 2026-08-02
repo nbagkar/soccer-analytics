@@ -309,6 +309,14 @@ def forecast_teams(analytics_db: Path, season: str, division: str) -> list[str]:
     return sorted(names)
 
 
+def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5):
+    """Per-team form (list[TeamForm]) for a season, hottest first. [] if no results."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.team_form(season, division, last_n=last_n)
+
+
 # Recency-aware forecasting: fit on the last few seasons and re-fit as new results land,
 # so the model tracks current form instead of one frozen old season. Time-decay was the
 # obvious next knob, but a walk-forward backtest measured it DOWN skill monotonically

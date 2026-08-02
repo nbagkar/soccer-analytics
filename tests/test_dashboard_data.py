@@ -358,6 +358,29 @@ class TestAnalyticsSnapshot:
         assert ("2526", "E0", 12) in analytics_available(path)
 
 
+class TestTrends:
+    def test_team_form_computed_and_sorted(self, tmp_path) -> None:
+        from soccer.dashboard.data import team_form
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)  # Arsenal strong, Brentford weak in E0 2526
+        forms = team_form(path, "2526", "E0", last_n=3)
+        assert forms
+        by = {f.team: f for f in forms}
+        assert by["Arsenal"].ppg > by["Brentford"].ppg  # strong team, higher PPG
+        assert all(len(f.recent_form) <= 3 for f in forms)  # window respected
+        assert forms[0].recent_ppg >= forms[-1].recent_ppg  # hottest first
+        # over25/btts rates are valid fractions
+        assert all(0.0 <= f.over25_rate <= 1.0 and 0.0 <= f.btts_rate <= 1.0 for f in forms)
+
+    def test_team_form_empty_for_unknown_slice(self, tmp_path) -> None:
+        from soccer.dashboard.data import team_form
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        assert team_form(path, "9999", "ZZ") == []
+
+
 class TestShotMap:
     def _seed_shots(self, path) -> None:
         from soccer.sources.statsbomb import Shot
@@ -646,6 +669,9 @@ class TestAppSmoke:
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Analytics").run()
             assert not at.exception, f"Analytics raised: {at.exception}"
+
+            at.radio[0].set_value("Trends").run()
+            assert not at.exception, f"Trends raised: {at.exception}"
 
             at.radio[0].set_value("Forecast").run()
             assert not at.exception, f"Forecast raised: {at.exception}"

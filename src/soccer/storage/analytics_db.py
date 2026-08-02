@@ -197,6 +197,43 @@ class TableRow:
     points: int
 
 
+def _pts(gf: int, ga: int) -> int:
+    return 3 if gf > ga else 1 if gf == ga else 0
+
+
+def _res(gf: int, ga: int) -> str:
+    return "W" if gf > ga else "D" if gf == ga else "L"
+
+
+@dataclass(frozen=True)
+class TeamForm:
+    """A team's season-to-date form plus a recent-window snapshot, for the trends view."""
+
+    team: str
+    played: int
+    points: int
+    goals_for: int
+    goals_against: int
+    over25_rate: float
+    btts_rate: float
+    recent_form: str  # e.g. "WWDLW", oldest -> newest across the last N matches
+    recent_points: int
+    recent_played: int
+
+    @property
+    def ppg(self) -> float:
+        return self.points / self.played if self.played else 0.0
+
+    @property
+    def recent_ppg(self) -> float:
+        return self.recent_points / self.recent_played if self.recent_played else 0.0
+
+    @property
+    def trend(self) -> float:
+        """Recent points-per-game minus season PPG: >0 improving, <0 sliding."""
+        return self.recent_ppg - self.ppg
+
+
 @dataclass(frozen=True)
 class XgRow:
     name: str  # team or player
@@ -438,6 +475,49 @@ class AnalyticsDB:
             )
             for i, r in enumerate(rows)
         ]
+
+    def team_form(self, season: str, division: str, *, last_n: int = 5) -> list[TeamForm]:
+        """Per-team form for a season, sorted hottest-first (recent PPG, then season PPG).
+
+        Season-to-date points/goals and over-2.5 / both-teams-scored rates, plus a
+        last-`last_n` window and its record string, so the trends view can show who is
+        rising or sliding relative to their own season baseline.
+        """
+        from collections import defaultdict
+
+        rows = self._con.execute(
+            "SELECT match_date, home, away, fthg, ftag FROM results "
+            "WHERE season=? AND division=? ORDER BY match_date, home",
+            [season, division],
+        ).fetchall()
+
+        # team -> chronological list of (points, gf, ga, result_char, over25, btts)
+        history: dict[str, list[tuple]] = defaultdict(list)
+        for _md, home, away, hg, ag in rows:
+            over25, btts = (hg + ag) > 2, hg > 0 and ag > 0
+            history[home].append((_pts(hg, ag), hg, ag, _res(hg, ag), over25, btts))
+            history[away].append((_pts(ag, hg), ag, hg, _res(ag, hg), over25, btts))
+
+        forms: list[TeamForm] = []
+        for team, games in history.items():
+            played = len(games)
+            recent = games[-last_n:]
+            forms.append(
+                TeamForm(
+                    team=team,
+                    played=played,
+                    points=sum(g[0] for g in games),
+                    goals_for=sum(g[1] for g in games),
+                    goals_against=sum(g[2] for g in games),
+                    over25_rate=sum(1 for g in games if g[4]) / played,
+                    btts_rate=sum(1 for g in games if g[5]) / played,
+                    recent_form="".join(g[3] for g in recent),
+                    recent_points=sum(g[0] for g in recent),
+                    recent_played=len(recent),
+                )
+            )
+        forms.sort(key=lambda f: (-f.recent_ppg, -f.ppg, f.team))
+        return forms
 
     def result_count(self, season: str | None = None, division: str | None = None) -> int:
         clauses, params = [], []
