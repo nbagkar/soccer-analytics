@@ -774,17 +774,15 @@ class TestAppSmoke:
             at.radio[0].set_value("Records").run()
             assert not at.exception, f"Records raised: {at.exception}"
 
-            # Players page: seed full-event stats so the rich leaderboard + profile render.
+            # Analysis merges match xG + players into one page (two tabs). Seed both shots
+            # and full-event player stats so each tab has data, then a single visit renders
+            # both tab bodies.
             seed_player_events(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("Players").run()
-            assert not at.exception, f"Players leaderboard raised: {at.exception}"
-            # Switch to the per-player profile view (percentile fingerprint).
-            at.segmented_control[0].set_value("Player profile").run()
-            assert not at.exception, f"Players profile raised: {at.exception}"
-
-            # Shot Map page needs shots; seed and visit.
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("Match analysis").run()
-            assert not at.exception, f"Shot Map raised: {at.exception}"
+            at.radio[0].set_value("Analysis").run()
+            assert not at.exception, f"Analysis raised: {at.exception}"
+            # Switch the Players tab to the per-player profile view (percentile fingerprint).
+            at.segmented_control[0].set_value("Player profile").run()
+            assert not at.exception, f"Analysis players profile raised: {at.exception}"
         finally:
             config._settings = None

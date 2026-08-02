@@ -1182,8 +1182,7 @@ _NAV = [
     ("Predictor", "Predictor", ":material/insights:", "Match scores and season odds"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
-    ("Shot Map", "Match analysis", ":material/sports_soccer:", "xG timelines and shot maps"),
-    ("Players", "Players", ":material/person:", "Player stats and scouting profiles"),
+    ("Analysis", "Analysis", ":material/analytics:", "Match xG and player scouting"),
     ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
 ]
 _NAV_LABELS = [label for _k, label, _i, _c in _NAV]
@@ -1198,6 +1197,118 @@ def _page_header(page: str) -> None:
     st.header(f"{icon} {label}", anchor=False)
     if blurb:
         st.caption(blurb)
+
+
+def _render_match_analysis(settings) -> None:
+    """Analysis > Match tab: xG timeline and shot map for a chosen StatsBomb match."""
+    matches = shot_matches(settings.analytics_db)
+    if not matches:
+        st.info(
+            "No match data yet. Go to **About & sources** → **Add player data** to load some.",
+            icon=":material/groups:",
+        )
+        return
+    comps = sorted({comp for _mid, _lbl, comp, _s in matches})
+    fcols = st.columns([1, 1, 2])
+    if len(comps) > 1:
+        chosen = fcols[0].selectbox("Competition", comps, key="ma_comp")
+        matches = [m for m in matches if m[2] == chosen]
+    seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
+    if len(seasons) > 1:
+        chosen_season = fcols[1].selectbox("Season", seasons, key="ma_season")
+        matches = [m for m in matches if m[3] == chosen_season]
+    labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
+    picked = fcols[2].selectbox("Match", list(labels), key="ma_match")
+    data = shot_map(settings.analytics_db, labels[picked])
+    if data is None:
+        st.info("No shots for that match.")
+    else:
+        _render_shot_map(data)
+
+
+def _render_players_page(settings) -> None:
+    """Analysis > Players tab: full-event leaderboard and per-player scouting profiles."""
+    if not has_player_events(settings.analytics_db):
+        # No full-event stats -- fall back to the shots-only board, or prompt.
+        rows = player_board(settings.analytics_db, top=25, min_shots=3, order="xg")
+        if rows:
+            _render_players(rows)
+        else:
+            st.info(
+                "No player data yet. Go to **About & sources** → **Add player data** to load some.",
+                icon=":material/groups:",
+            )
+        return
+
+    comps = player_competitions(settings.analytics_db)
+    competition, season, scope = None, None, "All competitions"
+    row = st.columns(4)
+    slot = 0
+    if len(comps) > 1:
+        clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
+        comp_choice = row[slot].selectbox("Competition", list(clabels), key="pl_comp")
+        slot += 1
+        competition = clabels[comp_choice]
+        if competition:
+            scope = competition
+    if competition:
+        seasons = player_seasons(settings.analytics_db, competition)
+        if len(seasons) > 1:
+            slabels = {"All seasons": None} | {f"{s}  ({n})": s for s, n in seasons}
+            season = slabels[row[slot].selectbox("Season", list(slabels), key="pl_season")]
+            slot += 1
+            if season:
+                scope = f"{competition} {season}"
+    view = row[slot].segmented_control(
+        "View", ["Leaderboard", "Player profile"], default="Leaderboard"
+    )
+    slot += 1
+    min_minutes = row[slot].slider("Min minutes", 90, 900, 270, step=30)
+
+    if view == "Player profile":
+        pool = player_profiles(
+            settings.analytics_db,
+            top=100_000,
+            min_minutes=min_minutes,
+            order="contributions",
+            competition=competition,
+            season=season,
+        )
+        if not pool:
+            st.info("No players clear that minutes threshold. Lower it above.")
+            return
+        names = [p.player for p in pool]
+        picked = st.selectbox("Player", names)
+        profile = player_profile(
+            settings.analytics_db, picked, competition=competition, season=season
+        )
+        pcts = player_percentiles(
+            settings.analytics_db,
+            picked,
+            min_minutes=min_minutes,
+            competition=competition,
+            season=season,
+        )
+        if profile is None:
+            st.info("No profile for that player.")
+        else:
+            _render_player_profile(profile, pcts, pool_label=scope)
+    else:
+        rc = st.columns([3, 1])
+        rank_label = rc[0].selectbox("Rank by", list(_RANK_OPTIONS))
+        per90 = rc[1].toggle("Per 90 minutes", value=False)
+        profiles = player_profiles(
+            settings.analytics_db,
+            top=40,
+            min_minutes=min_minutes,
+            order=_RANK_OPTIONS[rank_label],
+            competition=competition,
+            season=season,
+        )
+        if not profiles:
+            st.info("No players clear that minutes threshold. Lower it above.")
+        else:
+            _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
 
 
 def main() -> None:
@@ -1239,88 +1350,12 @@ def main() -> None:
         _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
         return
 
-    if page == "Players":
-        if not has_player_events(settings.analytics_db):
-            # No full-event stats -- fall back to the shots-only board, or prompt.
-            rows = player_board(settings.analytics_db, top=25, min_shots=3, order="xg")
-            if rows:
-                _render_players(rows)
-            else:
-                st.info(
-                    "No player data yet. Go to **Home** → **Add player data** to load some.",
-                    icon=":material/groups:",
-                )
-            return
-
-        comps = player_competitions(settings.analytics_db)
-        competition, season, scope = None, None, "All competitions"
-        row = st.columns(4)
-        slot = 0
-        if len(comps) > 1:
-            clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
-            comp_choice = row[slot].selectbox("Competition", list(clabels))
-            slot += 1
-            competition = clabels[comp_choice]
-            if competition:
-                scope = competition
-        if competition:
-            seasons = player_seasons(settings.analytics_db, competition)
-            if len(seasons) > 1:
-                slabels = {"All seasons": None} | {f"{s}  ({n})": s for s, n in seasons}
-                season = slabels[row[slot].selectbox("Season", list(slabels))]
-                slot += 1
-                if season:
-                    scope = f"{competition} {season}"
-        view = row[slot].segmented_control(
-            "View", ["Leaderboard", "Player profile"], default="Leaderboard"
-        )
-        slot += 1
-        min_minutes = row[slot].slider("Min minutes", 90, 900, 270, step=30)
-
-        if view == "Player profile":
-            pool = player_profiles(
-                settings.analytics_db,
-                top=100_000,
-                min_minutes=min_minutes,
-                order="contributions",
-                competition=competition,
-                season=season,
-            )
-            if not pool:
-                st.info("No players clear that minutes threshold. Lower it above.")
-                return
-            names = [p.player for p in pool]
-            picked = st.selectbox("Player", names)
-            profile = player_profile(
-                settings.analytics_db, picked, competition=competition, season=season
-            )
-            pcts = player_percentiles(
-                settings.analytics_db,
-                picked,
-                min_minutes=min_minutes,
-                competition=competition,
-                season=season,
-            )
-            if profile is None:
-                st.info("No profile for that player.")
-            else:
-                _render_player_profile(profile, pcts, pool_label=scope)
-        else:
-            rc = st.columns([3, 1])
-            rank_label = rc[0].selectbox("Rank by", list(_RANK_OPTIONS))
-            per90 = rc[1].toggle("Per 90 minutes", value=False)
-            profiles = player_profiles(
-                settings.analytics_db,
-                top=40,
-                min_minutes=min_minutes,
-                order=_RANK_OPTIONS[rank_label],
-                competition=competition,
-                season=season,
-            )
-            if not profiles:
-                st.info("No players clear that minutes threshold. Lower it above.")
-            else:
-                _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
+    if page == "Analysis":
+        match_tab, players_tab = st.tabs(["Match", "Players"])
+        with match_tab:
+            _render_match_analysis(settings)
+        with players_tab:
+            _render_players_page(settings)
         return
 
     if page == "Predictor":
@@ -1410,32 +1445,6 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_records(records)
-        return
-
-    if page == "Shot Map":
-        matches = shot_matches(settings.analytics_db)
-        if not matches:
-            st.info(
-                "No match data yet. Go to **Home** → **Add player data** to load some.",
-                icon=":material/groups:",
-            )
-            return
-        comps = sorted({comp for _mid, _lbl, comp, _s in matches})
-        fcols = st.columns([1, 1, 2])
-        if len(comps) > 1:
-            chosen = fcols[0].selectbox("Competition", comps)
-            matches = [m for m in matches if m[2] == chosen]
-        seasons = sorted({s for _mid, _lbl, _c, s in matches if s}, reverse=True)
-        if len(seasons) > 1:
-            chosen_season = fcols[1].selectbox("Season", seasons)
-            matches = [m for m in matches if m[3] == chosen_season]
-        labels = {f"{lbl}": mid for mid, lbl, _comp, _s in matches}
-        picked = fcols[2].selectbox("Match", list(labels))
-        data = shot_map(settings.analytics_db, labels[picked])
-        if data is None:
-            st.info("No shots for that match.")
-        else:
-            _render_shot_map(data)
         return
 
     if not settings.live_db.exists():
