@@ -85,12 +85,32 @@ def _go(page: str) -> None:
 def _render_home(settings) -> None:
     from soccer.dashboard import actions
 
+    status = actions.data_status(settings)
+
+    # First launch: set the user up automatically -- no clicks, no terminal. The data
+    # can't ship bundled (source licences forbid redistribution), so we fetch a starter
+    # set live, once.
+    if status["leagues"] == 0 and not st.session_state.get("_setup_tried"):
+        st.session_state._setup_tried = True
+        st.info("Welcome! Setting up a starter set of leagues for you — a one-time download.")
+        bar = st.progress(0.0, "Downloading…")
+        try:
+            message = actions.starter_setup(
+                settings, on_progress=lambda d, t: bar.progress(d / t, f"{d}/{t} leagues")
+            )
+            bar.empty()
+            st.toast(message, icon="✅")
+            st.rerun()
+        except Exception as exc:  # offline/first-run; fall back to the manual buttons
+            bar.empty()
+            st.warning(f"Couldn't auto-download (are you online?). Use the buttons below. — {exc}")
+
     st.markdown(
         "Welcome! This is your local football intelligence centre — everything runs on "
         "your machine. Ask questions in plain English, browse forecasts, tables, form and "
-        "player stats, and top up the data below. **No terminal needed.**"
+        "player stats. It sets itself up on first launch; top up any time below. "
+        "**No terminal needed.**"
     )
-    status = actions.data_status(settings)
     c = st.columns(4)
     c[0].metric("Leagues", status["leagues"], border=True)
     c[1].metric("History matches", f"{status['history_matches']:,}", border=True)

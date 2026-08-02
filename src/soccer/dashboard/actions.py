@@ -33,6 +33,11 @@ LEAGUE_CHOICES = {
     "Brazil Série A": "BRA",
 }
 
+# The set a fresh install downloads itself on first launch, so it "just works" without
+# any clicks -- fast, token-free league results that power tables, forecasts, trends,
+# records, the season oracle and most assistant questions.
+STARTER_LEAGUES = ["E0", "SP1", "N1", "P1"]
+
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
 EVENT_PACKS = {
     "2022 World Cup (64 matches)": (43, 106, 64),
@@ -132,6 +137,34 @@ def add_league_history(settings: Settings, division: str) -> str:
     if not total:
         return f"No data available yet for {division_name(division)}."
     return f"Added {total} matches for {division_name(division)}."
+
+
+def starter_setup(settings: Settings, *, on_progress: Callable | None = None) -> str:
+    """Download the first-launch starter set so a fresh install populates itself.
+
+    Token-free league results for a handful of major leagues (plus fixtures if a
+    football-data.org token is configured). Fetched live from the sources -- their terms
+    forbid redistribution, so nothing can ship bundled; this is the permitted use.
+    """
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+    seasons = _recent_seasons(3)
+    total = 0
+    with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
+        for i, division in enumerate(STARTER_LEAGUES, 1):
+            for season in seasons:
+                results = source.fetch_division(season, division)
+                if results:
+                    adb.load_results(results)
+                    total += len(results)
+            if on_progress:
+                on_progress(i, len(STARTER_LEAGUES))
+    if settings.football_data_org_token:
+        import contextlib
+
+        with contextlib.suppress(Exception):  # fixtures are a bonus; never block setup
+            update_fixtures(settings)
+    return f"Loaded {total} matches across {len(STARTER_LEAGUES)} leagues — you're ready to go!"
 
 
 def load_event_pack(

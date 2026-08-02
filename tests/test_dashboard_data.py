@@ -721,6 +721,9 @@ class TestAppSmoke:
                 status=MatchStatus.FINISHED,
             )
             build.close()
+            # Seed some league data up front so the Home page shows content instead of
+            # firing its first-launch auto-download (which would hit the network).
+            TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
 
             from streamlit.testing.v1 import AppTest
 
