@@ -745,9 +745,11 @@ class TestAppSmoke:
             at.radio[0].set_value("About & sources").run()
             assert not at.exception, f"Data Health raised: {at.exception}"
 
-            # Fixtures page reads upcoming matches (none forecastable here) — must not raise.
-            at.radio[0].set_value("Upcoming matches").run()
-            assert not at.exception, f"Fixtures raised: {at.exception}"
+            # Predictions merges upcoming fixtures + matchup + season into one page. Visit it
+            # before seeding league data: the Upcoming tab lists fixtures (none forecastable
+            # here), and the Matchup/Season tabs fall back to their "add data" prompts.
+            at.radio[0].set_value("Predictions").run()
+            assert not at.exception, f"Predictions (empty) raised: {at.exception}"
 
             # League tables now folds the form guide in as a second tab, and adds a Form
             # column to the table itself. AppTest executes both tab bodies on one visit, so
@@ -766,10 +768,11 @@ class TestAppSmoke:
             at.chat_input[0].set_value("who is top of the premier league?").run()
             assert not at.exception, f"Assistant query raised: {at.exception}"
 
-            # Predictor merges match + season into one page (two tabs); AppTest executes
-            # both tab bodies, so a single visit covers the forecast slate and the sim.
-            at.radio[0].set_value("Predictor").run()
-            assert not at.exception, f"Predictor raised: {at.exception}"
+            # With league data seeded, revisit Predictions: AppTest executes all three tab
+            # bodies, so this covers the upcoming-fixtures list, the matchup forecast slate
+            # and the season simulation in one visit.
+            at.radio[0].set_value("Predictions").run()
+            assert not at.exception, f"Predictions raised: {at.exception}"
 
             at.radio[0].set_value("Records").run()
             assert not at.exception, f"Records raised: {at.exception}"

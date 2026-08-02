@@ -127,9 +127,7 @@ def _render_home(settings) -> None:
         st.markdown("#### :material/rocket_launch: Start here")
         if st.button("Ask the assistant", icon=":material/chat:", width="stretch", type="primary"):
             _go("Assistant")
-        if st.button("See upcoming fixtures", icon=":material/event_upcoming:", width="stretch"):
-            _go("Fixtures")
-        if st.button("Predict scores & tables", icon=":material/insights:", width="stretch"):
+        if st.button("See predictions & fixtures", icon=":material/insights:", width="stretch"):
             _go("Predictor")
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
@@ -463,13 +461,15 @@ def _render_season(briefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
-def _league_season_pickers(available: list[tuple[str, str, int]], *, extra: int = 0) -> tuple:
+def _league_season_pickers(
+    available: list[tuple[str, str, int]], *, extra: int = 0, key: str = "ls"
+) -> tuple:
     """Dependent League + Season selectors laid out as a row on the page.
 
     Returns (season, division). Pass `extra` to reserve that many trailing columns for a
     page's own controls (the returned tuple then also yields those columns). The season
-    list follows the chosen league, newest first with its latest entry tagged; shared
-    widget keys persist the choice across pages.
+    list follows the chosen league, newest first with its latest entry tagged. Widget keys
+    derive from `key`, so pages that show two pickers at once pass distinct keys.
     """
     by_league: dict[str, list] = {}
     for season, division, _n in available:
@@ -477,11 +477,11 @@ def _league_season_pickers(available: list[tuple[str, str, int]], *, extra: int 
         entry[1].append(season)
 
     cols = st.columns(2 + extra)
-    league = cols[0].selectbox("League", sorted(by_league), key="ls_league")
+    league = cols[0].selectbox("League", sorted(by_league), key=f"{key}_league")
     division, seasons = by_league[league]
     seasons = sorted(set(seasons), reverse=True)
     tagged = {f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)}
-    season = tagged[cols[1].selectbox("Season", list(tagged), key="ls_season")]
+    season = tagged[cols[1].selectbox("Season", list(tagged), key=f"{key}_season")]
     if extra:
         return season, division, cols[2:]
     return season, division
@@ -1178,8 +1178,7 @@ _NAV = [
     ("Home", "Home", ":material/home:", "Set up and quick actions"),
     ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
-    ("Fixtures", "Upcoming matches", ":material/event_upcoming:", "Fixtures with predicted scores"),
-    ("Predictor", "Predictor", ":material/insights:", "Match scores and season odds"),
+    ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
     ("Analysis", "Analysis", ":material/analytics:", "Match xG and player scouting"),
@@ -1346,10 +1345,6 @@ def main() -> None:
         _render_assistant(settings)
         return
 
-    if page == "Fixtures":
-        _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
-        return
-
     if page == "Analysis":
         match_tab, players_tab = st.tabs(["Match", "Players"])
         with match_tab:
@@ -1360,50 +1355,58 @@ def main() -> None:
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        if not available:
-            st.info(
-                "No league data yet. Go to **Home** → **Add a league** to download some.",
-                icon=":material/download:",
-            )
-            return
-        # One league/season pick drives both views; the tabs just change the question.
-        season, division = _league_season_pickers(available)
-        match_tab, season_tab = st.tabs(["Match", "Season"])
+        upcoming_tab, match_tab, season_tab = st.tabs(["Upcoming", "Matchup", "Season"])
+
+        with upcoming_tab:
+            _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
 
         with match_tab:
-            st.caption(
-                "Odds and a likely score for any matchup in this slice. "
-                "For the upcoming season's real fixtures, see **Upcoming matches**."
-            )
-            teams = forecast_teams(settings.analytics_db, season, division)
-            fc = st.columns([2, 2, 1])
-            home = fc[0].selectbox("Home", teams, index=0)
-            away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
-            mle = fc[2].toggle("Dixon-Coles model", value=True)
-            if home == away:
-                st.info("Pick two different teams.")
+            if not available:
+                st.info(
+                    "No league data yet. Go to **About & sources** → **Add a league**.",
+                    icon=":material/download:",
+                )
             else:
-                slate = forecast_slate(settings.analytics_db, season, division, home, away, mle=mle)
-                if slate is None:
-                    st.info("Could not forecast that matchup.")
+                season, division = _league_season_pickers(available, key="pred_match")
+                st.caption("Odds and a likely score for any matchup in this slice.")
+                teams = forecast_teams(settings.analytics_db, season, division)
+                fc = st.columns([2, 2, 1])
+                home = fc[0].selectbox("Home", teams, index=0)
+                away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
+                mle = fc[2].toggle("Dixon-Coles model", value=True)
+                if home == away:
+                    st.info("Pick two different teams.")
                 else:
-                    _render_forecast(slate)
-                    st.divider()
-                    _render_ev_calculator(slate)
-                    report = _cached_market_edge(str(settings.analytics_db), season, division)
-                    if report is not None:
+                    slate = forecast_slate(
+                        settings.analytics_db, season, division, home, away, mle=mle
+                    )
+                    if slate is None:
+                        st.info("Could not forecast that matchup.")
+                    else:
+                        _render_forecast(slate)
                         st.divider()
-                        _render_market_edge(report)
+                        _render_ev_calculator(slate)
+                        report = _cached_market_edge(str(settings.analytics_db), season, division)
+                        if report is not None:
+                            st.divider()
+                            _render_market_edge(report)
 
         with season_tab:
-            st.caption(
-                "Title, top-four and relegation odds from simulating the rest of the season."
-            )
-            briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
-            if briefing is None:
-                st.info("No results for that selection.")
+            if not available:
+                st.info(
+                    "No league data yet. Go to **About & sources** → **Add a league**.",
+                    icon=":material/download:",
+                )
             else:
-                _render_season(briefing)
+                season, division = _league_season_pickers(available, key="pred_season")
+                st.caption(
+                    "Title, top-four and relegation odds from simulating the rest of the season."
+                )
+                briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
+                if briefing is None:
+                    st.info("No results for that selection.")
+                else:
+                    _render_season(briefing)
         return
 
     if page == "Analytics":
