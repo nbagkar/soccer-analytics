@@ -317,6 +317,61 @@ def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5
         return adb.team_form(season, division, last_n=last_n)
 
 
+@dataclass(frozen=True)
+class SeasonBriefing:
+    season: str
+    division: str
+    n_sims: int
+    top_n: int
+    relegation: int
+    projections: list  # TeamProjection, team = normalized name
+    names: dict  # normalized -> display name
+
+
+def season_briefing(
+    analytics_db: Path,
+    season: str,
+    division: str,
+    *,
+    n_sims: int = 10_000,
+    top_n: int = 4,
+    relegation: int = 3,
+    seed: int = 1,
+) -> SeasonBriefing | None:
+    """Monte Carlo a full season among `season`'s teams, from the recency-weighted model.
+
+    Simulates every team playing every other home and away (a clean round-robin, not the
+    real schedule) using the same multi-season Dixon-Coles fit the match forecasts use --
+    a pre-season projection of title / top-N / relegation odds and expected points. None
+    if the season has no results.
+    """
+    from soccer.models.dixon_coles import fit_dixon_coles
+    from soccer.models.simulation import simulate_season
+
+    with AnalyticsDB(analytics_db) as adb:
+        anchor = adb.outcomes_for(season, division)
+        window = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+    if not anchor:
+        return None
+
+    names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
+    teams = sorted(names)
+    model = fit_dixon_coles(window, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
+    fixtures = [(home, away) for home in teams for away in teams if home != away]
+    result = simulate_season(
+        model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
+    )
+    return SeasonBriefing(
+        season=season,
+        division=division,
+        n_sims=n_sims,
+        top_n=top_n,
+        relegation=relegation,
+        projections=result.projections,
+        names=names,
+    )
+
+
 # Recency-aware forecasting: fit on the last few seasons and re-fit as new results land,
 # so the model tracks current form instead of one frozen old season. Time-decay was the
 # obvious next knob, but a walk-forward backtest measured it DOWN skill monotonically

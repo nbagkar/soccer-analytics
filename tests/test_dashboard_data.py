@@ -381,6 +381,29 @@ class TestTrends:
         assert team_form(path, "9999", "ZZ") == []
 
 
+class TestSeasonBriefing:
+    def test_projects_full_table(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_briefing
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)  # Arsenal strong, Brentford weak
+        briefing = season_briefing(path, "2526", "E0", n_sims=300, seed=1)
+        assert briefing is not None
+        assert len(briefing.projections) == 4  # the four seeded teams
+        # Someone wins every simulated season -> title probabilities sum to 1.
+        assert sum(p.title_pct for p in briefing.projections) == pytest.approx(1.0, abs=1e-6)
+        # The strongest seeded team is the title favourite.
+        favourite = max(briefing.projections, key=lambda p: p.title_pct)
+        assert briefing.names[favourite.team] == "Arsenal"
+
+    def test_none_for_unknown_slice(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_briefing
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        assert season_briefing(path, "9999", "ZZ") is None
+
+
 class TestShotMap:
     def _seed_shots(self, path) -> None:
         from soccer.sources.statsbomb import Shot
@@ -672,6 +695,9 @@ class TestAppSmoke:
 
             at.radio[0].set_value("Trends").run()
             assert not at.exception, f"Trends raised: {at.exception}"
+
+            at.radio[0].set_value("Season").run()
+            assert not at.exception, f"Season raised: {at.exception}"
 
             at.radio[0].set_value("Forecast").run()
             assert not at.exception, f"Forecast raised: {at.exception}"

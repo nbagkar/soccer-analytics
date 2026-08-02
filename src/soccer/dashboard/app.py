@@ -35,6 +35,7 @@ from soccer.dashboard.data import (
     player_profile,
     player_profiles,
     player_seasons,
+    season_briefing,
     shot_map,
     shot_matches,
     team_form,
@@ -226,6 +227,67 @@ def _cached_market_edge(db_path: str, season: str, division: str):
     from pathlib import Path
 
     return market_edge(Path(db_path), season, division)
+
+
+@st.cache_data(show_spinner="Simulating the season…")
+def _cached_season_briefing(db_path: str, season: str, division: str):
+    from pathlib import Path
+
+    return season_briefing(Path(db_path), season, division)
+
+
+def _render_season(briefing) -> None:
+    st.subheader(
+        f"Season oracle — {division_name(briefing.division)} {season_label(briefing.season)}"
+    )
+    st.caption(
+        f"{briefing.n_sims:,} Monte Carlo seasons from the recency-weighted model, every team "
+        f"playing a full round-robin. A pre-season projection off {season_label(briefing.season)} "
+        "strengths — blind to summer transfers and injuries, so treat the extremes with care."
+    )
+    names = briefing.names
+    projs = sorted(briefing.projections, key=lambda p: -p.expected_points)
+
+    fav = projs[0]
+    drop = max(projs, key=lambda p: p.relegation_pct)
+    tightest = min(projs, key=lambda p: abs(p.title_pct - 0.5))
+    k = st.columns(3)
+    k[0].metric("Title favourite", names.get(fav.team, fav.team), f"{fav.title_pct:.0%}")
+    k[1].metric("Most at risk", names.get(drop.team, drop.team), f"{drop.relegation_pct:.0%} down")
+    k[2].metric(
+        "On the bubble", names.get(tightest.team, tightest.team), f"{tightest.title_pct:.0%} title"
+    )
+
+    frame = pl.DataFrame(
+        {
+            "#": list(range(1, len(projs) + 1)),
+            "Team": [names.get(p.team, p.team) for p in projs],
+            "xPts": [round(p.expected_points) for p in projs],
+            "Title %": [round(100 * p.title_pct, 1) for p in projs],
+            f"Top {briefing.top_n} %": [round(100 * p.top_pct, 1) for p in projs],
+            "Relegation %": [round(100 * p.relegation_pct, 1) for p in projs],
+        }
+    ).to_pandas()
+
+    st.dataframe(
+        frame,
+        width="stretch",
+        hide_index=True,
+        height=min(760, 60 + 35 * len(projs)),
+        column_config={
+            "xPts": st.column_config.NumberColumn("xPts", format="%d", help="Expected points"),
+            "Title %": st.column_config.ProgressColumn(
+                "Title %", format="%.1f%%", min_value=0, max_value=100
+            ),
+            f"Top {briefing.top_n} %": st.column_config.ProgressColumn(
+                f"Top {briefing.top_n} %", format="%.0f%%", min_value=0, max_value=100
+            ),
+            "Relegation %": st.column_config.ProgressColumn(
+                "Relegation %", format="%.0f%%", min_value=0, max_value=100
+            ),
+        },
+    )
+    st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
 def _form_html(form: str) -> str:
@@ -846,6 +908,7 @@ def main() -> None:
             [
                 "Live Centre",
                 "Fixtures",
+                "Season",
                 "Analytics",
                 "Trends",
                 "Forecast",
@@ -1010,6 +1073,25 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_trends(forms, last_n=last_n)
+        return
+
+    if page == "Season":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            return
+        with st.sidebar:
+            # Only leagues (round-robin) simulate sensibly; every loaded slice is offered.
+            options = sorted(available, key=lambda t: t[0], reverse=True)
+            options = sorted(options, key=lambda t: division_name(t[1]))
+            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            picked = st.selectbox("League / season", list(labels))
+        season, division = labels[picked]
+        briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
+        if briefing is None:
+            st.info("No results for that selection.")
+        else:
+            _render_season(briefing)
         return
 
     if page == "Shot Map":
