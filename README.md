@@ -54,6 +54,12 @@ disappointment.
 This realizes the original 12-week plan's full scope. Remaining ideas are optional
 extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 
+The dashboard is also usable without the terminal: a **Home** page shows data status and
+loads/refreshes data with buttons (scores, fixtures, a league's history, a StatsBomb
+player-data pack), and a built-in **Assistant** answers plain-English questions
+("who's top of the Premier League?", "Arsenal vs Chelsea?", "how many goals did Messi
+score?") entirely offline — rule-based, no LLM, nothing leaves the machine.
+
 On betting value: there is no free source of odds for *upcoming* matches, so rather than
 fake a live edge, `soccer value` measures a real one against history — betting the model's
 positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
@@ -153,7 +159,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 353 tests
+pytest            # 365 tests
 ruff check .      # lint
 ruff format .     # format
 ```
