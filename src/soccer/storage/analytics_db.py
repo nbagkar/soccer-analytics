@@ -235,6 +235,41 @@ class TeamForm:
 
 
 @dataclass(frozen=True)
+class TeamStreak:
+    """Active runs for a team (counted back from its most recent match) plus a season best."""
+
+    team: str
+    unbeaten: int
+    winning: int
+    winless: int
+    scoring: int
+    longest_unbeaten: int
+
+
+@dataclass(frozen=True)
+class MatchRecord:
+    """A single notable result, for the records view."""
+
+    match_date: object
+    home: str
+    away: str
+    home_goals: int
+    away_goals: int
+
+    @property
+    def score(self) -> str:
+        return f"{self.home_goals}-{self.away_goals}"
+
+    @property
+    def total(self) -> int:
+        return self.home_goals + self.away_goals
+
+    @property
+    def margin(self) -> int:
+        return abs(self.home_goals - self.away_goals)
+
+
+@dataclass(frozen=True)
 class XgRow:
     name: str  # team or player
     team: str | None
@@ -518,6 +553,71 @@ class AnalyticsDB:
             )
         forms.sort(key=lambda f: (-f.recent_ppg, -f.ppg, f.team))
         return forms
+
+    def team_streaks(self, season: str, division: str) -> list[TeamStreak]:
+        """Active runs per team (unbeaten / winning / winless / scoring), longest-run first.
+
+        Streaks are counted back from each team's most recent match, so they answer "who is
+        on a run right now" -- the records-to-watch view. `longest_unbeaten` is the season's
+        best unbeaten sequence for context.
+        """
+        from collections import defaultdict
+
+        rows = self._con.execute(
+            "SELECT match_date, home, away, fthg, ftag FROM results "
+            "WHERE season=? AND division=? ORDER BY match_date, home",
+            [season, division],
+        ).fetchall()
+        history: dict[str, list[tuple[str, bool]]] = defaultdict(list)
+        for _md, home, away, hg, ag in rows:
+            history[home].append((_res(hg, ag), hg > 0))
+            history[away].append((_res(ag, hg), ag > 0))
+
+        def run_back(seq, predicate) -> int:
+            count = 0
+            for item in reversed(seq):
+                if predicate(item):
+                    count += 1
+                else:
+                    break
+            return count
+
+        def longest_run(seq, predicate) -> int:
+            best = current = 0
+            for item in seq:
+                current = current + 1 if predicate(item) else 0
+                best = max(best, current)
+            return best
+
+        streaks = [
+            TeamStreak(
+                team=team,
+                unbeaten=run_back(games, lambda g: g[0] != "L"),
+                winning=run_back(games, lambda g: g[0] == "W"),
+                winless=run_back(games, lambda g: g[0] != "W"),
+                scoring=run_back(games, lambda g: g[1]),
+                longest_unbeaten=longest_run(games, lambda g: g[0] != "L"),
+            )
+            for team, games in history.items()
+        ]
+        streaks.sort(key=lambda s: (-s.unbeaten, -s.winning, s.team))
+        return streaks
+
+    def _match_records(self, season: str, division: str, order_by: str, limit: int) -> list:
+        rows = self._con.execute(
+            "SELECT match_date, home, away, fthg, ftag FROM results "
+            f"WHERE season=? AND division=? ORDER BY {order_by} LIMIT ?",  # order_by is internal
+            [season, division, limit],
+        ).fetchall()
+        return [MatchRecord(*r) for r in rows]
+
+    def biggest_wins(self, season: str, division: str, *, limit: int = 5) -> list[MatchRecord]:
+        """Results with the largest winning margin (ties broken by total goals)."""
+        return self._match_records(season, division, "ABS(fthg-ftag) DESC, (fthg+ftag) DESC", limit)
+
+    def highest_scoring(self, season: str, division: str, *, limit: int = 5) -> list[MatchRecord]:
+        """Results with the most total goals."""
+        return self._match_records(season, division, "(fthg+ftag) DESC, ABS(fthg-ftag) DESC", limit)
 
     def result_count(self, season: str | None = None, division: str | None = None) -> int:
         clauses, params = [], []

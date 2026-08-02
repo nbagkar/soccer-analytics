@@ -318,6 +318,30 @@ def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5
 
 
 @dataclass(frozen=True)
+class SeasonRecords:
+    streaks: list  # TeamStreak, longest active unbeaten first
+    biggest_wins: list  # MatchRecord
+    highest_scoring: list  # MatchRecord
+
+
+def season_records(
+    analytics_db: Path, season: str, division: str, *, limit: int = 6
+) -> SeasonRecords | None:
+    """Active streaks and notable results for a season, or None if it has no results."""
+    if not Path(analytics_db).exists():
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        streaks = adb.team_streaks(season, division)
+        if not streaks:
+            return None
+        return SeasonRecords(
+            streaks=streaks,
+            biggest_wins=adb.biggest_wins(season, division, limit=limit),
+            highest_scoring=adb.highest_scoring(season, division, limit=limit),
+        )
+
+
+@dataclass(frozen=True)
 class SeasonBriefing:
     season: str
     division: str

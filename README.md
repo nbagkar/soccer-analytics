@@ -35,11 +35,12 @@ league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match foreca
 Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb event
 analytics (real xG, shot data), and an MCP server that makes it all queryable in natural
 language. The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
-forecasts**, league Analytics, a full **Forecast** market slate with a value/EV calculator,
-a **Match centre** (xG timeline, shot map, shot log), and a **Players** view — a full-event
-leaderboard filterable by competition and per-player **percentile scouting fingerprints**.
-Player event data spans the 2022 World Cup, La Liga (Barcelona) and the full 2015/16
-Premier League. **342 passing tests.**
+forecasts**, a **Season** oracle (Monte Carlo title/top-4/relegation odds), league
+Analytics, **Trends** (form), **Records** (streaks), a full **Forecast** market slate with
+a value/EV calculator, a **Match centre** (xG timeline, shot map, shot log), and a
+**Players** view — a full-event leaderboard filterable by competition and season, with
+per-player **percentile scouting fingerprints**. Forecasts fit on a rolling multi-season
+window and re-fit as results land. **353 passing tests.**
 
 The forecasting is evaluated honestly rather than assumed good. On real 2025/26 Premier
 League data the walk-forward backtest shows the ratio-method Poisson beats a base-rate
@@ -152,7 +153,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 340 tests
+pytest            # 353 tests
 ruff check .      # lint
 ruff format .     # format
 ```

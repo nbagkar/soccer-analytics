@@ -36,6 +36,7 @@ from soccer.dashboard.data import (
     player_profiles,
     player_seasons,
     season_briefing,
+    season_records,
     shot_map,
     shot_matches,
     team_form,
@@ -288,6 +289,66 @@ def _render_season(briefing) -> None:
         },
     )
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
+
+
+def _render_records(records) -> None:
+    st.subheader("Records & streaks")
+    st.caption(
+        "Active runs counted back from each team's most recent match, plus the season's "
+        "standout results. Streaks are the records to watch."
+    )
+    streaks = records.streaks
+    on_fire = max(streaks, key=lambda s: s.winning)
+    unbeaten = streaks[0]  # already sorted by active unbeaten
+    struggling = max(streaks, key=lambda s: s.winless)
+    k = st.columns(3)
+    k[0].metric("Longest unbeaten", unbeaten.team, f"{unbeaten.unbeaten} games")
+    k[1].metric("Hot streak", on_fire.team, f"{on_fire.winning} wins")
+    k[2].metric("Winless run", struggling.team, f"{struggling.winless} games")
+
+    st.markdown("**Active streaks**")
+    rows = [
+        {
+            "Team": s.team,
+            "Unbeaten": _streak_span(s.unbeaten, good=True),
+            "Winning": _streak_span(s.winning, good=True),
+            "Winless": _streak_span(s.winless, good=False),
+            "Scoring": _streak_span(s.scoring, good=True),
+            "Best unbeaten": f'<span style="color:#8b8b8b">{s.longest_unbeaten}</span>',
+        }
+        for s in streaks
+    ]
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Biggest wins**")
+        st.markdown(_match_record_list(records.biggest_wins, tag="margin"), unsafe_allow_html=True)
+    with col2:
+        st.markdown("**Highest scoring**")
+        st.markdown(
+            _match_record_list(records.highest_scoring, tag="goals"), unsafe_allow_html=True
+        )
+
+
+def _streak_span(n: int, *, good: bool) -> str:
+    if n == 0:
+        return '<span style="color:#8b8b8b">0</span>'
+    colour = "#16a34a" if good else "#dc2626"
+    weight = "700" if n >= 5 else "400"
+    return f'<span style="color:{colour};font-weight:{weight}">{n}</span>'
+
+
+def _match_record_list(matches, *, tag: str) -> str:
+    items = ""
+    for m in matches:
+        extra = f"{m.margin}" if tag == "margin" else f"{m.total} goals"
+        items += (
+            f'<div style="padding:2px 0;font-size:0.9rem">'
+            f"{m.home} <b>{m.score}</b> {m.away} "
+            f'<span style="color:#8b8b8b">· {extra}</span></div>'
+        )
+    return items
 
 
 def _form_html(form: str) -> str:
@@ -911,6 +972,7 @@ def main() -> None:
                 "Season",
                 "Analytics",
                 "Trends",
+                "Records",
                 "Forecast",
                 "Shot Map",
                 "Players",
@@ -1073,6 +1135,24 @@ def main() -> None:
             st.info("No results for that selection.")
         else:
             _render_trends(forms, last_n=last_n)
+        return
+
+    if page == "Records":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info("No analytics data yet. Run `soccer ingest-history`, then reload.")
+            return
+        with st.sidebar:
+            options = sorted(available, key=lambda t: t[0], reverse=True)
+            options = sorted(options, key=lambda t: division_name(t[1]))
+            labels = {f"{division_name(d)} - {season_label(s)}": (s, d) for s, d, n in options}
+            picked = st.selectbox("League / season", list(labels))
+        season, division = labels[picked]
+        records = season_records(settings.analytics_db, season, division)
+        if records is None:
+            st.info("No results for that selection.")
+        else:
+            _render_records(records)
         return
 
     if page == "Season":

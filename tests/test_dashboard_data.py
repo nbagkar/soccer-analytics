@@ -404,6 +404,30 @@ class TestSeasonBriefing:
         assert season_briefing(path, "9999", "ZZ") is None
 
 
+class TestSeasonRecords:
+    def test_streaks_and_notable_matches(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_records
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)  # Arsenal win 3-0s, Brentford lose 0-2s
+        records = season_records(path, "2526", "E0")
+        assert records is not None
+        assert records.streaks  # non-empty, sorted by active unbeaten
+        assert records.streaks == sorted(records.streaks, key=lambda s: (-s.unbeaten, -s.winning))
+        # The biggest win is by the largest margin.
+        top = records.biggest_wins[0]
+        assert top.margin == max(m.margin for m in records.biggest_wins)
+        # Highest scoring is ordered by total goals.
+        assert records.highest_scoring[0].total >= records.highest_scoring[-1].total
+
+    def test_none_for_unknown_slice(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_records
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        assert season_records(path, "9999", "ZZ") is None
+
+
 class TestShotMap:
     def _seed_shots(self, path) -> None:
         from soccer.sources.statsbomb import Shot
@@ -698,6 +722,9 @@ class TestAppSmoke:
 
             at.radio[0].set_value("Season").run()
             assert not at.exception, f"Season raised: {at.exception}"
+
+            at.radio[0].set_value("Records").run()
+            assert not at.exception, f"Records raised: {at.exception}"
 
             at.radio[0].set_value("Forecast").run()
             assert not at.exception, f"Forecast raised: {at.exception}"
