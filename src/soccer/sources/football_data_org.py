@@ -141,7 +141,12 @@ class FootballDataOrg:
             self._sync_budget(response)
 
             if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", 60))
+                # Retry-After is usually seconds, but the spec also allows an HTTP-date;
+                # float() on a date would raise, so fall back to a sane default.
+                try:
+                    retry_after = float(response.headers.get("Retry-After", 60))
+                except (TypeError, ValueError):
+                    retry_after = 60.0
                 self._limiter.penalize(retry_after)
                 last_error = httpx.HTTPStatusError(
                     "rate limited", request=response.request, response=response

@@ -135,6 +135,24 @@ class TestRateLimitHandling:
         assert result.payload == {"matches": [{"id": 1}]}
         assert not result.is_stale
 
+    async def test_429_with_http_date_retry_after_does_not_crash(self, store: RawStore) -> None:
+        # Retry-After may be an HTTP-date rather than seconds; must not raise on float().
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return httpx.Response(
+                    429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, json={}
+                )
+            return httpx.Response(200, json={"matches": [{"id": 1}]})
+
+        async with make_adapter(store, httpx.MockTransport(handler)) as adapter:
+            result = await adapter.matches(date_from=date(2026, 7, 31))
+
+        assert attempts["n"] == 2
+        assert result.payload == {"matches": [{"id": 1}]}
+
 
 class TestFailureHandling:
     async def test_403_is_not_retried(self, store: RawStore) -> None:
