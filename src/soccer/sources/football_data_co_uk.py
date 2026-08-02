@@ -80,7 +80,11 @@ def season_label(season: str) -> str:
     if len(season) == 4 and season.isdigit():
         first, second = int(season[:2]), int(season[2:])
         if (first + 1) % 100 == second:
-            return f"20{season[:2]}/{season[2:]}"
+            # Two-digit year -> century. football-data.co.uk history starts in 1993, so a
+            # high prefix (>=90) is a 1990s season; everything else is 20xx. Without this,
+            # "9394" rendered as "2093/94".
+            century = "19" if first >= 90 else "20"
+            return f"{century}{season[:2]}/{season[2:]}"
     return season
 
 

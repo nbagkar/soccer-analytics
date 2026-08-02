@@ -124,6 +124,12 @@ class TestLeagueNames:
         assert season_label("2526") == "2025/26"
         assert season_label("2425") == "2024/25"
 
+    def test_1990s_season_uses_19xx_century(self) -> None:
+        # Deep history reaches the 1990s; the prefix must not hardcode 20xx.
+        assert season_label("9394") == "1993/94"
+        assert season_label("9900") == "1999/00"
+        assert season_label("0001") == "2000/01"
+
     def test_calendar_year_season_kept(self) -> None:
         # Brazil's calendar-year seasons are not consecutive halves -> left as-is.
         assert season_label("2026") == "2026"
