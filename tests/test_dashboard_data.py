@@ -702,6 +702,9 @@ class TestAppSmoke:
             app_path = str(files("soccer.dashboard") / "app.py")
             # Generous timeout: the first Streamlit run in a process pays cold-start.
             at = AppTest.from_file(app_path, default_timeout=120).run()
+            assert not at.exception, f"Assistant (default) raised: {at.exception}"
+
+            at.radio[0].set_value("Live Centre").run()
             assert not at.exception, f"Live Centre raised: {at.exception}"
             assert any(m.label == "Matches" for m in at.metric)
 
@@ -716,6 +719,12 @@ class TestAppSmoke:
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
             at.radio[0].set_value("Analytics").run()
             assert not at.exception, f"Analytics raised: {at.exception}"
+
+            # Assistant answers a real question now that data is present.
+            at.radio[0].set_value("Assistant").run()
+            assert not at.exception, f"Assistant raised: {at.exception}"
+            at.chat_input[0].set_value("who is top of the premier league?").run()
+            assert not at.exception, f"Assistant query raised: {at.exception}"
 
             at.radio[0].set_value("Trends").run()
             assert not at.exception, f"Trends raised: {at.exception}"

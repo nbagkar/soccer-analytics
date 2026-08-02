@@ -901,6 +901,12 @@ class AnalyticsDB:
             "SELECT COUNT(DISTINCT player) FROM player_match_stats"
         ).fetchone()[0]
 
+    def player_minutes(self) -> list[tuple[str, int]]:
+        """(player, total minutes) for every player -- for name matching in the assistant."""
+        return self._con.execute(
+            "SELECT player, SUM(minutes) FROM player_match_stats GROUP BY player"
+        ).fetchall()
+
     def player_profiles(
         self,
         *,

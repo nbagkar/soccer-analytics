@@ -76,6 +76,56 @@ def _marker(view: MatchView) -> tuple[str, str]:
     return colour, label
 
 
+def _render_assistant(settings) -> None:
+    from soccer.dashboard.assistant import answer as assistant_answer
+
+    st.caption(
+        "Ask in plain English about tables, top scorers, a player, a match forecast, form, "
+        "records or fixtures. Runs entirely on your machine — nothing is sent anywhere."
+    )
+    greeting = {
+        "role": "assistant",
+        "text": (
+            "Hi! I'm your football assistant. Ask me things like "
+            "*“who's top of the Premier League?”* or *“Arsenal vs Chelsea, who wins?”*"
+        ),
+    }
+    if "chat" not in st.session_state:
+        st.session_state.chat = [greeting]
+
+    prompt = st.chat_input("Ask a question…") or st.session_state.pop("_suggestion", None)
+    if prompt:
+        st.session_state.chat.append({"role": "user", "text": prompt})
+        with st.spinner("Thinking…"):
+            reply = assistant_answer(prompt, settings.analytics_db, settings.live_db)
+        st.session_state.chat.append(
+            {
+                "role": "assistant",
+                "text": reply.text,
+                "table": reply.table,
+                "suggestions": reply.suggestions,
+            }
+        )
+
+    for message in st.session_state.chat:
+        avatar = "⚽" if message["role"] == "assistant" else None
+        with st.chat_message(message["role"], avatar=avatar):
+            st.markdown(message["text"])
+            if message.get("table"):
+                st.dataframe(
+                    pl.DataFrame(message["table"]).to_pandas(), hide_index=True, width="stretch"
+                )
+
+    last = st.session_state.chat[-1]
+    if last["role"] == "assistant" and last.get("suggestions"):
+        st.caption("Try:")
+        cols = st.columns(len(last["suggestions"]))
+        for col, suggestion in zip(cols, last["suggestions"], strict=False):
+            if col.button(suggestion, key=f"sug_{suggestion}", width="stretch"):
+                st.session_state._suggestion = suggestion
+                st.rerun()
+
+
 def _render_live(snap: LiveSnapshot) -> None:
     k = snap.kpis
     cols = st.columns(5)
@@ -313,9 +363,7 @@ def _league_season_pickers(available: list[tuple[str, str, int]]) -> tuple[str, 
     league = st.selectbox("League", sorted(by_league), key="ls_league")
     division, seasons = by_league[league]
     seasons = sorted(set(seasons), reverse=True)
-    tagged = {
-        f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)
-    }
+    tagged = {f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)}
     season = tagged[st.selectbox("Season", list(tagged), key="ls_season")]
     return season, division
 
@@ -1000,7 +1048,11 @@ def _pct_cell(p: float, is_max: bool) -> str:
 # Per-page identity: a Material Symbol icon and a one-line description, for a consistent
 # header on every page and cleaner navigation.
 _PAGE_META = {
-    "Live Centre": (":material/bolt:", "Live and recent scores across every ingested competition."),
+    "Assistant": (":material/chat:", "Ask questions about your football data in plain English."),
+    "Live Centre": (
+        ":material/bolt:",
+        "Live and recent scores across every ingested competition.",
+    ),
     "Fixtures": (
         ":material/event_upcoming:",
         "Upcoming matches with model-projected scores and odds.",
@@ -1041,6 +1093,7 @@ def main() -> None:
         page = st.radio(
             "Page",
             [
+                "Assistant",
                 "Live Centre",
                 "Fixtures",
                 "Season",
@@ -1056,6 +1109,10 @@ def main() -> None:
         )
 
     _page_header(page)
+
+    if page == "Assistant":
+        _render_assistant(settings)
+        return
 
     if page == "Fixtures":
         _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
