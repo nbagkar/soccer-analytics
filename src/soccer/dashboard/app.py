@@ -780,43 +780,106 @@ def _shot_chart(frame):
     return (pitch + misses + goals).properties(height=380).configure_view(strokeWidth=0)
 
 
+# --- Kalshi-style market rendering: a probability is shown as a cent "price" (100c =
+# certain), the leading outcome in Yes-green, fill bars proportional to the price, and
+# tabular numerals so columns of prices line up like an order book. ---
+_YES = "#16c784"
+_MUTE = "#8b95a1"
+
+
+def _cents(p: float) -> str:
+    return f"{round(p * 100)}¢"
+
+
+def _mkt_title(title: str) -> str:
+    return (
+        f"<div style='color:{_MUTE};font-size:0.72rem;text-transform:uppercase;"
+        f"letter-spacing:0.6px;margin:2px 0 4px'>{title}</div>"
+    )
+
+
 def _market_table(title: str, markets, *, odds: bool = True) -> str:
+    """A market as Kalshi-style price rows: name, fill bar, cent price (leader green)."""
+    if not markets:
+        return ""
+    mx = max(m.probability for m in markets)
     rows = []
     for m in markets:
-        cells = f"<td>{m.name}</td><td style='text-align:right'>{m.probability:.0%}</td>"
-        if odds:
-            cells += f"<td style='text-align:right;color:#8b8b8b'>{m.fair_odds:.2f}</td>"
-        rows.append(f"<tr>{cells}</tr>")
-    head = f"<b>{title}</b>"
-    return f"{head}<table style='width:100%;font-size:0.88rem'>{''.join(rows)}</table>"
+        lead = m.probability >= mx
+        tint = "rgba(22,199,132,0.16)" if lead else "rgba(139,149,161,0.13)"
+        fill = round(m.probability * 100)
+        bar = f"linear-gradient(90deg,{tint} {fill}%,rgba(255,255,255,0.03) {fill}%)"
+        tail = (
+            f"<span style='color:{_MUTE};font-size:0.78rem;margin-left:8px'>"
+            f"{m.fair_odds:.2f}</span>"
+            if odds
+            else ""
+        )
+        rows.append(
+            f"<div style='display:flex;align-items:center;justify-content:space-between;"
+            f"background:{bar};border-radius:6px;padding:5px 10px;margin:3px 0'>"
+            f"<span>{m.name}</span>"
+            f"<span style='font-variant-numeric:tabular-nums'>"
+            f"<b style='color:{_YES if lead else _MUTE}'>"
+            f"{_cents(m.probability)}</b>{tail}</span></div>"
+        )
+    return f"<div style='margin-bottom:12px'>{_mkt_title(title)}{''.join(rows)}</div>"
+
+
+def _price_tiles(markets) -> str:
+    """Headline outcomes as big Kalshi price tiles (the 1X2 result)."""
+    mx = max(m.probability for m in markets)
+    tiles = []
+    for m in markets:
+        lead = m.probability >= mx
+        border = _YES if lead else "#262b36"
+        bg = "rgba(22,199,132,0.08)" if lead else "rgba(255,255,255,0.02)"
+        color = _YES if lead else "#e6e9ef"
+        tiles.append(
+            f"<div style='flex:1;border:1px solid {border};border-radius:10px;"
+            f"padding:12px 14px;background:{bg}'>"
+            f"<div style='color:{_MUTE};font-size:0.82rem;white-space:nowrap;overflow:hidden;"
+            f"text-overflow:ellipsis'>{m.name}</div>"
+            f"<div style='font-size:1.9rem;font-weight:700;line-height:1.15;"
+            f"font-variant-numeric:tabular-nums;color:{color}'>{_cents(m.probability)}</div>"
+            f"<div style='color:{_MUTE};font-size:0.72rem'>{m.fair_odds:.2f} fair</div></div>"
+        )
+    return f"<div style='display:flex;gap:10px;margin:4px 0 10px'>{''.join(tiles)}</div>"
+
+
+def _ou_block(over_unders) -> str:
+    """Over/Under lines as Over/Under (Yes/No) price rows."""
+    rows = []
+    for ou in over_unders:
+        over_lead = ou.over >= ou.under
+        rows.append(
+            f"<div style='display:flex;justify-content:space-between;padding:5px 10px;margin:3px 0;"
+            f"background:rgba(255,255,255,0.03);border-radius:6px'>"
+            f"<span>{ou.line} goals</span>"
+            f"<span style='font-variant-numeric:tabular-nums'>"
+            f"<b style='color:{_YES if over_lead else _MUTE}'>O&nbsp;{_cents(ou.over)}</b>"
+            f"&nbsp;&nbsp;<b style='color:{_YES if not over_lead else _MUTE}'>"
+            f"U&nbsp;{_cents(ou.under)}</b>"
+            f"</span></div>"
+        )
+    return f"<div style='margin-bottom:12px'>{_mkt_title('Total goals lines')}{''.join(rows)}</div>"
 
 
 def _render_forecast(slate) -> None:
-    st.subheader(f"{slate.home} vs {slate.away}", anchor=False)
+    st.markdown(f"#### {slate.home}  ·  {slate.away}")
+    st.markdown(_price_tiles(slate.result), unsafe_allow_html=True)
+    x, y, p = slate.most_likely_score
     c = st.columns(3)
     c[0].metric(f"{slate.home} xG", f"{slate.home_expected:.2f}", border=True)
     c[1].metric(f"{slate.away} xG", f"{slate.away_expected:.2f}", border=True)
-    x, y, p = slate.most_likely_score
-    c[2].metric("Most likely score", f"{x}-{y}", f"{p:.0%}", border=True)
+    c[2].metric("Likely score", f"{x}-{y}", _cents(p), border=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(_market_table("Result (1X2)", slate.result), unsafe_allow_html=True)
         st.markdown(_market_table("Double chance", slate.double_chance), unsafe_allow_html=True)
         st.markdown(_market_table("Both teams to score", slate.btts), unsafe_allow_html=True)
     with col2:
-        ou_rows = "".join(
-            f"<tr><td>Over/Under {ou.line}</td>"
-            f"<td style='text-align:right'>{ou.over:.0%}</td>"
-            f"<td style='text-align:right'>{ou.under:.0%}</td></tr>"
-            for ou in slate.over_under
-        )
-        st.markdown(
-            f"<b>Total goals lines</b><table style='width:100%;font-size:0.88rem'>"
-            f"<tr><td></td><td style='text-align:right'>Over</td>"
-            f"<td style='text-align:right'>Under</td></tr>{ou_rows}</table>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(_ou_block(slate.over_under), unsafe_allow_html=True)
         st.markdown(_market_table("Clean sheet", slate.clean_sheet), unsafe_allow_html=True)
         st.markdown(_market_table("Win to nil", slate.win_to_nil), unsafe_allow_html=True)
     with col3:
@@ -824,16 +887,18 @@ def _render_forecast(slate) -> None:
             _market_table("Total goals", slate.total_goals, odds=False), unsafe_allow_html=True
         )
         cs_rows = "".join(
-            f"<tr><td>{x}-{y}</td><td style='text-align:right'>{p:.0%}</td></tr>"
+            f"<div style='display:flex;justify-content:space-between;padding:3px 10px;margin:2px 0;"
+            f"background:rgba(255,255,255,0.03);border-radius:6px'><span>{x}-{y}</span>"
+            f"<b style='font-variant-numeric:tabular-nums'>{_cents(p)}</b></div>"
             for x, y, p in slate.correct_scores
         )
         st.markdown(
-            f"<b>Correct score</b><table style='width:100%;font-size:0.88rem'>{cs_rows}</table>",
+            f"<div style='margin-bottom:12px'>{_mkt_title('Correct score')}{cs_rows}</div>",
             unsafe_allow_html=True,
         )
     st.caption(
-        "Fair prices (no margin) from a Dixon-Coles model fit on the last ~3 seasons, "
-        "re-fit as new results land. Directional, not advice."
+        "Prices are the model's fair probability in cents (100¢ = certain), no bookmaker "
+        "margin. Dixon-Coles on ~3 recent seasons, re-fit as results land. Directional, not advice."
     )
 
 
@@ -1144,9 +1209,9 @@ def _render_fixtures(fixtures) -> None:
             _pct_cell(home_p, home_p >= max(draw_p, away_p)),
             _pct_cell(draw_p, draw_p >= max(home_p, away_p)),
             _pct_cell(away_p, away_p >= max(home_p, draw_p)),
-            f"{over25:.0%}",
-            f"{btts_yes:.0%}",
-            f'<span style="color:#16a34a">{fav}</span>',
+            _pct_cell(over25, over25 >= 0.5),
+            _pct_cell(btts_yes, btts_yes >= 0.5),
+            f'<span style="color:{_YES}">{fav}</span>',
         ]
         tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
         body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
@@ -1176,8 +1241,9 @@ def _render_fixtures(fixtures) -> None:
 
 
 def _pct_cell(p: float, is_max: bool) -> str:
-    """Outcome probability, bolded when it is the likeliest of the three."""
-    return f"<b>{p:.0%}</b>" if is_max else f"{p:.0%}"
+    """Outcome probability as a Kalshi cent price; leader in Yes-green, tabular figures."""
+    color = _YES if is_max else _MUTE
+    return f"<b style='color:{color};font-variant-numeric:tabular-nums'>{_cents(p)}</b>"
 
 
 # Per-page identity: a Material Symbol icon and a one-line description, for a consistent
