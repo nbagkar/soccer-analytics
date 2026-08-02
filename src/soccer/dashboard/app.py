@@ -150,11 +150,21 @@ def _render_home(settings) -> None:
 
     with st.expander("Add player data (StatsBomb events)", icon=":material/groups:"):
         st.caption(
-            "StatsBomb open data — free for research, logo attribution required. "
-            "Larger packs take a few minutes."
+            "StatsBomb open data — free for personal/research use, logo attribution "
+            "required. Loading everything takes a few minutes."
         )
-        pack = st.selectbox("Which dataset?", list(actions.EVENT_PACKS))
-        if st.button("Load player data", key="add_events"):
+        if st.button("Load all player data", key="add_all_events", type="primary"):
+            bar = st.progress(0.0, "Starting…")
+            msg = actions.load_all_events(
+                settings, on_progress=lambda d, t: bar.progress(d / t, f"dataset {d}/{t}")
+            )
+            bar.empty()
+            st.success(msg)
+        st.caption("Or pick a single dataset:")
+        pack = st.selectbox(
+            "Which dataset?", list(actions.EVENT_PACKS), label_visibility="collapsed"
+        )
+        if st.button("Load this one", key="add_events"):
             comp_id, season_id, _n = actions.EVENT_PACKS[pack]
             bar = st.progress(0.0, "Starting…")
             msg = actions.load_event_pack(

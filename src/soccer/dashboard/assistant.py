@@ -47,10 +47,18 @@ _LEAGUE_ALIASES = {
     "primeira": "P1",
     "portugal": "P1",
     "portuguese": "P1",
+    "bundesliga": "D1",
+    "germany": "D1",
+    "german": "D1",
+    "serie a": "I1",
+    "italy": "I1",
+    "italian": "I1",
+    "ligue 1": "F1",
+    "france": "F1",
+    "french": "F1",
     "brazil": "BRA",
     "brazilian": "BRA",
     "brasileiro": "BRA",
-    "serie a": "BRA",  # loaded Serie A results are Brazil's; Italian is StatsBomb-only
 }
 
 # Common team nicknames -> the football-data.co.uk spelling, for name resolution.
@@ -327,7 +335,9 @@ def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | 
 
 def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(win the league|title|champions?|relegat|top four|top 4|finish|odds to win)\b", q
+        r"\b(win the league|who will win|who wins|title|champions?|relegat|top four|top 4"
+        r"|finish|odds to win)\b",
+        q,
     ):
         return None
     with AnalyticsDB(analytics_db) as adb:

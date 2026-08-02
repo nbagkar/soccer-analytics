@@ -28,6 +28,9 @@ LEAGUE_CHOICES = {
     "Premier League (England)": "E0",
     "Championship (England)": "E1",
     "La Liga (Spain)": "SP1",
+    "Bundesliga (Germany)": "D1",
+    "Serie A (Italy)": "I1",
+    "Ligue 1 (France)": "F1",
     "Eredivisie (Netherlands)": "N1",
     "Primeira Liga (Portugal)": "P1",
     "Brazil Série A": "BRA",
@@ -35,8 +38,9 @@ LEAGUE_CHOICES = {
 
 # The set a fresh install downloads itself on first launch, so it "just works" without
 # any clicks -- fast, token-free league results that power tables, forecasts, trends,
-# records, the season oracle and most assistant questions.
-STARTER_LEAGUES = ["E0", "SP1", "N1", "P1"]
+# records, the season oracle and most assistant questions. All the leagues we know how to
+# fetch, so nothing is left to pick by hand.
+STARTER_LEAGUES = ["E0", "E1", "SP1", "D1", "I1", "F1", "N1", "P1", "BRA"]
 
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
 EVENT_PACKS = {
@@ -206,3 +210,18 @@ def load_event_pack(
     return (
         f"Loaded {shots_total} shots and {players_total} player rows from {len(match_ids)} matches."
     )
+
+
+def load_all_events(settings: Settings, *, on_progress: Callable | None = None) -> str:
+    """Load every curated player-data pack in one go, so nothing is picked by hand.
+
+    Non-commercial/personal use of StatsBomb open data is within its terms, so a single
+    press pulls the lot -- World Cup, a full Premier League and La Liga season, and the
+    Champions League finals.
+    """
+    packs = list(EVENT_PACKS.values())
+    for i, (competition_id, season_id, _approx) in enumerate(packs, 1):
+        load_event_pack(settings, competition_id, season_id)
+        if on_progress:
+            on_progress(i, len(packs))
+    return f"Loaded {len(packs)} player datasets — the marquee names are ready."
