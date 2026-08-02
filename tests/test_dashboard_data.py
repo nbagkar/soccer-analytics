@@ -518,6 +518,18 @@ class TestFixtureForecasts:
             assert adb.latest_season("SP1") == "2526"
             assert adb.latest_season("ZZ") is None
 
+    def test_recent_outcomes_window_spans_seasons(self, tmp_path) -> None:
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea"], season="2425")
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea"], season="2526")
+        with AnalyticsDB(path) as adb:
+            window3 = adb.recent_outcomes_through("E0", "2526", n_seasons=3)
+            window1 = adb.recent_outcomes_through("E0", "2526", n_seasons=1)
+        assert len(window1) == 2  # only 2526 (2 teams, home-and-away)
+        assert len(window3) == 4  # 2526 + 2425 both included
+
     def test_curated_alias_resolves_verbose_name(self, tmp_path) -> None:
         # "Club Atlético de Madrid" (football-data.org) must reach "Ath Madrid" (co.uk).
         from soccer.dashboard.data import fixture_forecasts

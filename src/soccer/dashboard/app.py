@@ -442,7 +442,10 @@ def _render_forecast(slate) -> None:
             f"<b>Correct score</b><table style='width:100%;font-size:0.88rem'>{cs_rows}</table>",
             unsafe_allow_html=True,
         )
-    st.caption("Fair prices (no margin) from a Dixon-Coles model. Directional, not advice.")
+    st.caption(
+        "Fair prices (no margin) from a Dixon-Coles model fit on the last ~3 seasons, "
+        "re-fit as new results land. Directional, not advice."
+    )
 
 
 def _render_ev_calculator(slate) -> None:

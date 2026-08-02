@@ -478,6 +478,34 @@ class AnalyticsDB:
         ).fetchall()
         return [ResultRow(*r) for r in rows]
 
+    def recent_outcomes_through(
+        self, division: str, season: str, *, n_seasons: int = 3
+    ) -> list[ResultRow]:
+        """Outcomes from the `n_seasons` most recent seasons up to and including `season`.
+
+        Combined and date-ordered, for a recency-weighted fit: pairing this with a
+        time-decay Dixon-Coles blends last season as a prior while letting recent form
+        dominate. Seasons sort correctly whether European ("2526") or calendar ("2026").
+        """
+        seasons = [
+            r[0]
+            for r in self._con.execute(
+                "SELECT DISTINCT season FROM results WHERE division=? AND season<=? "
+                "ORDER BY season DESC LIMIT ?",
+                [division, season, n_seasons],
+            ).fetchall()
+        ]
+        if not seasons:
+            return []
+        placeholders = ",".join("?" * len(seasons))
+        rows = self._con.execute(
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag "
+            f"FROM results WHERE division=? AND season IN ({placeholders}) "
+            "ORDER BY match_date, home",
+            [division, *seasons],
+        ).fetchall()
+        return [ResultRow(*r) for r in rows]
+
     def outcomes_with_odds(self, season: str, division: str) -> list[OddsRow]:
         """Results for one (season, division) carrying closing 1X2 odds, date order.
 

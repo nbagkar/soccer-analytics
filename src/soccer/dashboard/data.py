@@ -309,21 +309,57 @@ def forecast_teams(analytics_db: Path, season: str, division: str) -> list[str]:
     return sorted(names)
 
 
+# Recency-aware forecasting: fit on the last few seasons and re-fit as new results land,
+# so the model tracks current form instead of one frozen old season. Time-decay was the
+# obvious next knob, but a walk-forward backtest measured it DOWN skill monotonically
+# (+2.7% none, +2.4% at 140d, +1.6% at 90d on E0), so it is deliberately off -- the win is
+# the multi-season window plus self-updating, not down-weighting. Kept as a tunable, not a
+# default. (See docs / `soccer backtest --half-life`.)
+FORECAST_SEASONS = 3
+FORECAST_HALF_LIFE_DAYS = 0  # 0 = no time-decay (measured best); >0 halves weight every N days
+
+
+def _decay(half_life_days: float) -> float:
+    """xi (per day) for fit_dixon_coles, from a half-life: weight halves every N days."""
+    import math
+
+    return math.log(2) / half_life_days if half_life_days > 0 else 0.0
+
+
 def forecast_slate(
-    analytics_db: Path, season: str, division: str, home: str, away: str, *, mle: bool = True
+    analytics_db: Path,
+    season: str,
+    division: str,
+    home: str,
+    away: str,
+    *,
+    mle: bool = True,
+    weighted: bool = True,
 ):
-    """Full market slate for a matchup, or None if a team is unknown. mle -> Dixon-Coles."""
+    """Full market slate for a matchup, or None if a team is unknown.
+
+    `mle` -> Dixon-Coles (else ratio-method Poisson). `weighted` recency-weights the
+    Dixon-Coles fit over the last few seasons up to `season`, so recent form dominates --
+    the self-updating "oracle" fit rather than one frozen season.
+    """
     from soccer.domain.names import normalize_name
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.markets import compute_markets
     from soccer.models.poisson import fit_poisson
 
     with AnalyticsDB(analytics_db) as adb:
-        outcomes = adb.outcomes_for(season, division)
+        if mle and weighted:
+            outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+        else:
+            outcomes = adb.outcomes_for(season, division)
     if not outcomes:
         return None
     names = {o.home_norm: o.home for o in outcomes} | {o.away_norm: o.away for o in outcomes}
-    model = fit_dixon_coles(outcomes) if mle else fit_poisson(outcomes)
+    if mle:
+        decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
+        model = fit_dixon_coles(outcomes, time_decay=decay)
+    else:
+        model = fit_poisson(outcomes)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -593,9 +629,14 @@ def fixture_forecasts(
             if Path(analytics_db).exists():
                 with AnalyticsDB(analytics_db) as adb:
                     season = adb.latest_season(division)
-                    outcomes = adb.outcomes_for(season, division) if season else []
+                    outcomes = (
+                        adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+                        if season
+                        else []
+                    )
                 if outcomes:
-                    model = fit_dixon_coles(outcomes)
+                    # Recency-weighted: last few seasons, current form dominating.
+                    model = fit_dixon_coles(outcomes, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
             models[division] = model
         return models[division]
 
