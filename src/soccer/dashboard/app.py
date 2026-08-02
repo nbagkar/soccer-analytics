@@ -77,13 +77,13 @@ def _marker(view: MatchView) -> tuple[str, str]:
 
 
 def _go(page: str) -> None:
-    """Request a navigation change from a call-to-action button.
+    """Request a navigation change from a call-to-action button (takes a routing key).
 
-    Stashes the target in a separate key rather than writing the radio's own ``nav`` key,
-    which Streamlit forbids once the widget has been instantiated this run; main() applies
-    the request before the radio is created.
+    Stashes the target label in a separate key rather than writing the radio's own ``nav``
+    key, which Streamlit forbids once the widget has been instantiated this run; main()
+    applies the request before the radio is created.
     """
-    st.session_state._nav_to = page
+    st.session_state._nav_to = _LABEL_BY_KEY.get(page, page)
     st.rerun()
 
 
@@ -1152,37 +1152,33 @@ def _pct_cell(p: float, is_max: bool) -> str:
 
 # Per-page identity: a Material Symbol icon and a one-line description, for a consistent
 # header on every page and cleaner navigation.
-_PAGE_META = {
-    "Home": (":material/home:", "Your starting point — status, quick actions, and data setup."),
-    "Assistant": (
-        ":material/chat:",
-        "Ask questions about your football data in plain English.",
-    ),
-    "Live Centre": (
-        ":material/bolt:",
-        "Live and recent scores across every ingested competition.",
-    ),
-    "Fixtures": (
-        ":material/event_upcoming:",
-        "Upcoming matches with model-projected scores and odds.",
-    ),
-    "Season": (":material/emoji_events:", "Monte Carlo projection of the whole season ahead."),
-    "Analytics": (":material/table_chart:", "League table, power ranking and title odds."),
-    "Trends": (":material/trending_up:", "Who's hot and who's sliding, right now."),
-    "Records": (":material/military_tech:", "Active streaks and the season's standout results."),
-    "Forecast": (
-        ":material/insights:",
-        "Full market slate and a value calculator for any matchup.",
-    ),
-    "Shot Map": (":material/sports_soccer:", "Match centre — xG timeline, shot map and shot log."),
-    "Players": (":material/person:", "Full-event leaderboard and percentile scouting profiles."),
-    "Data Health": (":material/health_and_safety:", "Sources, coverage and licensing at a glance."),
-}
+# Navigation: (routing key, sidebar label, icon, one-line description). The routing keys
+# stay stable so the page dispatch is untouched; only the plain-English labels and the
+# captions the user reads change. Ordered as a journey: start -> this season -> explore.
+_NAV = [
+    ("Home", "Home", ":material/home:", "Set up and quick actions"),
+    ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
+    ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
+    ("Fixtures", "Upcoming matches", ":material/event_upcoming:", "Fixtures with predicted scores"),
+    ("Forecast", "Match predictor", ":material/insights:", "Odds and a likely score for a matchup"),
+    ("Season", "Season predictor", ":material/emoji_events:", "Title, top-four, relegation odds"),
+    ("Analytics", "League tables", ":material/table_chart:", "Standings, power rank, title odds"),
+    ("Trends", "Form guide", ":material/trending_up:", "Who's hot and who's cold right now"),
+    ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
+    ("Shot Map", "Match analysis", ":material/sports_soccer:", "xG timelines and shot maps"),
+    ("Players", "Players", ":material/person:", "Player stats and scouting profiles"),
+    ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
+]
+_NAV_LABELS = [label for _k, label, _i, _c in _NAV]
+_NAV_CAPTIONS = [caption for _k, _l, _i, caption in _NAV]
+_KEY_BY_LABEL = {label: key for key, label, _i, _c in _NAV}
+_LABEL_BY_KEY = {key: label for key, label, _i, _c in _NAV}
+_HEADER = {key: (icon, label, caption) for key, label, icon, caption in _NAV}
 
 
 def _page_header(page: str) -> None:
-    icon, blurb = _PAGE_META.get(page, (":material/dashboard:", ""))
-    st.header(f"{icon} {page}", anchor=False)
+    icon, label, blurb = _HEADER.get(page, (":material/dashboard:", page, ""))
+    st.header(f"{icon} {label}", anchor=False)
     if blurb:
         st.caption(blurb)
 
@@ -1203,25 +1199,14 @@ def main() -> None:
         # radio is created -- setting its key afterwards is not allowed.
         if "_nav_to" in st.session_state:
             st.session_state.nav = st.session_state.pop("_nav_to")
-        page = st.radio(
-            "Page",
-            [
-                "Home",
-                "Assistant",
-                "Live Centre",
-                "Fixtures",
-                "Season",
-                "Analytics",
-                "Trends",
-                "Records",
-                "Forecast",
-                "Shot Map",
-                "Players",
-                "Data Health",
-            ],
+        selected = st.radio(
+            "Menu",
+            _NAV_LABELS,
+            captions=_NAV_CAPTIONS,
             label_visibility="collapsed",
             key="nav",
         )
+    page = _KEY_BY_LABEL[selected]
 
     _page_header(page)
 

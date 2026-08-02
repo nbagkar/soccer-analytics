@@ -738,38 +738,38 @@ class TestAppSmoke:
                 cta[0].click().run()
                 assert not at.exception, f"Home navigation raised: {at.exception}"
 
-            at.radio[0].set_value("Live Centre").run()
+            at.radio[0].set_value("Live scores").run()
             assert not at.exception, f"Live Centre raised: {at.exception}"
             assert any(m.label == "Matches" for m in at.metric)
 
-            at.radio[0].set_value("Data Health").run()
+            at.radio[0].set_value("About & sources").run()
             assert not at.exception, f"Data Health raised: {at.exception}"
 
             # Fixtures page reads upcoming matches (none forecastable here) — must not raise.
-            at.radio[0].set_value("Fixtures").run()
+            at.radio[0].set_value("Upcoming matches").run()
             assert not at.exception, f"Fixtures raised: {at.exception}"
 
             # Analytics page needs an analytics DB; seed one and visit it.
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("Analytics").run()
+            at.radio[0].set_value("League tables").run()
             assert not at.exception, f"Analytics raised: {at.exception}"
 
             # Assistant answers a real question now that data is present.
-            at.radio[0].set_value("Assistant").run()
+            at.radio[0].set_value("Ask a question").run()
             assert not at.exception, f"Assistant raised: {at.exception}"
             at.chat_input[0].set_value("who is top of the premier league?").run()
             assert not at.exception, f"Assistant query raised: {at.exception}"
 
-            at.radio[0].set_value("Trends").run()
+            at.radio[0].set_value("Form guide").run()
             assert not at.exception, f"Trends raised: {at.exception}"
 
-            at.radio[0].set_value("Season").run()
+            at.radio[0].set_value("Season predictor").run()
             assert not at.exception, f"Season raised: {at.exception}"
 
             at.radio[0].set_value("Records").run()
             assert not at.exception, f"Records raised: {at.exception}"
 
-            at.radio[0].set_value("Forecast").run()
+            at.radio[0].set_value("Match predictor").run()
             assert not at.exception, f"Forecast raised: {at.exception}"
 
             # Players page: seed full-event stats so the rich leaderboard + profile render.
@@ -782,7 +782,7 @@ class TestAppSmoke:
 
             # Shot Map page needs shots; seed and visit.
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("Shot Map").run()
+            at.radio[0].set_value("Match analysis").run()
             assert not at.exception, f"Shot Map raised: {at.exception}"
         finally:
             config._settings = None
