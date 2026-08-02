@@ -77,8 +77,13 @@ def _marker(view: MatchView) -> tuple[str, str]:
 
 
 def _go(page: str) -> None:
-    """Switch the sidebar navigation to a page (used by call-to-action buttons)."""
-    st.session_state.nav = page
+    """Request a navigation change from a call-to-action button.
+
+    Stashes the target in a separate key rather than writing the radio's own ``nav`` key,
+    which Streamlit forbids once the widget has been instantiated this run; main() applies
+    the request before the radio is created.
+    """
+    st.session_state._nav_to = page
     st.rerun()
 
 
@@ -1184,6 +1189,10 @@ def main() -> None:
         st.markdown("### :material/sports_soccer: Soccer Analytics")
         st.caption("Local-first football intelligence")
         st.space("small")
+        # Apply a pending navigation request (from a call-to-action button) before the
+        # radio is created -- setting its key afterwards is not allowed.
+        if "_nav_to" in st.session_state:
+            st.session_state.nav = st.session_state.pop("_nav_to")
         page = st.radio(
             "Page",
             [

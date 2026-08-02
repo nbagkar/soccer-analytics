@@ -732,6 +732,12 @@ class TestAppSmoke:
             at = AppTest.from_file(app_path, default_timeout=120).run()
             assert not at.exception, f"Home (default) raised: {at.exception}"
 
+            # A Home call-to-action button (_go) navigates without a session_state error.
+            cta = [b for b in at.button if "assistant" in b.label.lower()]
+            if cta:
+                cta[0].click().run()
+                assert not at.exception, f"Home navigation raised: {at.exception}"
+
             at.radio[0].set_value("Live Centre").run()
             assert not at.exception, f"Live Centre raised: {at.exception}"
             assert any(m.label == "Matches" for m in at.metric)
