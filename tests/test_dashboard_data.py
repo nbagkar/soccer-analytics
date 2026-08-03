@@ -693,6 +693,24 @@ class TestTeamDossier:
         assert team_dossier(path, "E0", "2526", "Nobody") is None
 
 
+class TestLeagueHistory:
+    def test_all_time_leaderboards(self, tmp_path) -> None:
+        from soccer.dashboard.data import league_history
+
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2425")
+        seed_results(path, division="E0", teams=teams, season="2526")
+        hist = league_history(path, "E0")
+        assert hist is not None
+        assert hist.seasons == 2
+        # Same seeded shape both seasons, so one team tops both -> two titles.
+        assert hist.title_counts[0][1] == 2
+        assert hist.record_points is not None
+        assert hist.biggest_wins and hist.highest_scoring
+        assert league_history(path, "ZZ9") is None
+
+
 class TestFixtureForecasts:
     def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:
         add_match(

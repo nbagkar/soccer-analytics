@@ -32,6 +32,7 @@ from soccer.dashboard.data import (
     forecast_teams,
     has_player_events,
     health_snapshot,
+    league_history,
     live_snapshot,
     market_edge,
     player_board,
@@ -428,6 +429,13 @@ def _cached_team_dossier(db_path: str, division: str, season: str, team: str):
     return team_dossier(Path(db_path), division, season, team)
 
 
+@st.cache_data(show_spinner="Gathering the all-time records…")
+def _cached_league_history(db_path: str, division: str):
+    from pathlib import Path
+
+    return league_history(Path(db_path), division)
+
+
 @st.cache_data(show_spinner="Simulating the season…")
 def _cached_season_briefing(db_path: str, season: str, division: str):
     from pathlib import Path
@@ -562,6 +570,39 @@ def _render_records(records) -> None:
         st.markdown(
             _match_record_list(records.highest_scoring, tag="goals"), unsafe_allow_html=True
         )
+
+
+def _title_bar_chart(counts):
+    top = counts[:10]
+    frame = pl.DataFrame({"team": [t for t, _n in top], "titles": [n for _t, n in top]}).to_pandas()
+    base = alt.Chart(frame).encode(
+        x=alt.X("titles:Q", title=None, axis=alt.Axis(grid=False, tickMinStep=1)),
+        y=alt.Y("team:N", sort="-x", title=None),
+    )
+    bars = base.mark_bar(color="#16c784", cornerRadiusEnd=4, size=16)
+    labels = base.mark_text(align="left", dx=4, color="#8b95a1").encode(text="titles:Q")
+    return (bars + labels).properties(height=max(120, 26 * len(top)))
+
+
+def _render_league_history(hist) -> None:
+    st.caption(
+        f"All-time across {hist.seasons} loaded seasons ({hist.oldest} to {hist.newest}). "
+        "The latest season's leader is provisional — it may not be finished."
+    )
+    if hist.record_points:
+        team, season, pts = hist.record_points
+        st.metric("Record points campaign", f"{team} — {pts} pts", season, border=True)
+    st.markdown("**Most table-toppers**")
+    st.altair_chart(_title_bar_chart(hist.title_counts), width="stretch")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Biggest wins ever**")
+        rows = [{"Season": r["Season"], "Result": _esc(r["Result"])} for r in hist.biggest_wins]
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
+    with col2:
+        st.markdown("**Highest scoring ever**")
+        rows = [{"Season": r["Season"], "Result": _esc(r["Result"])} for r in hist.highest_scoring]
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
 
 
 def _streak_span(n: int, *, good: bool) -> str:
@@ -712,10 +753,14 @@ def _xpoints_scatter(rows):
         .mark_line(color="#8b95a1", strokeDash=[4, 4])
         .encode(x="x:Q", y="y:Q")
     )
-    pts = alt.Chart(frame).mark_circle(size=90, color="#16c784", opacity=0.8).encode(
-        x=alt.X("xP:Q", title="expected points (xP)", scale=alt.Scale(domain=[lo, hi])),
-        y=alt.Y("pts:Q", title="actual points", scale=alt.Scale(domain=[lo, hi])),
-        tooltip=["team", "pts", "xP"],
+    pts = (
+        alt.Chart(frame)
+        .mark_circle(size=90, color="#16c784", opacity=0.8)
+        .encode(
+            x=alt.X("xP:Q", title="expected points (xP)", scale=alt.Scale(domain=[lo, hi])),
+            y=alt.Y("pts:Q", title="actual points", scale=alt.Scale(domain=[lo, hi])),
+            tooltip=["team", "pts", "xP"],
+        )
     )
     return (diag + pts).properties(height=320)
 
@@ -757,10 +802,14 @@ def _team_strength_bars(d):
     frame = pl.DataFrame(
         {"metric": ["Attack", "Defence"], "value": [d.attack, d.solidity]}
     ).to_pandas()
-    bars = alt.Chart(frame).mark_bar().encode(
-        x=alt.X("value:Q", title=None, scale=alt.Scale(domainMin=0)),
-        y=alt.Y("metric:N", sort=None, title=None),
-        color=alt.condition("datum.value >= 1", alt.value("#16c784"), alt.value("#ea3943")),
+    bars = (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            x=alt.X("value:Q", title=None, scale=alt.Scale(domainMin=0)),
+            y=alt.Y("metric:N", sort=None, title=None),
+            color=alt.condition("datum.value >= 1", alt.value("#16c784"), alt.value("#ea3943")),
+        )
     )
     rule = (
         alt.Chart(pl.DataFrame({"x": [1.0]}).to_pandas())
@@ -1976,11 +2025,19 @@ def main() -> None:
             )
             return
         season, division = _league_season_pickers(available)
-        records = season_records(settings.analytics_db, season, division)
-        if records is None:
-            st.info("No results for that selection.")
-        else:
-            _render_records(records)
+        season_tab, all_time_tab = st.tabs(["This season", "All-time"])
+        with season_tab:
+            records = season_records(settings.analytics_db, season, division)
+            if records is None:
+                st.info("No results for that selection.")
+            else:
+                _render_records(records)
+        with all_time_tab:
+            hist = _cached_league_history(str(settings.analytics_db), division)
+            if hist is None:
+                st.info("No history loaded for that league.")
+            else:
+                _render_league_history(hist)
         return
 
     if not settings.live_db.exists():

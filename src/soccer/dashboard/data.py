@@ -589,9 +589,7 @@ class UnderlyingRow:
         return self.goals_for - self.xgf  # >0 clinical/hot finishing
 
 
-def underlying_table(
-    analytics_db: Path, season: str, division: str
-) -> list[UnderlyingRow] | None:
+def underlying_table(analytics_db: Path, season: str, division: str) -> list[UnderlyingRow] | None:
     """Expected-points table from shots-on-target chance quality, or None without shot data.
 
     Each match's shots on target become expected goals (via the league's conversion), those
@@ -683,9 +681,7 @@ class TeamDossier:
     trajectory: list[dict]  # per-matchday cumulative points (+ expected points where shots exist)
 
 
-def team_dossier(
-    analytics_db: Path, division: str, season: str, team: str
-) -> TeamDossier | None:
+def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> TeamDossier | None:
     """One club's full picture for a (division, season): standing, form, underlying, trajectory.
 
     Consolidates the table, form, streaks, model strengths, expected points and the team's
@@ -774,6 +770,63 @@ def team_dossier(
         scoring=streak.scoring if streak else 0,
         recent=recent[-6:][::-1],
         trajectory=trajectory,
+    )
+
+
+@dataclass(frozen=True)
+class LeagueHistory:
+    division: str
+    seasons: int
+    oldest: str
+    newest: str
+    title_counts: list[tuple[str, int]]  # (team, times finishing top), most first
+    record_points: tuple[str, str, int] | None  # (team, season_label, points) -- best campaign
+    biggest_wins: list[dict]
+    highest_scoring: list[dict]
+
+
+def league_history(analytics_db: Path, division: str) -> LeagueHistory | None:
+    """All-time leaderboards for a division across every loaded season, or None if empty.
+
+    Tallies table-toppers into a title count, finds the record points campaign, and the
+    biggest wins and highest-scoring games in the whole loaded history -- a hall of fame for
+    the deep backfill. The current season's leader is provisional (it may not be over).
+    """
+    from soccer.sources.football_data_co_uk import season_label, season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        seasons = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division}, key=season_sort_key
+        )
+        if not seasons:
+            return None
+        titles: dict[str, int] = {}
+        record: tuple[str, str, int] | None = None
+        for s in seasons:
+            table = adb.league_table(s, division)
+            if not table:
+                continue
+            champ = table[0]
+            titles[champ.team] = titles.get(champ.team, 0) + 1
+            if record is None or champ.points > record[2]:
+                record = (champ.team, season_label(s), champ.points)
+        biggest = adb.notable_matches(division, "ABS(fthg-ftag) DESC, (fthg+ftag) DESC", limit=6)
+        scoring = adb.notable_matches(division, "(fthg+ftag) DESC, ABS(fthg-ftag) DESC", limit=6)
+
+    def fmt(rows: list[tuple]) -> list[dict]:
+        return [
+            {"Season": season_label(r[0]), "Result": f"{r[1]} {r[3]}-{r[4]} {r[2]}"} for r in rows
+        ]
+
+    return LeagueHistory(
+        division=division,
+        seasons=len(seasons),
+        oldest=season_label(seasons[0]),
+        newest=season_label(seasons[-1]),
+        title_counts=sorted(titles.items(), key=lambda kv: (-kv[1], kv[0])),
+        record_points=record,
+        biggest_wins=fmt(biggest),
+        highest_scoring=fmt(scoring),
     )
 
 

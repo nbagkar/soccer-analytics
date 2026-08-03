@@ -641,6 +641,18 @@ class AnalyticsDB:
         """Results with the most total goals."""
         return self._match_records(season, division, "(fthg+ftag) DESC, ABS(fthg-ftag) DESC", limit)
 
+    def notable_matches(self, division: str, order_by: str, *, limit: int = 5) -> list[tuple]:
+        """(season, home, away, fthg, ftag) for a division across ALL seasons, ranked.
+
+        `order_by` is an internal expression (never user input) -- e.g. biggest margin or
+        most goals -- for all-time leaderboards over the full loaded history.
+        """
+        return self._con.execute(
+            f"SELECT season, home, away, fthg, ftag FROM results WHERE division=? "
+            f"ORDER BY {order_by} LIMIT ?",
+            [division, limit],
+        ).fetchall()
+
     def result_count(self, season: str | None = None, division: str | None = None) -> int:
         clauses, params = [], []
         if season is not None:
