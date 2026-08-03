@@ -627,6 +627,55 @@ class TestForecastData:
         assert forecast_explanation(path, "2526", "E0", "Arsenal", "Nobody") is None
 
 
+class TestUnderlyingTable:
+    def _seed_with_shots(self, path):
+        from datetime import date
+
+        from soccer.domain.names import normalize_name
+        from soccer.sources.football_data_co_uk import MatchResult
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        def mr(h, a, hg, ag, hst, ast, day):
+            return MatchResult(
+                season="2526", division="E0", match_date=date(2026, 1, day),
+                home=h, away=a, home_norm=normalize_name(h), away_norm=normalize_name(a),
+                fthg=hg, ftag=ag, ftr="H" if hg > ag else "A" if ag > hg else "D",
+                hthg=None, htag=None, home_shots=None, away_shots=None,
+                home_shots_target=hst, away_shots_target=ast, home_corners=None,
+                away_corners=None, home_yellows=None, away_yellows=None, home_reds=None,
+                away_reds=None, referee=None,
+            )
+
+        # A dominates chances (SoT 10/9/8) but converts poorly; B barely creates.
+        rows = [
+            mr("A", "B", 1, 0, 10, 2, 1),
+            mr("B", "A", 0, 1, 3, 9, 2),
+            mr("A", "B", 1, 1, 8, 4, 3),
+        ]
+        with AnalyticsDB(path) as adb:
+            adb.load_results(rows)
+
+    def test_none_without_shot_data(self, tmp_path) -> None:
+        from soccer.dashboard.data import underlying_table
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)  # seeded results carry no shots
+        assert underlying_table(path, "2526", "E0") is None
+
+    def test_expected_points_reflect_chance_quality(self, tmp_path) -> None:
+        from soccer.dashboard.data import underlying_table
+
+        path = tmp_path / "analytics.duckdb"
+        self._seed_with_shots(path)
+        table = underlying_table(path, "2526", "E0")
+        assert table is not None and len(table) == 2
+        teams = {r.team: r for r in table}
+        assert teams["A"].played == 3 and teams["B"].played == 3
+        assert teams["A"].xpoints > 0 and teams["B"].xpoints > 0
+        # A creates far more, so it deserves more points than B regardless of finishing.
+        assert teams["A"].xpoints > teams["B"].xpoints
+
+
 class TestFixtureForecasts:
     def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:
         add_match(

@@ -569,6 +569,90 @@ def forecast_explanation(
     )
 
 
+@dataclass(frozen=True)
+class UnderlyingRow:
+    team: str
+    played: int
+    points: int
+    xpoints: float  # expected points from shots-on-target chance quality
+    goals_for: int
+    xgf: float
+    goals_against: int
+    xga: float
+
+    @property
+    def points_diff(self) -> float:
+        return self.points - self.xpoints  # >0 overperforming (hot/lucky), <0 unlucky
+
+    @property
+    def finishing(self) -> float:
+        return self.goals_for - self.xgf  # >0 clinical/hot finishing
+
+
+def underlying_table(
+    analytics_db: Path, season: str, division: str
+) -> list[UnderlyingRow] | None:
+    """Expected-points table from shots-on-target chance quality, or None without shot data.
+
+    Each match's shots on target become expected goals (via the league's conversion), those
+    two expected-goal rates give win/draw/loss probabilities and so expected points per team.
+    Comparing to the real table shows who is over- or under-performing their underlying play
+    -- the honest read on luck and likely regression, not a betting edge.
+    """
+    from soccer.models.poisson import DEFAULT_RHO, score_grid
+
+    with AnalyticsDB(analytics_db) as adb:
+        rows = adb.outcomes_for(season, division)
+    with_shots = [
+        r for r in rows if r.home_shots_target is not None and r.away_shots_target is not None
+    ]
+    tot_goals = sum(r.fthg + r.ftag for r in with_shots)
+    tot_sot = sum(r.home_shots_target + r.away_shots_target for r in with_shots)
+    if not tot_sot:
+        return None
+    conv = tot_goals / tot_sot
+
+    agg: dict[str, dict] = {}
+    for r in with_shots:
+        hxg, axg = r.home_shots_target * conv, r.away_shots_target * conv
+        grid = score_grid(hxg, axg, DEFAULT_RHO)
+        p_home = sum(p for (x, y), p in grid.items() if x > y)
+        p_draw = sum(p for (x, y), p in grid.items() if x == y)
+        home_xp, away_xp = 3 * p_home + p_draw, 3 * (1 - p_home - p_draw) + p_draw
+        home_pts = 3 if r.fthg > r.ftag else 1 if r.fthg == r.ftag else 0
+        away_pts = 3 if r.ftag > r.fthg else 1 if r.fthg == r.ftag else 0
+        for team, gf, ga, pts, xp, xg_for, xg_ag in (
+            (r.home, r.fthg, r.ftag, home_pts, home_xp, hxg, axg),
+            (r.away, r.ftag, r.fthg, away_pts, away_xp, axg, hxg),
+        ):
+            d = agg.setdefault(
+                team, {"pl": 0, "pts": 0, "xp": 0.0, "gf": 0, "xgf": 0.0, "ga": 0, "xga": 0.0}
+            )
+            d["pl"] += 1
+            d["pts"] += pts
+            d["xp"] += xp
+            d["gf"] += gf
+            d["xgf"] += xg_for
+            d["ga"] += ga
+            d["xga"] += xg_ag
+    if not agg:
+        return None
+    result = [
+        UnderlyingRow(
+            team=t,
+            played=d["pl"],
+            points=d["pts"],
+            xpoints=d["xp"],
+            goals_for=d["gf"],
+            xgf=d["xgf"],
+            goals_against=d["ga"],
+            xga=d["xga"],
+        )
+        for t, d in agg.items()
+    ]
+    return sorted(result, key=lambda r: (r.points, r.goals_for - r.goals_against), reverse=True)
+
+
 def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
     """Closing-line-value backtest for a slice, or None if no odds are loaded.
 

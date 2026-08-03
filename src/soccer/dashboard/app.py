@@ -45,6 +45,7 @@ from soccer.dashboard.data import (
     shot_map,
     shot_matches,
     team_form,
+    underlying_table,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
@@ -686,6 +687,62 @@ def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
     bars = base.mark_bar(color="#16a34a", cornerRadiusEnd=4, size=16)
     labels = base.mark_text(align="left", dx=4, color="#8b8b8b").encode(text="pct:Q")
     st.altair_chart((bars + labels).properties(height=max(120, 26 * len(contenders))))
+
+
+def _xpoints_scatter(rows):
+    frame = pl.DataFrame(
+        {
+            "team": [r.team for r in rows],
+            "xP": [r.xpoints for r in rows],
+            "pts": [float(r.points) for r in rows],
+        }
+    ).to_pandas()
+    lo = min(frame["xP"].min(), frame["pts"].min()) - 3
+    hi = max(frame["xP"].max(), frame["pts"].max()) + 3
+    diag = (
+        alt.Chart(pl.DataFrame({"x": [lo, hi], "y": [lo, hi]}).to_pandas())
+        .mark_line(color="#8b95a1", strokeDash=[4, 4])
+        .encode(x="x:Q", y="y:Q")
+    )
+    pts = alt.Chart(frame).mark_circle(size=90, color="#16c784", opacity=0.8).encode(
+        x=alt.X("xP:Q", title="expected points (xP)", scale=alt.Scale(domain=[lo, hi])),
+        y=alt.Y("pts:Q", title="actual points", scale=alt.Scale(domain=[lo, hi])),
+        tooltip=["team", "pts", "xP"],
+    )
+    return (diag + pts).properties(height=320)
+
+
+def _render_underlying(rows) -> None:
+    st.caption(
+        "Expected points (xP) from shots-on-target chance quality, vs the real table. Above xP "
+        "= results are flattering the underlying play (running hot, prone to cool); below = "
+        "creating more than the table shows (unlucky, prone to rise). Insight, not a bet."
+    )
+    over = max(rows, key=lambda r: r.points_diff)
+    under = min(rows, key=lambda r: r.points_diff)
+    k = st.columns(2)
+    k[0].metric("Running hottest", over.team, f"{over.points_diff:+.1f} pts vs xP", border=True)
+    k[1].metric("Unluckiest", under.team, f"{under.points_diff:+.1f} pts vs xP", border=True)
+
+    body = []
+    for i, r in enumerate(rows, 1):
+        diff = r.points_diff
+        colour = "#f0a020" if diff > 1.5 else "#3b82f6" if diff < -1.5 else "#8b95a1"
+        body.append(
+            {
+                "#": i,
+                "Team": _esc(r.team),
+                "Pts": f"<b>{r.points}</b>",
+                "xP": f"{r.xpoints:.1f}",
+                "Diff": f"<b style='color:{colour}'>{diff:+.1f}</b>",
+                "GF": r.goals_for,
+                "xGF": f"{r.xgf:.1f}",
+                "GA": r.goals_against,
+                "xGA": f"{r.xga:.1f}",
+            }
+        )
+    st.markdown(_html_table(body), unsafe_allow_html=True)
+    st.altair_chart(_xpoints_scatter(rows), width="stretch")
 
 
 def _render_shot_map(data) -> None:
@@ -1759,7 +1816,7 @@ def main() -> None:
             st.info("No results for that selection.")
             return
         forms = team_form(settings.analytics_db, season, division, last_n=last_n)
-        table_tab, form_tab = st.tabs(["Table", "Form guide"])
+        table_tab, form_tab, under_tab = st.tabs(["Table", "Form guide", "Underlying"])
         with table_tab:
             _render_analytics(snap, forms=forms, last_n=last_n)
         with form_tab:
@@ -1767,6 +1824,12 @@ def main() -> None:
                 _render_trends(forms, last_n=last_n)
             else:
                 st.info("No results for that selection.")
+        with under_tab:
+            under = underlying_table(settings.analytics_db, season, division)
+            if under is None:
+                st.info("No shot data for this season, so no underlying-performance view.")
+            else:
+                _render_underlying(under)
         return
 
     if page == "Records":
