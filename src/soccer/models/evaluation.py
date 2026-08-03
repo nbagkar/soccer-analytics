@@ -89,6 +89,7 @@ class Divergence:
 class ForecastReport:
     n: int
     model: Score
+    model_goals: Score  # goals-only Poisson, for comparison (== model when model="poisson")
     market: Score
     baseline: Score
     blend_curve: list[BlendPoint]
@@ -116,6 +117,7 @@ def evaluate_forecasts(
     rows: list,
     *,
     model: str = "poisson",
+    alpha: float = 0.5,
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
@@ -124,17 +126,24 @@ def evaluate_forecasts(
 
     Each match (after warmup, both teams seen, odds present) is predicted from a model fit
     on only the matches already played, then compared to the vig-free closing line.
+    ``model="shots"`` fits on a shots-on-target expected-goals blend (weight ``alpha``).
     """
     from soccer.models.dixon_coles import fit_dixon_coles
-    from soccer.models.poisson import fit_poisson
+    from soccer.models.poisson import fit_poisson, fit_poisson_shots
 
     def fit(played: list):
-        return fit_poisson(played) if model == "poisson" else fit_dixon_coles(played)
+        if model == "shots":
+            return fit_poisson_shots(played, alpha=alpha)
+        if model == "dixon_coles":
+            return fit_dixon_coles(played)
+        return fit_poisson(played)
 
     chronological = sorted(rows, key=lambda o: o.match_date)
     played: list = []
     seen: set[str] = set()
     records: list[tuple[Probs, Probs, int, object]] = []  # (model_p, market_p, actual, row)
+    goals_preds: list[tuple[Probs, int]] = []  # goals-only Poisson, for comparison
+    compare_goals = model != "poisson"
 
     for o in chronological:
         eligible = (
@@ -149,7 +158,13 @@ def evaluate_forecasts(
             market_p = implied_probabilities(
                 o.close_home_odds, o.close_draw_odds, o.close_away_odds
             )
-            records.append((model_p, market_p, _outcome_index(o.fthg, o.ftag), o))
+            actual = _outcome_index(o.fthg, o.ftag)
+            records.append((model_p, market_p, actual, o))
+            if compare_goals:
+                gfc = fit_poisson(played).forecast(o.home_norm, o.away_norm)
+                goals_preds.append(((gfc.prob_home, gfc.prob_draw, gfc.prob_away), actual))
+            else:
+                goals_preds.append((model_p, actual))
         played.append(o)
         seen.update((o.home_norm, o.away_norm))
 
@@ -194,6 +209,7 @@ def evaluate_forecasts(
     return ForecastReport(
         n=n,
         model=_score(model_preds),
+        model_goals=_score(goals_preds),
         market=_score(market_preds),
         baseline=_score(baseline_preds),
         blend_curve=curve,

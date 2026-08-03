@@ -372,6 +372,8 @@ class ResultRow:
     away_norm: str
     fthg: int
     ftag: int
+    home_shots_target: int | None = None
+    away_shots_target: int | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +394,8 @@ class OddsRow:
     close_home_odds: float | None
     close_draw_odds: float | None
     close_away_odds: float | None
+    home_shots_target: int | None = None
+    away_shots_target: int | None = None
 
     @property
     def has_odds(self) -> bool:
@@ -679,7 +683,8 @@ class AnalyticsDB:
     def outcomes_for(self, season: str, division: str) -> list[ResultRow]:
         """Results for one (season, division) in date order, for the models to fit on."""
         rows = self._con.execute(
-            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag "
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
+            "home_shots_target, away_shots_target "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()
@@ -710,7 +715,8 @@ class AnalyticsDB:
             return []
         placeholders = ",".join("?" * len(seasons))
         rows = self._con.execute(
-            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag "
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
+            "home_shots_target, away_shots_target "
             f"FROM results WHERE division=? AND season IN ({placeholders}) "
             "ORDER BY match_date, home",
             [division, *seasons],
@@ -725,7 +731,8 @@ class AnalyticsDB:
         """
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
-            "       close_home_odds, close_draw_odds, close_away_odds "
+            "       close_home_odds, close_draw_odds, close_away_odds, "
+            "       home_shots_target, away_shots_target "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()

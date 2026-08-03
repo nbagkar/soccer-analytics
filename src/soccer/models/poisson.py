@@ -182,3 +182,65 @@ def fit_poisson(outcomes: list[Outcome], *, rho: float = DEFAULT_RHO) -> Poisson
         away_avg=away_goals / matches,
         rho=rho,
     )
+
+
+def fit_poisson_shots(
+    outcomes: list[Outcome], *, alpha: float = 0.5, rho: float = DEFAULT_RHO
+) -> PoissonModel:
+    """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
+
+    Finishing is noisy; shots on target are a steadier read on how many chances a team
+    actually creates and concedes. Each team-game is credited with
+    ``alpha*goals + (1-alpha)*(SoT * league_conversion)`` where the conversion is the
+    league's goals-per-SoT -- so the pseudo-goals preserve the league's exact goal total
+    (strengths stay on the real goal scale) while shifting credit toward chance quality.
+    ``alpha=1`` recovers the goals-only model; ``alpha=0`` is pure SoT expected goals. A
+    match missing shot data falls back to its actual scoreline.
+
+    The home/away league averages stay on actual goals, so forecasts remain goal-scaled.
+    """
+    if not outcomes:
+        raise ValueError("cannot fit a model with no results")
+
+    tot_goals = tot_sot = 0
+    for o in outcomes:
+        hst, ast = getattr(o, "home_shots_target", None), getattr(o, "away_shots_target", None)
+        if hst is not None and ast is not None:
+            tot_goals += o.fthg + o.ftag
+            tot_sot += hst + ast
+    conv = tot_goals / tot_sot if tot_sot else 0.0
+
+    scored: dict[str, float] = {}
+    conceded: dict[str, float] = {}
+    games: dict[str, int] = {}
+    home_goals = away_goals = 0
+
+    for o in outcomes:
+        home_goals += o.fthg
+        away_goals += o.ftag
+        hst, ast = getattr(o, "home_shots_target", None), getattr(o, "away_shots_target", None)
+        if conv and hst is not None and ast is not None:
+            h_val = alpha * o.fthg + (1 - alpha) * hst * conv
+            a_val = alpha * o.ftag + (1 - alpha) * ast * conv
+        else:  # no shot data for this match -> trust the scoreline
+            h_val, a_val = float(o.fthg), float(o.ftag)
+        for team, gf, ga in ((o.home_norm, h_val, a_val), (o.away_norm, a_val, h_val)):
+            scored[team] = scored.get(team, 0.0) + gf
+            conceded[team] = conceded.get(team, 0.0) + ga
+            games[team] = games.get(team, 0) + 1
+
+    matches = len(outcomes)
+    overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
+    strengths = {
+        team: TeamStrength(
+            attack=(scored[team] / games[team]) / overall,
+            defence=(conceded[team] / games[team]) / overall,
+        )
+        for team in games
+    }
+    return PoissonModel(
+        strengths=strengths,
+        home_avg=home_goals / matches,
+        away_avg=away_goals / matches,
+        rho=rho,
+    )

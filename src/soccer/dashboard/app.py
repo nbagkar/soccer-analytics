@@ -993,13 +993,17 @@ def _blend_curve_chart(curve):
         {"weight": [p.weight for p in curve], "log_loss": [p.log_loss for p in curve]}
     ).to_pandas()
     best = min(curve, key=lambda p: p.log_loss)
-    line = alt.Chart(frame).mark_line(color="#3b82f6").encode(
-        x=alt.X(
-            "weight:Q",
-            title="model weight (0 = market, 1 = model)",
-            axis=alt.Axis(format="%"),
-        ),
-        y=alt.Y("log_loss:Q", title="log loss", scale=alt.Scale(zero=False)),
+    line = (
+        alt.Chart(frame)
+        .mark_line(color="#3b82f6")
+        .encode(
+            x=alt.X(
+                "weight:Q",
+                title="model weight (0 = market, 1 = model)",
+                axis=alt.Axis(format="%"),
+            ),
+            y=alt.Y("log_loss:Q", title="log loss", scale=alt.Scale(zero=False)),
+        )
     )
     mark = (
         alt.Chart(pl.DataFrame({"weight": [best.weight], "log_loss": [best.log_loss]}).to_pandas())
@@ -1022,20 +1026,24 @@ def _calibration_chart(bins):
         .mark_line(strokeDash=[4, 4], color="#8b95a1")
         .encode(x="x:Q", y="y:Q")
     )
-    pts = alt.Chart(frame).mark_circle(color="#16c784", opacity=0.8).encode(
-        x=alt.X(
-            "predicted:Q",
-            title="predicted home-win",
-            scale=alt.Scale(domain=[0, 1]),
-            axis=alt.Axis(format="%"),
-        ),
-        y=alt.Y(
-            "observed:Q",
-            title="actual home-win",
-            scale=alt.Scale(domain=[0, 1]),
-            axis=alt.Axis(format="%"),
-        ),
-        size=alt.Size("count:Q", legend=None),
+    pts = (
+        alt.Chart(frame)
+        .mark_circle(color="#16c784", opacity=0.8)
+        .encode(
+            x=alt.X(
+                "predicted:Q",
+                title="predicted home-win",
+                scale=alt.Scale(domain=[0, 1]),
+                axis=alt.Axis(format="%"),
+            ),
+            y=alt.Y(
+                "observed:Q",
+                title="actual home-win",
+                scale=alt.Scale(domain=[0, 1]),
+                axis=alt.Axis(format="%"),
+            ),
+            size=alt.Size("count:Q", legend=None),
+        )
     )
     return (diag + pts).properties(height=240)
 
@@ -1049,7 +1057,8 @@ def _render_report_card(report, division: str) -> None:
     )
     metrics = [
         ("Baseline (base rates)", report.baseline),
-        ("Model", report.model),
+        ("Model (goals only)", report.model_goals),
+        ("Model (shots-on-target)", report.model),
         ("Market (closing line)", report.market),
         (f"Blend ({report.best_weight:.0%} model)", report.blend),
     ]
@@ -1109,8 +1118,8 @@ def _render_report_card(report, division: str) -> None:
     ]
     st.markdown(_html_table(div_rows), unsafe_allow_html=True)
     st.caption(
-        "Closing 1X2 odds from football-data.co.uk (Pinnacle preferred), de-vigged. "
-        "Model = ratio-method Poisson with the Dixon-Coles low-score correction."
+        "Closing 1X2 odds from football-data.co.uk (Pinnacle preferred), de-vigged. Model = "
+        "Poisson fit on a shots-on-target expected-goals blend (the app's live forecast model)."
     )
 
 
@@ -1610,7 +1619,7 @@ def main() -> None:
                 fc = st.columns([2, 2, 1])
                 home = fc[0].selectbox("Home", teams, index=0)
                 away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
-                mle = fc[2].toggle("Dixon-Coles model", value=True)
+                mle = fc[2].toggle("Dixon-Coles instead", value=False)
                 if home == away:
                     st.info("Pick two different teams.")
                 else:

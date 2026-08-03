@@ -18,7 +18,7 @@ from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.elo import EloRating, power_ranking
-from soccer.models.poisson import fit_poisson
+from soccer.models.poisson import fit_poisson_shots
 from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
 from soccer.storage.analytics_db import AnalyticsDB, TableRow, XgRow
@@ -218,7 +218,11 @@ def analytics_snapshot(
     power = power_ranking(outcomes)
     fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
     projections = simulate_season(
-        fit_poisson(outcomes), fixtures, teams=list(names), n_sims=sims, seed=seed
+        fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA),
+        fixtures,
+        teams=list(names),
+        n_sims=sims,
+        seed=seed,
     ).projections
 
     return AnalyticsSnapshot(
@@ -404,6 +408,10 @@ def season_briefing(
 # default. (See docs / `soccer backtest --half-life`.)
 FORECAST_SEASONS = 3
 FORECAST_HALF_LIFE_DAYS = 0  # 0 = no time-decay (measured best); >0 halves weight every N days
+# Shots-on-target blend for the standalone forecast model: pseudo-goals = a*goals + (1-a)*SoT-xG.
+# Backtest across the top leagues put the model's log-loss gap to the closing line at roughly
+# half the goals-only model's (best around 0.25); matches without shot data fall back to goals.
+FORECAST_ALPHA = 0.25
 
 
 def _decay(half_life_days: float) -> float:
@@ -425,17 +433,17 @@ def forecast_slate(
 ):
     """Full market slate for a matchup, or None if a team is unknown.
 
-    `mle` -> Dixon-Coles (else ratio-method Poisson). `weighted` recency-weights the
-    Dixon-Coles fit over the last few seasons up to `season`, so recent form dominates --
-    the self-updating "oracle" fit rather than one frozen season.
+    Default fit is the shots-on-target-blended Poisson (steadier than goals-only, ~half the
+    log-loss gap to the market). `mle` switches to Dixon-Coles instead. `weighted` fits over
+    the last few seasons up to `season` so recent form dominates -- the self-updating fit.
     """
     from soccer.domain.names import normalize_name
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.markets import compute_markets
-    from soccer.models.poisson import fit_poisson
+    from soccer.models.poisson import fit_poisson_shots
 
     with AnalyticsDB(analytics_db) as adb:
-        if mle and weighted:
+        if weighted:
             outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
         else:
             outcomes = adb.outcomes_for(season, division)
@@ -446,7 +454,7 @@ def forecast_slate(
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
     else:
-        model = fit_poisson(outcomes)
+        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -473,9 +481,7 @@ def market_edge(analytics_db: Path, season: str, division: str, *, model: str = 
         return None
 
 
-def forecast_report(
-    analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "poisson"
-):
+def forecast_report(analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "shots"):
     """Model-vs-market-vs-blend scorecard for a division's recent odds-bearing seasons.
 
     The honest measurement instrument: walk-forward scores the model, the vig-free closing
@@ -495,7 +501,7 @@ def forecast_report(
         rows = [r for s in seasons for r in adb.outcomes_with_odds(s, division)]
     if not rows:
         return None
-    return evaluate_forecasts(rows, model=model, min_history=60)
+    return evaluate_forecasts(rows, model=model, alpha=FORECAST_ALPHA, min_history=60)
 
 
 def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
@@ -707,7 +713,6 @@ def fixture_forecasts(
     projection (European "2526", Brazil's calendar-year "2026", ... resolved per league).
     """
     from soccer.domain.names import normalize_name
-    from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.markets import compute_markets
 
     def resolve(name: str, model) -> str | None:
@@ -747,8 +752,9 @@ def fixture_forecasts(
                         else []
                     )
                 if outcomes:
-                    # Recency-weighted: last few seasons, current form dominating.
-                    model = fit_dixon_coles(outcomes, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
+                    # Recency window (last few seasons), fit on the shots-on-target blend --
+                    # measured to roughly halve the goals-only model's gap to the market.
+                    model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA)
             models[division] = model
         return models[division]
 

@@ -13,7 +13,7 @@ from datetime import date
 import pytest
 
 from soccer.models.elo import EloConfig, compute_ratings, expected_score, power_ranking
-from soccer.models.poisson import fit_poisson
+from soccer.models.poisson import fit_poisson, fit_poisson_shots
 
 
 @dataclass(frozen=True)
@@ -79,6 +79,50 @@ class TestPoisson:
     def test_empty_results_rejected(self) -> None:
         with pytest.raises(ValueError, match="no results"):
             fit_poisson([])
+
+
+@dataclass(frozen=True)
+class ShotRow(Row):
+    home_shots_target: int = 0
+    away_shots_target: int = 0
+
+
+def _shot_rows() -> list[ShotRow]:
+    # a,b,c double round-robin. 'a' hugely out-shoots on target but converts poorly (an
+    # unlucky finisher) -- so SoT should rate its attack well above its goals do.
+    return [
+        ShotRow("a", "b", 1, 0, date(2026, 1, 1), 12, 3),
+        ShotRow("b", "a", 0, 1, date(2026, 1, 2), 3, 12),
+        ShotRow("a", "c", 1, 1, date(2026, 1, 3), 12, 3),
+        ShotRow("c", "a", 1, 1, date(2026, 1, 4), 3, 12),
+        ShotRow("b", "c", 2, 0, date(2026, 1, 5), 6, 3),
+        ShotRow("c", "b", 0, 2, date(2026, 1, 6), 3, 6),
+    ]
+
+
+class TestPoissonShots:
+    def test_alpha_one_recovers_the_goals_model(self) -> None:
+        rows = _shot_rows()
+        goals = fit_poisson(
+            [Row(r.home_norm, r.away_norm, r.fthg, r.ftag, r.match_date) for r in rows]
+        )
+        shots = fit_poisson_shots(rows, alpha=1.0)
+        for team in goals.strengths:
+            assert shots.strengths[team].attack == pytest.approx(goals.strengths[team].attack)
+            assert shots.strengths[team].defence == pytest.approx(goals.strengths[team].defence)
+
+    def test_falls_back_to_goals_without_shot_data(self) -> None:
+        # Plain Rows carry no SoT -> even alpha=0 must reduce to the goals-only fit.
+        rows = season("strong", "weak")
+        goals = fit_poisson(rows)
+        shots = fit_poisson_shots(rows, alpha=0.0)
+        assert shots.strengths["strong"].attack == pytest.approx(goals.strengths["strong"].attack)
+
+    def test_shots_credit_chance_creation(self) -> None:
+        rows = _shot_rows()  # 'a' out-shoots its goals
+        goals_attack = fit_poisson_shots(rows, alpha=1.0).strengths["a"].attack
+        shots_attack = fit_poisson_shots(rows, alpha=0.0).strengths["a"].attack
+        assert shots_attack > goals_attack
 
     def test_rho_only_perturbs_low_scores(self) -> None:
         # With rho=0 the model is plain independent Poisson; outcomes still valid.
