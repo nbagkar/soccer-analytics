@@ -116,9 +116,11 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_help,
         _intent_compare,
         _intent_h2h,
+        _intent_match_centre,
         _intent_forecast,
         _intent_model,
         _intent_honours,
+        _intent_scout,
         _intent_top_scorers,
         _intent_player,
         _intent_title_odds,
@@ -126,8 +128,8 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_records,
         _intent_form,
         _intent_standings,
-        _intent_team,
         _intent_fixtures,
+        _intent_team,
     ):
         reply = handler(q, analytics_db, live_db)
         if reply is not None:
@@ -862,7 +864,8 @@ def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply
 
 def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(fixtures?|upcoming|next (game|match)|who ?s playing|this weekend|schedule)\b",
+        r"\b(fixtures?|upcoming|next (game|match|fixture|up)|who ?s playing|this weekend"
+        r"|schedule|play next|playing next)\b|when (do|does|will|are|is) \w+",
         q,
     ):
         return None
@@ -876,6 +879,45 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     ]
     if not fixtures:
         return Reply("No upcoming fixtures with a forecast yet — try **Home → Update fixtures**.")
+
+    with AnalyticsDB(analytics_db) as adb:
+        index = _team_index(adb, _loaded_divisions(adb))
+    named = _resolve_teams(q, index)
+    if named:  # a club is named -> that club's own schedule, team-first
+        tnorm = _norm(named[0][0])
+        mine = [f for f in fixtures if tnorm in _norm(f.home) or tnorm in _norm(f.away)]
+        if not mine:
+            return Reply(
+                f"I don't see an upcoming fixture for **{named[0][0]}** in the loaded schedule."
+            )
+        rows = []
+        for f in mine[:6]:
+            hx, ax, _ = f.slate.most_likely_score
+            res = [m.probability for m in f.slate.result]
+            home_is = tnorm in _norm(f.home)
+            rows.append(
+                {
+                    "Date": f.kickoff_utc.strftime("%b %d"),
+                    "Opponent": f.away if home_is else f.home,
+                    "H/A": "H" if home_is else "A",
+                    "Pred": f"{hx}-{ax}" if home_is else f"{ax}-{hx}",
+                    "Win %": round(100 * (res[0] if home_is else res[2])),
+                }
+            )
+        nxt = mine[0]
+        home_is = tnorm in _norm(nxt.home)
+        opp = nxt.away if home_is else nxt.home
+        res = [m.probability for m in nxt.slate.result]
+        hx, ax, _ = nxt.slate.most_likely_score
+        pred = f"{hx}-{ax}" if home_is else f"{ax}-{hx}"
+        return Reply(
+            f"**{named[0][0]}'s next match** — {'home to' if home_is else 'away to'} "
+            f"**{opp}** on {nxt.kickoff_utc.strftime('%a %b %d')}: predicted **{pred}**, "
+            f"{named[0][0]} win **{(res[0] if home_is else res[2]):.0%}**.",
+            table=rows,
+            suggestions=[f"Tell me about {named[0][0]}", "Show all upcoming fixtures"],
+        )
+
     rows = []
     for f in fixtures[:8]:
         x, y, _ = f.slate.most_likely_score
@@ -994,6 +1036,109 @@ def _intent_underlying(q: str, analytics_db: Path, live_db: Path | None) -> Repl
         f"Unluckiest: **{under.team}** ({under.points_diff:+.1f}).",
         table=rows,
         suggestions=["Who is in form?", "Who will win the league?"],
+    )
+
+
+_SB_STOP = {"real", "club", "borussia", "olympique", "deportivo", "sporting", "racing"}
+
+
+def _covered_tokens(name: str, q_words: set[str]) -> set[str]:
+    """Distinctive club-name tokens (len>=4) from `name` that appear in the question."""
+    return {w for w in _norm(name).split() if len(w) >= 4 and w not in _SB_STOP} & q_words
+
+
+def _find_shot_match(q: str, matches: list[tuple]) -> tuple[int, str, str] | None:
+    """The loaded StatsBomb match whose two clubs are both named in the question.
+
+    Scores every "Home v Away" label by how many distinctive name tokens the question covers
+    on each side; a valid match needs both sides covered by different clubs. Ties go to the
+    newest StatsBomb id (~ most recent meeting). None if no match is clearly identified. This
+    matches whole games rather than picking two club names, so "Bayer Leverkusen" and the
+    alias "TSV Bayer 04 Leverkusen" can't be mistaken for two different sides.
+    """
+    q_words = set(q.split())
+    best: tuple[int, int, str, str] | None = None  # (score, mid, home, away)
+    for mid, label, _comp, _season in matches:
+        if " v " not in label:
+            continue
+        home, away = (x.strip() for x in label.split(" v ", 1))
+        ch, ca = _covered_tokens(home, q_words), _covered_tokens(away, q_words)
+        if ch and ca and _norm(home) != _norm(away):
+            score = len(ch) + len(ca)
+            if best is None or (score, mid) > (best[0], best[1]):
+                best = (score, mid, home, away)
+    return (best[1], best[2], best[3]) if best else None
+
+
+def _intent_match_centre(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"shot map|shot log|shots? (in|from|for|by|chart)|match (centre|center|report)"
+        r"|xg (timeline|race|map|breakdown)|chances (created|in the (game|match))"
+        r"|how many shots|xg (in|for) (the )?(game|match)",
+        q,
+    ):
+        return None
+
+    from soccer.dashboard.data import shot_map, shot_matches
+
+    matches = shot_matches(analytics_db)
+    found = _find_shot_match(q, matches) if matches else None
+    if found is None:
+        return None
+    mid, home, away = found
+    data = shot_map(analytics_db, mid)
+    if data is None:
+        return None
+    xg = sorted(data.team_xg, key=lambda r: -r.xg)
+    xg_line = " · ".join(f"{r.name} **{r.xg:.1f} xG** ({r.goals}g, {r.shots} sh)" for r in xg)
+    top = sorted(data.shots, key=lambda s: -s["xg"])[:8]
+    rows = [
+        {
+            "Min": s["minute"],
+            "Player": s["player"],
+            "Team": s["team"],
+            "xG": round(s["xg"], 2),
+            "Outcome": s.get("outcome", ""),
+        }
+        for s in top
+    ]
+    return Reply(
+        f"**{data.label}**\n\n- xG race: {xg_line}\n- Biggest chances below.",
+        table=rows,
+        suggestions=[f"Tell me about {home}", f"How is {away}'s form?"],
+    )
+
+
+def _intent_scout(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"scout|scouting|percentiles?|\bradar\b|fingerprint|strengths and weakness"
+        r"|how does .* (rank|compare)|rank among|percentile rank",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_stats_count() == 0:
+            return None
+        player = _resolve_player(q, adb, _team_tokens(adb))
+    if player is None:
+        return None
+
+    from soccer.dashboard.data import player_percentiles
+
+    pcts = player_percentiles(analytics_db, player)
+    if not pcts:
+        return None
+    best = max(pcts, key=lambda m: m.percentile)
+    worst = min(pcts, key=lambda m: m.percentile)
+    rows = [{"Metric": m.label, "Per 90": m.value, "Pctl": round(m.percentile)} for m in pcts]
+    return Reply(
+        f"**{player} — scouting profile** (percentile vs all loaded players, 200+ mins)\n\n"
+        f"- Elite: **{best.label}** — {round(best.percentile)}th pct ({best.value} per 90)\n"
+        f"- Weakest: {worst.label} — {round(worst.percentile)}th pct\n\n"
+        "Percentiles pool every loaded competition and era together, so read them as a rough "
+        "shape rather than a single-league rank.",
+        table=rows,
+        suggestions=["Top scorers", "Who is the best playmaker?"],
     )
 
 

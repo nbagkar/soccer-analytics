@@ -20,6 +20,47 @@ def _seed(tmp_path):
     return path
 
 
+def _seed_shots(path):
+    """A single StatsBomb match (Argentina v France) with a few shots, for the match centre."""
+    from soccer.sources.statsbomb import Shot
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    with AnalyticsDB(path) as adb:
+        adb.load_shots(
+            [
+                Shot(
+                    1,
+                    "Argentina",
+                    "Messi",
+                    23,
+                    1,
+                    110.0,
+                    40.0,
+                    0.35,
+                    "Goal",
+                    True,
+                    False,
+                    "Left Foot",
+                ),
+                Shot(1, "France", "Mbappé", 80, 2, 108.0, 44.0, 0.76, "Goal", True, True, None),
+                Shot(
+                    1,
+                    "Argentina",
+                    "Di María",
+                    60,
+                    1,
+                    100.0,
+                    40.0,
+                    0.20,
+                    "Saved",
+                    False,
+                    False,
+                    None,
+                ),
+            ]
+        )
+
+
 class TestRouting:
     def test_help(self, tmp_path) -> None:
         reply = answer("what can you do?", _seed(tmp_path))
@@ -88,6 +129,35 @@ class TestRouting:
         assert "Arsenal" in reply.text
         assert "title" in reply.text.lower()
         assert "%" in reply.text
+
+    def test_match_centre_shot_log(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        _seed_shots(path)  # Argentina v France
+        reply = answer("shot log for Argentina vs France", path)
+        assert "Argentina" in reply.text and "France" in reply.text
+        assert "xG" in reply.text  # the xG race line
+        assert reply.table and "Player" in reply.table[0]
+
+    def test_match_centre_ignores_alias_collision(self, tmp_path) -> None:
+        # A shot ask with a single team named must not invent a match; fall through cleanly.
+        path = _seed(tmp_path)
+        _seed_shots(path)
+        reply = answer("shot map for Argentina", path)  # only one side named
+        assert "Argentina v France" not in reply.text  # did not fabricate the match
+
+    def test_scout_percentiles(self, tmp_path) -> None:
+        reply = answer("scouting report for Messi", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "Messi" in reply.text
+        assert "pct" in reply.text.lower()
+        assert reply.table is not None
+
+    def test_team_fixtures_query_not_stolen_by_dossier(self, tmp_path) -> None:
+        # "<club> fixtures" must reach the fixtures intent (honest note without a live DB),
+        # not the team dossier -- the two-word query used to trip the dossier's short branch.
+        reply = answer("Arsenal fixtures", _seed(tmp_path))
+        assert "fixtures" in reply.text.lower()
+        assert "1st" not in reply.text  # not the standings/dossier line
 
     def test_fallback_is_honest(self, tmp_path) -> None:
         reply = answer("what is the weather tomorrow", _seed(tmp_path))
@@ -161,4 +231,3 @@ class TestRouting:
         reply = answer("compare Messi and Otamendi", _seed(tmp_path))
         assert "Messi" in reply.text and "Otamendi" in reply.text
         assert reply.table and reply.table[0]["Metric"] == "Matches"
-
