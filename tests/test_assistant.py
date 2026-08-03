@@ -7,6 +7,8 @@ store so the checks are deterministic.
 
 from __future__ import annotations
 
+import re
+
 from soccer.dashboard.assistant import answer
 from tests.test_dashboard_data import seed_player_events, seed_results
 
@@ -122,3 +124,41 @@ class TestRouting:
         seed_results(path, division="E0", teams=teams, season="2526")
         reply = answer("premier league last season table", path)
         assert "2024/25" in reply.text  # the season before the latest, not this one
+
+    def test_forecast_gives_a_predicted_scoreline(self, tmp_path) -> None:
+        reply = answer("what's the predicted score for Chelsea vs Arsenal", _seed(tmp_path))
+        assert "Predicted score" in reply.text
+        assert re.search(r"\d-\d", reply.text)  # an actual scoreline
+
+    def test_forecast_fires_on_two_teams_without_a_keyword(self, tmp_path) -> None:
+        # "scoreline" + two clubs must forecast, not get hijacked by a player-name collision.
+        reply = answer("predicted scoreline chelsea arsenal", _seed(tmp_path))
+        assert reply.text.startswith("**Chelsea vs Arsenal")
+
+    def test_team_dossier(self, tmp_path) -> None:
+        reply = answer("tell me about Arsenal", _seed(tmp_path))
+        assert reply.text.startswith("**Arsenal**")
+        assert reply.table  # recent results listed
+        assert "not sure" not in reply.text.lower()
+
+    def test_bare_club_name_is_a_dossier(self, tmp_path) -> None:
+        # Just naming a club should give its dossier, not fall through.
+        reply = answer("Brentford", _seed(tmp_path))
+        assert reply.text.startswith("**Brentford**")
+
+    def test_all_time_honours(self, tmp_path) -> None:
+        reply = answer("who has won the most titles in the premier league", _seed(tmp_path))
+        assert "all-time" in reply.text.lower()
+        assert reply.table and "Titles" in reply.table[0]
+
+    def test_model_accuracy_is_honest(self, tmp_path) -> None:
+        # No odds in the seed -> honest "need odds" note; real point is it does not fall back.
+        reply = answer("how accurate is your model", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "odds" in reply.text.lower()
+
+    def test_compare_two_players(self, tmp_path) -> None:
+        reply = answer("compare Messi and Otamendi", _seed(tmp_path))
+        assert "Messi" in reply.text and "Otamendi" in reply.text
+        assert reply.table and reply.table[0]["Metric"] == "Matches"
+

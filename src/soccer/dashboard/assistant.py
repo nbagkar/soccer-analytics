@@ -113,8 +113,11 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
 
     for handler in (
         _intent_help,
+        _intent_compare,
         _intent_h2h,
         _intent_forecast,
+        _intent_model,
+        _intent_honours,
         _intent_top_scorers,
         _intent_player,
         _intent_title_odds,
@@ -122,6 +125,7 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_records,
         _intent_form,
         _intent_standings,
+        _intent_team,
         _intent_fixtures,
     ):
         reply = handler(q, analytics_db, live_db)
@@ -244,12 +248,27 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
     return [entry for _pos, entry in sorted(hits.values(), key=lambda pe: pe[0])]
 
 
-def _resolve_player(q: str, adb: AnalyticsDB) -> str | None:
+def _team_tokens(adb: AnalyticsDB) -> frozenset[str]:
+    """Distinctive words that name a loaded team (len>=5), to stop a club name matching a
+    player. A club literally named after a player exists (e.g. a keeper 'Chelsea Ashurst'),
+    so a lone 'chelsea' must resolve to the club, not her -- the full player name still wins.
+    """
+    loaded = _loaded_divisions(adb)
+    tokens: set[str] = set()
+    for norm in _team_index(adb, loaded):
+        tokens.update(w for w in norm.split() if len(w) >= 5)
+    return frozenset(tokens)
+
+
+def _resolve_player(
+    q: str, adb: AnalyticsDB, team_tokens: frozenset[str] = frozenset()
+) -> str | None:
     """The most prominent player (by minutes) whose name appears in the question.
 
     StatsBomb stores full legal names ("Lionel Andrés Messi Cuccittini"); users type
     "Messi". So match on the full name OR any distinctive whole-word token (a surname),
-    and disambiguate common tokens by picking the player with the most minutes.
+    and disambiguate common tokens by picking the player with the most minutes. Tokens that
+    are also a loaded club name are skipped unless the full player name is present.
     """
     if adb.player_stats_count() == 0:
         return None
@@ -257,10 +276,39 @@ def _resolve_player(q: str, adb: AnalyticsDB) -> str | None:
     best, best_mins = None, -1
     for player, mins in adb.player_minutes():
         name = _norm(player)
-        tokens = [t for t in name.split() if len(t) >= 5 and t not in _STOP]
+        tokens = [
+            t for t in name.split() if len(t) >= 5 and t not in _STOP and t not in team_tokens
+        ]
         if (name in q or any(t in q_words for t in tokens)) and mins > best_mins:
             best, best_mins = player, mins
     return best
+
+
+def _resolve_players(
+    q: str, adb: AnalyticsDB, team_tokens: frozenset[str], limit: int = 2
+) -> list[str]:
+    """Distinct players named in the question, in the order they appear -- for comparisons.
+
+    Like `_resolve_player` but keeps every match, ordered by first mention (ties broken by
+    minutes), so 'compare Messi and Ronaldo' yields both, Messi first.
+    """
+    if adb.player_stats_count() == 0:
+        return []
+    q_words = set(q.split())
+    found: dict[str, tuple[int, int]] = {}  # player -> (position, minutes)
+    for player, mins in adb.player_minutes():
+        name = _norm(player)
+        pos = q.find(name) if name in q else -1
+        if pos == -1:
+            for t in name.split():
+                if len(t) >= 5 and t not in _STOP and t not in team_tokens and t in q_words:
+                    p = q.find(t)
+                    if p != -1 and (pos == -1 or p < pos):
+                        pos = p
+        if pos != -1:
+            found[player] = (pos, mins)
+    ordered = sorted(found.items(), key=lambda kv: (kv[1][0], -kv[1][1]))
+    return [player for player, _ in ordered[:limit]]
 
 
 # --- intents -----------------------------------------------------------------
@@ -293,7 +341,9 @@ def _intent_help(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
 
 def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     triggers = re.search(
-        r"\b(vs|versus|beat|predict|forecasts?|prediction|wins?|winner|odds|score)\b", q
+        r"\b(vs|versus|beat|predict|forecasts?|prediction|wins?|winner|odds"
+        r"|scoreline|score|result|chances?)\b",
+        q,
     )
     if not triggers and " v " not in f" {q} ":
         return None
@@ -310,7 +360,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     if pair is None:
         # A clear match-forecast ask ("match forecasts", "predict Arsenal") but not two
         # teams -> guide, rather than falling through to a blank "I'm not sure".
-        if re.search(r"\b(predict|forecasts?|prediction)\b", q) or " vs " in f" {q} ":
+        if re.search(r"\b(predict|forecasts?|prediction|scoreline)\b", q) or " vs " in f" {q} ":
             return Reply(
                 "To forecast a match, name two teams — e.g. **Arsenal vs Chelsea**. "
                 "For upcoming real fixtures, ask for **fixtures**.",
@@ -318,28 +368,40 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             )
         return None
 
-    from soccer.dashboard.data import forecast_slate
+    from soccer.dashboard.data import forecast_explanation, forecast_slate
 
     division, (home_e, away_e) = pair[0], pair[1][:2]
     home, away = home_e[0], away_e[0]
-    slate = forecast_slate(analytics_db, home_e[1], division, home, away)
+    season = home_e[1]
+    slate = forecast_slate(analytics_db, season, division, home, away)
     if slate is None:
         return None
     res = {m.name: m.probability for m in slate.result}
-    x, y, _ = slate.most_likely_score
+    x, y, p0 = slate.most_likely_score
+    others = ", ".join(f"{a}-{b} ({p:.0%})" for a, b, p in slate.correct_scores[1:3])
     over = next(o for o in slate.over_under if o.line == 2.5).over
     btts = next(m.probability for m in slate.btts if m.name == "Yes")
     lead = max(res, key=res.get)
     text = (
         f"**{home} vs {away}** ({division_name(division)})\n\n"
-        f"- Most likely score: **{x}-{y}**\n"
+        f"- Predicted score: **{x}-{y}** ({p0:.0%}) — then {others}\n"
         f"- {home} win **{res[home]:.0%}** · draw **{res['Draw']:.0%}** · "
         f"{away} win **{res[away]:.0%}**\n"
-        f"- Over 2.5 goals **{over:.0%}** · both teams score **{btts:.0%}**\n\n"
-        f"Model leans **{lead if lead != 'Draw' else 'a draw'}**. Directional, not advice."
+        f"- Over 2.5 goals **{over:.0%}** · both teams score **{btts:.0%}**"
     )
+    expl = forecast_explanation(analytics_db, season, division, home, away)
+    if expl is not None:
+        text += f"\n\n{expl.summary} (confidence: {expl.confidence.lower()})"
+    else:
+        text += (
+            f"\n\nModel leans **{lead if lead != 'Draw' else 'a draw'}**. Directional, not advice."
+        )
     return Reply(
-        text, suggestions=[f"Top scorers in {division_name(division)}", "Who will win the league?"]
+        text,
+        suggestions=[
+            f"{home} vs {away} head to head",
+            f"How is {home}'s form?",
+        ],
     )
 
 
@@ -425,7 +487,7 @@ def _resolve_statsbomb_competition(q: str, adb: AnalyticsDB) -> str | None:
 
 def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     with AnalyticsDB(analytics_db) as adb:
-        player = _resolve_player(q, adb)
+        player = _resolve_player(q, adb, _team_tokens(adb))
         if player is None:
             return None
         profile = adb.player_profile(player)
@@ -442,6 +504,183 @@ def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | 
         f"- Defending: {profile.tackles} tackles, {profile.interceptions} interceptions"
     )
     return Reply(text, suggestions=["Top scorers", "Who is the best playmaker?"])
+
+
+def _vs_avg(multiplier: float) -> str:
+    """A strength multiplier as a readable deviation: 1.2 -> '20% above average'."""
+    d = multiplier - 1.0
+    return f"{abs(d):.0%} {'above' if d >= 0 else 'below'} average"
+
+
+def _intent_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(r"\bcompare\b|\bvs\b|\bversus\b|\bbetter\b|compared to", q):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_stats_count() == 0:
+            return None
+        names = _resolve_players(q, adb, _team_tokens(adb), limit=2)
+        profiles = [adb.player_profile(n) for n in names]
+    profiles = [p for p in profiles if p is not None]
+    if len(profiles) < 2:
+        return None
+    a, b = profiles[0], profiles[1]
+    rows = [
+        {"Metric": m, a.player: av, b.player: bv}
+        for m, av, bv in (
+            ("Matches", a.matches, b.matches),
+            ("Goals", a.goals, b.goals),
+            ("Assists", a.assists, b.assists),
+            ("xG", round(a.xg, 1), round(b.xg, 1)),
+            ("xA", round(a.xa, 1), round(b.xa, 1)),
+            ("Key passes", a.key_passes, b.key_passes),
+            ("Pass %", round(a.pass_pct), round(b.pass_pct)),
+        )
+    ]
+    return Reply(
+        f"**{a.player}** vs **{b.player}** — {a.goals}G/{a.assists}A vs "
+        f"{b.goals}G/{b.assists}A over {a.matches} and {b.matches} matches loaded.",
+        table=rows,
+        suggestions=[f"Tell me about {a.player}", f"Tell me about {b.player}"],
+    )
+
+
+def _intent_model(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"how (accurate|reliable)\b|how good (is|are) (your|the) (model|forecast|prediction)"
+        r"|model'?s? (accuracy|accurate)|forecast accuracy|accuracy of (your|the)"
+        r"|beat the (market|bookies?|book)|can you beat|do you beat|edge over"
+        r"|how (do|does) (your|the) (model|forecast)|calibrat|log ?loss|brier|\brps\b|backtest",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        division, _season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+
+    from soccer.dashboard.data import forecast_report
+
+    report = forecast_report(analytics_db, division)
+    if report is None:
+        return Reply(
+            "I can only score forecast accuracy where bookmaker odds are loaded, and I don't "
+            f"have any for {division_name(division)} yet."
+        )
+    m, mk = report.model, report.market
+    if report.best_weight >= 0.10 and report.blend_beats_market:
+        blendline = (
+            f"a **{report.best_weight:.0%}** model blend beats the closing line by a hair, "
+            "but not enough to clear the bookmaker's margin"
+        )
+    else:
+        blendline = "mixing the model into the market barely moves the needle"
+    return Reply(
+        f"**Forecast accuracy — {division_name(division)}** "
+        f"(walk-forward over {report.n} matches):\n\n"
+        f"- Model: RPS **{m.rps:.3f}**, log-loss **{m.log_loss:.3f}**\n"
+        f"- Market close: RPS **{mk.rps:.3f}**, log-loss **{mk.log_loss:.3f}** (lower is better)\n"
+        f"- Best blend weight on the model: **{report.best_weight:.0%}**\n\n"
+        f"Honest read: the market is sharper — {blendline}. There's no exploitable edge on free "
+        "public data, so these forecasts are for insight, not betting.",
+        suggestions=["Arsenal vs Chelsea, who wins?", "Who will win the league?"],
+    )
+
+
+def _intent_honours(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"most (league )?titles?|won the most|most successful|most champions|most trophies"
+        r"|record (points|for points)|all[ -]?time|hall of fame|how many titles"
+        r"|biggest (ever|ever win|win in history)|record (win|victory)",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, _season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+
+    from soccer.dashboard.data import league_history
+
+    hist = league_history(analytics_db, division)
+    if hist is None or not hist.title_counts:
+        return None
+    rows = [{"Team": t, "Titles": n} for t, n in hist.title_counts[:8]]
+    leader, count = hist.title_counts[0]
+    text = (
+        f"**{division_name(division)} — all-time** (loaded {hist.oldest} to {hist.newest}, "
+        f"{hist.seasons} seasons)\n\n"
+        f"- Most titles: **{leader}** with **{count}**\n"
+    )
+    if hist.record_points:
+        rt, rs, rp = hist.record_points
+        text += f"- Record points haul: **{rt}, {rp} pts** ({rs})\n"
+    if hist.biggest_wins:
+        w = hist.biggest_wins[0]
+        text += f"- Biggest win on record: {w['Result']} ({w['Season']})"
+    return Reply(
+        text,
+        table=rows,
+        suggestions=["Who will win the league?", "Who is in form?"],
+    )
+
+
+def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    kw = re.search(
+        r"tell me about|how (are|is|good|s)\b|hows\b|what about|whats up with|profile of"
+        r"|overview|report on|scout|any good|doing|season so far|rate\b|breakdown|dossier",
+        q,
+    )
+    if not kw and len(q.split()) > 3:  # a bare club name is a fine "everything about X" ask
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        index = _team_index(adb, loaded)
+        named = _resolve_teams(q, index)
+        if not named:
+            return None
+        display, division, season = named[0]
+
+    from soccer.dashboard.data import team_dossier
+
+    d = team_dossier(analytics_db, division, season, display)
+    if d is None:
+        return None
+    trend = "rising" if d.trend > 0.15 else "sliding" if d.trend < -0.15 else "steady"
+    lines = [
+        f"**{d.team}** — {division_name(division)} {season_label(season)}",
+        "",
+        f"- **{_ordinal(d.position)}** on {d.points} pts "
+        f"({d.won}W {d.drawn}D {d.lost}L), GD {d.goal_difference:+d}",
+        f"- Last 5: **{d.recent_form or 'n/a'}** ({d.recent_ppg:.2f} ppg vs "
+        f"{d.season_ppg:.2f} season, {trend})",
+    ]
+    if d.xpoints is not None:
+        diff = d.points - d.xpoints
+        read = "overperforming" if diff > 1.5 else "underperforming" if diff < -1.5 else "about par"
+        lines.append(
+            f"- Underlying: **{d.xpoints:.1f} xP** ({diff:+.1f}, {read}); "
+            f"xGF {d.xgf:.1f} / xGA {d.xga:.1f}"
+        )
+    lines.append(f"- Attack {_vs_avg(d.attack)}; defence {_vs_avg(d.solidity)}")
+    if d.winning >= 3:
+        lines.append(f"- On a **{d.winning}-game winning run**")
+    elif d.unbeaten >= 4:
+        lines.append(f"- **Unbeaten in {d.unbeaten}**")
+    rows = [
+        {"Opponent": r["opponent"], "H/A": r["venue"], "Score": r["score"], "Res": r["result"]}
+        for r in d.recent
+    ]
+    return Reply(
+        "\n".join(lines),
+        table=rows,
+        suggestions=[f"Is {d.team} overperforming their xG?", f"How is {d.team}'s form?"],
+    )
 
 
 def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
