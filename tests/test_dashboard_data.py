@@ -952,6 +952,11 @@ class TestAppSmoke:
             at.chat_input[0].set_value("who is top of the premier league?").run()
             assert not at.exception, f"Assistant query raised: {at.exception}"
 
+            # A dossier answer renders its points-trajectory chart inline in the chat,
+            # exercising _render_chat_chart + st.altair_chart on the chat page itself.
+            at.chat_input[0].set_value("tell me about Arsenal").run()
+            assert not at.exception, f"Assistant chat chart raised: {at.exception}"
+
             # With league data seeded, revisit Predictions: AppTest executes all three tab
             # bodies, so this covers the upcoming-fixtures list, the matchup forecast slate
             # and the season simulation in one visit.

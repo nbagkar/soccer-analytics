@@ -203,6 +203,19 @@ def _render_data_manager(settings) -> None:
             st.success(msg)
 
 
+def _render_chat_chart(chart) -> None:
+    """Render an assistant Reply.chart spec with the same builders the pages use."""
+    if not chart or not chart.get("data"):
+        return
+    kind = chart["kind"]
+    if kind == "xg_race":
+        st.altair_chart(_xg_race_chart(chart["data"]), width="stretch")
+    elif kind == "trajectory":
+        st.altair_chart(_team_trajectory_chart(chart["data"]), width="stretch")
+    elif kind == "percentiles":
+        st.altair_chart(_percentile_bars_chart(chart["data"]), width="stretch")
+
+
 def _render_assistant(settings) -> None:
     from soccer.dashboard.assistant import answer as assistant_answer
 
@@ -231,6 +244,7 @@ def _render_assistant(settings) -> None:
                 "text": reply.text,
                 "table": reply.table,
                 "suggestions": reply.suggestions,
+                "chart": reply.chart,
             }
         )
 
@@ -242,6 +256,7 @@ def _render_assistant(settings) -> None:
                 st.dataframe(
                     pl.DataFrame(message["table"]).to_pandas(), hide_index=True, width="stretch"
                 )
+            _render_chat_chart(message.get("chart"))
 
     last = st.session_state.chat[-1]
     if last["role"] == "assistant" and last.get("suggestions"):
@@ -819,9 +834,9 @@ def _team_strength_bars(d):
     return (bars + rule).properties(height=110)
 
 
-def _team_trajectory_chart(d):
+def _team_trajectory_chart(trajectory):
     records = []
-    for p in d.trajectory:
+    for p in trajectory:
         records.append({"matchday": p["matchday"], "value": p["points"], "series": "Points"})
         if "xpoints" in p:
             records.append({"matchday": p["matchday"], "value": p["xpoints"], "series": "Expected"})
@@ -904,7 +919,7 @@ def _render_team(d) -> None:
         st.altair_chart(_team_strength_bars(d), width="stretch")
 
     st.markdown("**Season trajectory** — points earned vs deserved (the gap is luck)")
-    st.altair_chart(_team_trajectory_chart(d), width="stretch")
+    st.altair_chart(_team_trajectory_chart(d.trajectory), width="stretch")
 
 
 def _render_shot_map(data) -> None:
@@ -1550,36 +1565,10 @@ _CATEGORY_COLOURS = {
 }
 
 
-def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> None:
-    pos = f" · {profile.position}" if profile.position else ""
-    st.subheader(f"{profile.player}", anchor=False)
-    st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
-
-    row = st.columns(5)
-    row[0].metric("Goals", profile.goals, f"xG {profile.xg:.1f}", border=True)
-    row[1].metric("Assists", profile.assists, f"xA {profile.xa:.1f}", border=True)
-    row[2].metric("Shots", profile.shots, f"{profile.per90(profile.shots):.1f}/90", border=True)
-    row[3].metric("Pass %", f"{profile.pass_pct:.0f}%", f"{profile.passes} att", border=True)
-    row[4].metric(
-        "Prog. actions", profile.progressive_passes + profile.progressive_carries, border=True
-    )
-
-    if not percentiles:
-        st.info("Not enough minutes for a percentile fingerprint at this threshold.")
-        return
-
-    pool_note = pool_label if pool_label and pool_label != "All competitions" else "all loaded"
-    st.markdown(f"**Percentile rank** — vs {pool_note} players (per 90)")
-    order = [mp.label for mp in percentiles]
-    frame = pl.DataFrame(
-        {
-            "metric": [mp.label for mp in percentiles],
-            "category": [mp.category for mp in percentiles],
-            "percentile": [mp.percentile for mp in percentiles],
-            "value": [mp.value for mp in percentiles],
-        }
-    ).to_pandas()
-
+def _percentile_bars_chart(rows: list[dict]):
+    """FBref-style percentile fingerprint from [{metric, category, percentile, value}, ...]."""
+    frame = pl.DataFrame(rows).to_pandas()
+    order = [r["metric"] for r in rows]
     domain = list(_CATEGORY_COLOURS)
     rng = [_CATEGORY_COLOURS[c] for c in domain]
     bars = (
@@ -1607,9 +1596,39 @@ def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> Non
         .mark_rule(color="#9aa0a6", strokeDash=[3, 3])
         .encode(x="v:Q")
     )
-    st.altair_chart(
-        (bars + labels + midline).properties(height=22 * len(percentiles) + 10), width="stretch"
+    return (bars + labels + midline).properties(height=22 * len(rows) + 10)
+
+
+def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> None:
+    pos = f" · {profile.position}" if profile.position else ""
+    st.subheader(f"{profile.player}", anchor=False)
+    st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
+
+    row = st.columns(5)
+    row[0].metric("Goals", profile.goals, f"xG {profile.xg:.1f}", border=True)
+    row[1].metric("Assists", profile.assists, f"xA {profile.xa:.1f}", border=True)
+    row[2].metric("Shots", profile.shots, f"{profile.per90(profile.shots):.1f}/90", border=True)
+    row[3].metric("Pass %", f"{profile.pass_pct:.0f}%", f"{profile.passes} att", border=True)
+    row[4].metric(
+        "Prog. actions", profile.progressive_passes + profile.progressive_carries, border=True
     )
+
+    if not percentiles:
+        st.info("Not enough minutes for a percentile fingerprint at this threshold.")
+        return
+
+    pool_note = pool_label if pool_label and pool_label != "All competitions" else "all loaded"
+    st.markdown(f"**Percentile rank** — vs {pool_note} players (per 90)")
+    rows = [
+        {
+            "metric": mp.label,
+            "category": mp.category,
+            "percentile": mp.percentile,
+            "value": mp.value,
+        }
+        for mp in percentiles
+    ]
+    st.altair_chart(_percentile_bars_chart(rows), width="stretch")
     st.caption(
         "Bar = percentile within the pool; number = the player's per-90 value. Dashed line "
         "is the median (50th). " + ATTRIBUTION_STATSBOMB

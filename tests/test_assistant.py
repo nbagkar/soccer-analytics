@@ -137,6 +137,12 @@ class TestRouting:
         assert "Argentina" in reply.text and "France" in reply.text
         assert "xG" in reply.text  # the xG race line
         assert reply.table and "Player" in reply.table[0]
+        assert reply.chart and reply.chart["kind"] == "xg_race" and reply.chart["data"]
+
+    def test_team_dossier_has_trajectory_chart(self, tmp_path) -> None:
+        reply = answer("tell me about Arsenal", _seed(tmp_path))
+        assert "Arsenal" in reply.text
+        assert reply.chart and reply.chart["kind"] == "trajectory" and reply.chart["data"]
 
     def test_match_centre_ignores_alias_collision(self, tmp_path) -> None:
         # A shot ask with a single team named must not invent a match; fall through cleanly.
@@ -151,6 +157,7 @@ class TestRouting:
         assert "Messi" in reply.text
         assert "pct" in reply.text.lower()
         assert reply.table is not None
+        assert reply.chart and reply.chart["kind"] == "percentiles" and reply.chart["data"]
 
     def test_team_fixtures_query_not_stolen_by_dossier(self, tmp_path) -> None:
         # "<club> fixtures" must reach the fixtures intent (honest note without a live DB),

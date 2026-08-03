@@ -28,6 +28,10 @@ class Reply:
     """Markdown answer."""
     table: list[dict] | None = None
     suggestions: list[str] = field(default_factory=list)
+    chart: dict | None = None
+    """Optional chart spec: {"kind": "xg_race"|"trajectory"|"percentiles", "data": [...]}.
+    Kept as plain data (no Streamlit/Altair here) so the chat page can render it and it
+    survives session-state round-trips."""
 
 
 # Plain-language league names/nicknames -> football-data.co.uk division codes (results
@@ -685,6 +689,7 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         "\n".join(lines),
         table=rows,
         suggestions=[f"Is {d.team} overperforming their xG?", f"How is {d.team}'s form?"],
+        chart={"kind": "trajectory", "data": d.trajectory} if d.trajectory else None,
     )
 
 
@@ -1108,6 +1113,7 @@ def _intent_match_centre(q: str, analytics_db: Path, live_db: Path | None) -> Re
         f"**{data.label}**\n\n- xG race: {xg_line}\n- Biggest chances below.",
         table=rows,
         suggestions=[f"Tell me about {home}", f"How is {away}'s form?"],
+        chart={"kind": "xg_race", "data": data.timeline},
     )
 
 
@@ -1141,6 +1147,18 @@ def _intent_scout(q: str, analytics_db: Path, live_db: Path | None) -> Reply | N
         "shape rather than a single-league rank.",
         table=rows,
         suggestions=["Top scorers", "Who is the best playmaker?"],
+        chart={
+            "kind": "percentiles",
+            "data": [
+                {
+                    "metric": m.label,
+                    "category": m.category,
+                    "percentile": m.percentile,
+                    "value": m.value,
+                }
+                for m in pcts
+            ],
+        },
     )
 
 
