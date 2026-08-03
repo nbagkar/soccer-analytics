@@ -59,6 +59,34 @@ class TestRouting:
         assert reply.table is not None
         assert "goals" in reply.text.lower()
 
+    def test_best_player_by_involvement(self, tmp_path) -> None:
+        # "best player" (no "scorer"/"goals") must still reach the leaderboard, ranked by
+        # goal involvement rather than falling through to the honest fallback.
+        reply = answer("who's the best player", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "Messi" in reply.text
+        assert reply.table is not None
+
+    def test_best_playmaker_ranks_by_assists(self, tmp_path) -> None:
+        reply = answer("who's the best playmaker", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "assist" in reply.text.lower()
+
+    def test_match_forecasts_prompts_for_teams(self, tmp_path) -> None:
+        # Bare "match forecasts" names no teams -> guide the user instead of falling back.
+        reply = answer("match forecasts", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "two teams" in reply.text.lower()
+        assert reply.suggestions
+
+    def test_title_odds_for_a_named_team(self, tmp_path) -> None:
+        # "chances of winning" phrasing + a named club -> that club's own projection.
+        reply = answer("What are Arsenal's chances of winning the new season", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "Arsenal" in reply.text
+        assert "title" in reply.text.lower()
+        assert "%" in reply.text
+
     def test_fallback_is_honest(self, tmp_path) -> None:
         reply = answer("what is the weather tomorrow", _seed(tmp_path))
         assert "not sure" in reply.text.lower()

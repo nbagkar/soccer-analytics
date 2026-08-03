@@ -292,7 +292,9 @@ def _intent_help(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
 
 
 def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
-    triggers = re.search(r"\b(vs|versus|beat|predict|forecast|wins?|winner|odds|score)\b", q)
+    triggers = re.search(
+        r"\b(vs|versus|beat|predict|forecasts?|prediction|wins?|winner|odds|score)\b", q
+    )
     if not triggers and " v " not in f" {q} ":
         return None
     with AnalyticsDB(analytics_db) as adb:
@@ -306,6 +308,14 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         by_div.setdefault(division, []).append((display, season))
     pair = next(((d, t) for d, t in by_div.items() if len(t) >= 2), None)
     if pair is None:
+        # A clear match-forecast ask ("match forecasts", "predict Arsenal") but not two
+        # teams -> guide, rather than falling through to a blank "I'm not sure".
+        if re.search(r"\b(predict|forecasts?|prediction)\b", q) or " vs " in f" {q} ":
+            return Reply(
+                "To forecast a match, name two teams — e.g. **Arsenal vs Chelsea**. "
+                "For upcoming real fixtures, ask for **fixtures**.",
+                suggestions=["Arsenal vs Chelsea, who wins?", "Show upcoming fixtures"],
+            )
         return None
 
     from soccer.dashboard.data import forecast_slate
@@ -335,9 +345,18 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
 
 def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(top scorer|scorers?|most goals|golden boot|leading scorer|best striker)\b", q
+        r"top scorer|scorers?|most goals|golden boot|leading scorer|goalscorer"
+        r"|best (striker|forward|player|playmaker|passer|creator|midfielder)"
+        r"|most assists|player of the (season|year)|goal contributions|most creative",
+        q,
     ):
         return None
+    if re.search(r"playmaker|assist|passer|creator|creative|key pass", q):
+        order = "assists"
+    elif re.search(r"best player|player of the|contribution|goals and assists", q):
+        order = "contributions"
+    else:
+        order = "goals"
     with AnalyticsDB(analytics_db) as adb:
         if adb.player_stats_count() == 0:
             return Reply(
@@ -346,7 +365,7 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
             )
         competition = _resolve_statsbomb_competition(q, adb)
         profiles = adb.player_profiles(
-            limit=8, min_minutes=270, order="goals", competition=competition
+            limit=8, min_minutes=270, order=order, competition=competition
         )
     if not profiles:
         return None
@@ -356,15 +375,29 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
             "Player": p.player,
             "Team": p.team,
             "Goals": p.goals,
-            "xG": round(p.xg, 1),
             "Assists": p.assists,
+            "xG": round(p.xg, 1),
         }
         for p in profiles
     ]
     lead = profiles[0]
+    if order == "assists":
+        headline = (
+            f"**Top playmakers{scope}** — {lead.player} leads with "
+            f"**{lead.assists} assists** (xA {lead.xa:.1f})."
+        )
+    elif order == "contributions":
+        headline = (
+            f"**Best players{scope}** by goal involvement — {lead.player} leads with "
+            f"**{lead.goal_contributions}** ({lead.goals}G, {lead.assists}A)."
+        )
+    else:
+        headline = (
+            f"**Top scorers{scope}** — {lead.player} leads with "
+            f"**{lead.goals} goals** (xG {lead.xg:.1f})."
+        )
     return Reply(
-        f"**Top scorers{scope}** (across all loaded seasons) — {lead.player} leads with "
-        f"**{lead.goals} goals** (xG {lead.xg:.1f}).",
+        headline + " Across all loaded seasons.",
         table=rows,
         suggestions=[f"Tell me about {lead.player}", "Who is the best playmaker?"],
     )
@@ -413,14 +446,23 @@ def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | 
 
 def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(win the league|who will win|who wins|title|champions?|relegat|top four|top 4"
-        r"|finish|odds to win)\b",
+        r"win the (league|title|season)|winning the (league|title|season)"
+        r"|chances? (of|to) win|chance to win|odds (of|to) win|likely to win"
+        r"|who will win|who wins|\btitle\b|champions?|relegat|top four|top 4"
+        r"|finish|title race|win it\b",
         q,
     ):
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
-        division, season = _league_and_season(q, adb, loaded)
+        if not loaded:
+            return None
+        index = _team_index(adb, loaded)
+        named = _resolve_teams(q, index)
+        if named:  # a club is named -> use its own league
+            _display, division, season = named[0]
+        else:
+            division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
 
@@ -429,8 +471,24 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     briefing = season_briefing(analytics_db, season, division, n_sims=4000)
     if briefing is None:
         return None
-    projs = sorted(briefing.projections, key=lambda p: -p.title_pct)[:6]
     names = briefing.names
+
+    if named:
+        target = _norm(named[0][0])
+        proj = next(
+            (p for p in briefing.projections if _norm(names.get(p.team, p.team)) == target), None
+        )
+        if proj is not None:
+            name = names.get(proj.team, proj.team)
+            return Reply(
+                f"**{name}** — {division_name(division)} "
+                f"{season_label(season)}: **{proj.title_pct:.0%}** to win the title, "
+                f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation. "
+                "A Monte-Carlo sim off recent strengths, blind to transfers.",
+                suggestions=["Who are the favourites?", f"How is {name}'s form?"],
+            )
+
+    projs = sorted(briefing.projections, key=lambda p: -p.title_pct)[:6]
     rows = [
         {
             "Team": names.get(p.team, p.team),
