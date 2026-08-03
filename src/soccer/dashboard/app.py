@@ -44,6 +44,7 @@ from soccer.dashboard.data import (
     season_records,
     shot_map,
     shot_matches,
+    team_dossier,
     team_form,
     underlying_table,
 )
@@ -420,6 +421,13 @@ def _cached_forecast_report(db_path: str, division: str, n_seasons: int):
     return forecast_report(Path(db_path), division, n_seasons=n_seasons)
 
 
+@st.cache_data(show_spinner="Building the team dossier…")
+def _cached_team_dossier(db_path: str, division: str, season: str, team: str):
+    from pathlib import Path
+
+    return team_dossier(Path(db_path), division, season, team)
+
+
 @st.cache_data(show_spinner="Simulating the season…")
 def _cached_season_briefing(db_path: str, season: str, division: str):
     from pathlib import Path
@@ -743,6 +751,111 @@ def _render_underlying(rows) -> None:
         )
     st.markdown(_html_table(body), unsafe_allow_html=True)
     st.altair_chart(_xpoints_scatter(rows), width="stretch")
+
+
+def _team_strength_bars(d):
+    frame = pl.DataFrame(
+        {"metric": ["Attack", "Defence"], "value": [d.attack, d.solidity]}
+    ).to_pandas()
+    bars = alt.Chart(frame).mark_bar().encode(
+        x=alt.X("value:Q", title=None, scale=alt.Scale(domainMin=0)),
+        y=alt.Y("metric:N", sort=None, title=None),
+        color=alt.condition("datum.value >= 1", alt.value("#16c784"), alt.value("#ea3943")),
+    )
+    rule = (
+        alt.Chart(pl.DataFrame({"x": [1.0]}).to_pandas())
+        .mark_rule(color="#8b95a1", strokeDash=[4, 4])
+        .encode(x="x:Q")
+    )
+    return (bars + rule).properties(height=110)
+
+
+def _team_trajectory_chart(d):
+    records = []
+    for p in d.trajectory:
+        records.append({"matchday": p["matchday"], "value": p["points"], "series": "Points"})
+        if "xpoints" in p:
+            records.append({"matchday": p["matchday"], "value": p["xpoints"], "series": "Expected"})
+    frame = pl.DataFrame(records).to_pandas()
+    return (
+        alt.Chart(frame)
+        .mark_line()
+        .encode(
+            x=alt.X("matchday:Q", title="matchday"),
+            y=alt.Y("value:Q", title="cumulative points"),
+            color=alt.Color(
+                "series:N",
+                scale=alt.Scale(domain=["Points", "Expected"], range=["#16c784", "#8b95a1"]),
+                legend=alt.Legend(title=None, orient="top-left"),
+            ),
+            strokeDash=alt.condition(
+                "datum.series == 'Expected'", alt.value([4, 4]), alt.value([1, 0])
+            ),
+        )
+        .properties(height=260)
+    )
+
+
+def _render_team(d) -> None:
+    st.subheader(d.team, anchor=False)
+    st.caption(f"{division_name(d.division)} {season_label(d.season)} · {d.played} played")
+    c = st.columns(5)
+    c[0].metric("Position", f"#{d.position}", border=True)
+    c[1].metric("Points", d.points, border=True)
+    c[2].metric(
+        "Goal diff", f"{d.goal_difference:+d}", f"{d.goals_for}-{d.goals_against}", border=True
+    )
+    c[3].metric("Points/game", f"{d.season_ppg:.2f}", f"{d.trend:+.2f} recent", border=True)
+    if d.xpoints is not None:
+        c[4].metric(
+            "Expected pts",
+            f"{d.xpoints:.0f}",
+            f"{d.points - d.xpoints:+.1f} vs actual",
+            border=True,
+        )
+    else:
+        c[4].metric("Recent form", d.recent_form or "—", border=True)
+
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown(f"**Recent form** &nbsp; {_form_html(d.recent_form)}", unsafe_allow_html=True)
+        if d.xpoints is not None:
+            diff = d.points - d.xpoints
+            verdict = (
+                "overperforming their chances (running hot)"
+                if diff > 1.5
+                else "underperforming — creating more than the table shows (unlucky)"
+                if diff < -1.5
+                else "roughly in line with their underlying numbers"
+            )
+            colour = "#f0a020" if diff > 1.5 else "#3b82f6" if diff < -1.5 else "#8b95a1"
+            st.markdown(
+                f"<div style='margin:6px 0'>Underlying: <b>{d.points}</b> pts vs "
+                f"<b style='color:{colour}'>{d.xpoints:.1f} expected</b> ({diff:+.1f}) "
+                f"— {verdict}. <span style='color:{_MUTE}'>"
+                f"xG for {d.xgf:.1f}, against {d.xga:.1f}.</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            f"Active streaks — unbeaten {d.unbeaten} · winning {d.winning} · scoring {d.scoring}"
+        )
+        st.markdown("**Recent results**")
+        rows = [
+            {
+                "": r["venue"],
+                "Opponent": _esc(r["opponent"]),
+                "Score": r["score"],
+                "Result": _form_html(r["result"]),
+            }
+            for r in d.recent
+        ]
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
+    with right:
+        st.markdown("**Strength vs league** (1.0 = average)")
+        st.altair_chart(_team_strength_bars(d), width="stretch")
+
+    st.markdown("**Season trajectory** — points earned vs deserved (the gap is luck)")
+    st.altair_chart(_team_trajectory_chart(d), width="stretch")
 
 
 def _render_shot_map(data) -> None:
@@ -1534,6 +1647,7 @@ _NAV = [
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
+    ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
     ("Analysis", "Analysis", ":material/analytics:", "Match xG and player scouting"),
     ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
@@ -1830,6 +1944,27 @@ def main() -> None:
                 st.info("No shot data for this season, so no underlying-performance view.")
             else:
                 _render_underlying(under)
+        return
+
+    if page == "Team":
+        available = analytics_available(settings.analytics_db)
+        if not available:
+            st.info(
+                "No league data yet. Go to **About & sources** → **Add a league**.",
+                icon=":material/download:",
+            )
+            return
+        season, division, extra = _league_season_pickers(available, extra=1)
+        teams = forecast_teams(settings.analytics_db, season, division)
+        if not teams:
+            st.info("No teams for that selection.")
+            return
+        team = extra[0].selectbox("Team", teams)
+        dossier = _cached_team_dossier(str(settings.analytics_db), division, season, team)
+        if dossier is None:
+            st.info("No data for that team in the chosen season.")
+        else:
+            _render_team(dossier)
         return
 
     if page == "Records":

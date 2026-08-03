@@ -653,6 +653,130 @@ def underlying_table(
     return sorted(result, key=lambda r: (r.points, r.goals_for - r.goals_against), reverse=True)
 
 
+@dataclass(frozen=True)
+class TeamDossier:
+    team: str
+    division: str
+    season: str
+    position: int
+    played: int
+    points: int
+    won: int
+    drawn: int
+    lost: int
+    goals_for: int
+    goals_against: int
+    goal_difference: int
+    xpoints: float | None
+    xgf: float | None
+    xga: float | None
+    recent_form: str
+    recent_ppg: float
+    season_ppg: float
+    trend: float
+    attack: float  # scoring rate vs league average
+    solidity: float  # 1 / concede-rate vs league average
+    unbeaten: int
+    winning: int
+    scoring: int
+    recent: list[dict]  # last matches, most recent first
+    trajectory: list[dict]  # per-matchday cumulative points (+ expected points where shots exist)
+
+
+def team_dossier(
+    analytics_db: Path, division: str, season: str, team: str
+) -> TeamDossier | None:
+    """One club's full picture for a (division, season): standing, form, underlying, trajectory.
+
+    Consolidates the table, form, streaks, model strengths, expected points and the team's
+    own results into a single team-centric view -- everything the other pages hold, gathered
+    for one side. None if the team is not in that slice.
+    """
+    from soccer.domain.names import normalize_name
+    from soccer.models.poisson import DEFAULT_RHO, score_grid
+
+    norm = normalize_name(team)
+    with AnalyticsDB(analytics_db) as adb:
+        table = adb.league_table(season, division)
+        row = next((r for r in table if normalize_name(r.team) == norm), None)
+        if row is None:
+            return None
+        forms = adb.team_form(season, division, last_n=5)
+        form = next((f for f in forms if f.team == row.team), None)
+        streak = next((s for s in adb.team_streaks(season, division) if s.team == row.team), None)
+        outcomes = adb.outcomes_for(season, division)
+        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+
+    strength = model.strengths.get(norm)
+    attack = strength.attack if strength else 1.0
+    solidity = 1.0 / max(strength.defence, 0.05) if strength else 1.0
+
+    under = underlying_table(analytics_db, season, division)
+    urow = next((u for u in under if normalize_name(u.team) == norm), None) if under else None
+
+    with_shots = [
+        o for o in outcomes if o.home_shots_target is not None and o.away_shots_target is not None
+    ]
+    tot_sot = sum(o.home_shots_target + o.away_shots_target for o in with_shots)
+    conv = (sum(o.fthg + o.ftag for o in with_shots) / tot_sot) if tot_sot else None
+
+    matches = sorted(
+        (o for o in outcomes if norm in (o.home_norm, o.away_norm)), key=lambda o: o.match_date
+    )
+    recent, trajectory, cum_pts, cum_xp = [], [], 0, 0.0
+    for i, o in enumerate(matches, 1):
+        at_home = o.home_norm == norm
+        gf, ga = (o.fthg, o.ftag) if at_home else (o.ftag, o.fthg)
+        result = "W" if gf > ga else "D" if gf == ga else "L"
+        cum_pts += 3 if result == "W" else 1 if result == "D" else 0
+        point = {"matchday": i, "points": cum_pts}
+        if conv and o.home_shots_target is not None and o.away_shots_target is not None:
+            team_sot = o.home_shots_target if at_home else o.away_shots_target
+            opp_sot = o.away_shots_target if at_home else o.home_shots_target
+            grid = score_grid(team_sot * conv, opp_sot * conv, DEFAULT_RHO)
+            p_win = sum(p for (x, y), p in grid.items() if x > y)
+            p_draw = sum(p for (x, y), p in grid.items() if x == y)
+            cum_xp += 3 * p_win + p_draw
+            point["xpoints"] = round(cum_xp, 2)
+        trajectory.append(point)
+        recent.append(
+            {
+                "opponent": (o.away if at_home else o.home),
+                "venue": "H" if at_home else "A",
+                "score": f"{gf}-{ga}",
+                "result": result,
+            }
+        )
+    return TeamDossier(
+        team=row.team,
+        division=division,
+        season=season,
+        position=row.position,
+        played=row.played,
+        points=row.points,
+        won=row.won,
+        drawn=row.drawn,
+        lost=row.lost,
+        goals_for=row.goals_for,
+        goals_against=row.goals_against,
+        goal_difference=row.goal_difference,
+        xpoints=urow.xpoints if urow else None,
+        xgf=urow.xgf if urow else None,
+        xga=urow.xga if urow else None,
+        recent_form=form.recent_form if form else "",
+        recent_ppg=form.recent_ppg if form else 0.0,
+        season_ppg=form.ppg if form else 0.0,
+        trend=form.trend if form else 0.0,
+        attack=attack,
+        solidity=solidity,
+        unbeaten=streak.unbeaten if streak else 0,
+        winning=streak.winning if streak else 0,
+        scoring=streak.scoring if streak else 0,
+        recent=recent[-6:][::-1],
+        trajectory=trajectory,
+    )
+
+
 def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
     """Closing-line-value backtest for a slice, or None if no odds are loaded.
 

@@ -676,6 +676,23 @@ class TestUnderlyingTable:
         assert teams["A"].xpoints > teams["B"].xpoints
 
 
+class TestTeamDossier:
+    def test_gathers_a_team(self, tmp_path) -> None:
+        from soccer.dashboard.data import team_dossier
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        d = team_dossier(path, "E0", "2526", "Arsenal")
+        assert d is not None
+        assert d.team == "Arsenal" and d.position == 1  # strongest seeded team leads
+        assert d.played > 0 and d.points > 0
+        assert d.recent  # its recent results
+        # cumulative trajectory ends at the season points total
+        assert d.trajectory and d.trajectory[-1]["points"] == d.points
+        assert d.xpoints is None  # seed carries no shots, so no expected points
+        assert team_dossier(path, "E0", "2526", "Nobody") is None
+
+
 class TestFixtureForecasts:
     def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:
         add_match(
@@ -890,6 +907,10 @@ class TestAppSmoke:
             assert any(">Form</th>" in (m.value or "") for m in at.markdown), (
                 "League table is missing its Form column"
             )
+
+            # Teams hub: pick a club and render its dossier (standing, form, trajectory).
+            at.radio[0].set_value("Teams").run()
+            assert not at.exception, f"Teams raised: {at.exception}"
 
             # Assistant answers a real question now that data is present.
             at.radio[0].set_value("Ask a question").run()
