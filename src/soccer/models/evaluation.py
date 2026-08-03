@@ -118,6 +118,7 @@ def evaluate_forecasts(
     *,
     model: str = "poisson",
     alpha: float = 0.5,
+    shrinkage: float = 0.0,
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
@@ -126,14 +127,15 @@ def evaluate_forecasts(
 
     Each match (after warmup, both teams seen, odds present) is predicted from a model fit
     on only the matches already played, then compared to the vig-free closing line.
-    ``model="shots"`` fits on a shots-on-target expected-goals blend (weight ``alpha``).
+    ``model="shots"`` fits on a shots-on-target expected-goals blend (weight ``alpha``,
+    with ``shrinkage`` pseudo-matches pulling thin samples toward league average).
     """
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.poisson import fit_poisson, fit_poisson_shots
 
     def fit(played: list):
         if model == "shots":
-            return fit_poisson_shots(played, alpha=alpha)
+            return fit_poisson_shots(played, alpha=alpha, shrinkage=shrinkage)
         if model == "dixon_coles":
             return fit_dixon_coles(played)
         return fit_poisson(played)

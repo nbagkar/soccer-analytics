@@ -185,7 +185,7 @@ def fit_poisson(outcomes: list[Outcome], *, rho: float = DEFAULT_RHO) -> Poisson
 
 
 def fit_poisson_shots(
-    outcomes: list[Outcome], *, alpha: float = 0.5, rho: float = DEFAULT_RHO
+    outcomes: list[Outcome], *, alpha: float = 0.5, rho: float = DEFAULT_RHO, shrinkage: float = 0.0
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 
@@ -196,6 +196,11 @@ def fit_poisson_shots(
     (strengths stay on the real goal scale) while shifting credit toward chance quality.
     ``alpha=1`` recovers the goals-only model; ``alpha=0`` is pure SoT expected goals. A
     match missing shot data falls back to its actual scoreline.
+
+    ``shrinkage`` (a pseudo-match count) pulls each team's strength toward the league
+    average of 1.0, so a side with only a handful of games -- a newly promoted team early
+    in the season -- is regularised toward average instead of taking an extreme value from
+    one lucky result. It fades as real games accumulate.
 
     The home/away league averages stay on actual goals, so forecasts remain goal-scaled.
     """
@@ -231,10 +236,16 @@ def fit_poisson_shots(
 
     matches = len(outcomes)
     overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
+
+    def _strength(total: float, n: int) -> float:
+        # per-game rate relative to the league, shrunk toward 1.0 by `shrinkage` pseudo-games
+        rate = (total / n) / overall
+        return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
+
     strengths = {
         team: TeamStrength(
-            attack=(scored[team] / games[team]) / overall,
-            defence=(conceded[team] / games[team]) / overall,
+            attack=_strength(scored[team], games[team]),
+            defence=_strength(conceded[team], games[team]),
         )
         for team in games
     }

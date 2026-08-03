@@ -124,6 +124,15 @@ class TestPoissonShots:
         shots_attack = fit_poisson_shots(rows, alpha=0.0).strengths["a"].attack
         assert shots_attack > goals_attack
 
+    def test_shrinkage_regularises_a_thin_sample(self) -> None:
+        # A newcomer with a single lopsided win would take an extreme strength; shrinkage
+        # pulls it back toward the league average of 1.0.
+        rows = [*_shot_rows(), ShotRow("x", "a", 5, 0, date(2026, 2, 1), 10, 2)]
+        raw = fit_poisson_shots(rows, alpha=1.0, shrinkage=0.0).strengths["x"].attack
+        shrunk = fit_poisson_shots(rows, alpha=1.0, shrinkage=5.0).strengths["x"].attack
+        assert raw > shrunk > 1.0  # still above average (it won big) but far less extreme
+        assert abs(shrunk - 1.0) < abs(raw - 1.0)
+
     def test_rho_only_perturbs_low_scores(self) -> None:
         # With rho=0 the model is plain independent Poisson; outcomes still valid.
         rows = season("strong", "weak")

@@ -218,7 +218,7 @@ def analytics_snapshot(
     power = power_ranking(outcomes)
     fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
     projections = simulate_season(
-        fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA),
+        fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE),
         fixtures,
         teams=list(names),
         n_sims=sims,
@@ -412,6 +412,11 @@ FORECAST_HALF_LIFE_DAYS = 0  # 0 = no time-decay (measured best); >0 halves weig
 # Backtest across the top leagues put the model's log-loss gap to the closing line at roughly
 # half the goals-only model's (best around 0.25); matches without shot data fall back to goals.
 FORECAST_ALPHA = 0.25
+# Pseudo-match shrinkage toward league average, so a side with only a few games (a newly
+# promoted team early in the season) is regularised rather than taking an extreme value from
+# one result. Measured: k=3 slightly improves overall log loss AND rescues promoted teams'
+# early games (E0 that slice 1.33 -> 0.90, near the market's 0.86).
+FORECAST_SHRINKAGE = 3.0
 
 
 def _decay(half_life_days: float) -> float:
@@ -454,7 +459,7 @@ def forecast_slate(
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
     else:
-        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA)
+        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -501,7 +506,9 @@ def forecast_report(analytics_db: Path, division: str, *, n_seasons: int = 6, mo
         rows = [r for s in seasons for r in adb.outcomes_with_odds(s, division)]
     if not rows:
         return None
-    return evaluate_forecasts(rows, model=model, alpha=FORECAST_ALPHA, min_history=60)
+    return evaluate_forecasts(
+        rows, model=model, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE, min_history=60
+    )
 
 
 def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
@@ -754,7 +761,9 @@ def fixture_forecasts(
                 if outcomes:
                     # Recency window (last few seasons), fit on the shots-on-target blend --
                     # measured to roughly halve the goals-only model's gap to the market.
-                    model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA)
+                    model = fit_poisson_shots(
+                        outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE
+                    )
             models[division] = model
         return models[division]
 
