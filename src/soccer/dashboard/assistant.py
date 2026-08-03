@@ -1,10 +1,11 @@
 """A built-in, offline football assistant -- rule-based, no LLM, no network.
 
-Maps a plain-language question to one of a fixed set of intents (standings for any loaded
-league or past season, top scorers, a player's stats, a match forecast, head-to-head
-records, current form, over/under-performance vs xG, records, title odds, fixtures) and
-answers it from the local store. Deterministic and private: nothing leaves the machine, and
-it says plainly what it can and cannot answer rather than guessing.
+Maps a plain-language question to one of a fixed set of intents (match forecasts with
+predicted scorelines, team dossiers, standings for any loaded league or past season, top
+scorers, a player's stats and player comparisons, head-to-head records, current form,
+over/under-performance vs xG, in-season and all-time records, title odds, model accuracy,
+fixtures) and answers it from the local store. Deterministic and private: nothing leaves the
+machine, and it says plainly what it can and cannot answer rather than guessing.
 
 Kept free of Streamlit so the intent logic is unit-testable; the chat page is a thin
 render over `answer()`.
@@ -314,14 +315,14 @@ def _resolve_players(
 # --- intents -----------------------------------------------------------------
 
 _EXAMPLES = [
+    "What's the predicted score for Arsenal vs Chelsea?",
+    "Tell me about Liverpool",
     "Who's top of the Premier League?",
-    "Arsenal vs Chelsea — who wins?",
-    "Who's overperforming their xG?",
-    "Arsenal vs Tottenham head to head",
-    "Who won the Premier League in 2004?",
+    "Who has won the most titles?",
+    "Compare Messi and Ronaldo",
+    "How accurate is your model?",
     "Top scorers in La Liga",
     "How is Man City's form?",
-    "Show upcoming fixtures",
 ]
 
 
@@ -1003,8 +1004,9 @@ def _ordinal(n: int) -> str:
 
 def _fallback(q: str, analytics_db: Path) -> Reply:
     return Reply(
-        "I'm not sure how to answer that yet. I can help with league tables (any loaded "
-        "league or past season), top scorers, a player's stats, match forecasts, head-to-head "
-        "records, current form, over/under-performance (xG), records, title odds and fixtures.",
+        "I'm not sure how to answer that yet. I can help with match forecasts and predicted "
+        "scores, team reports, league tables (any loaded league or past season), top scorers "
+        "and player comparisons, head-to-head records, current form, over/under-performance "
+        "(xG), in-season and all-time records, title odds, model accuracy and fixtures.",
         suggestions=_EXAMPLES[:4],
     )
