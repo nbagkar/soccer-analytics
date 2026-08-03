@@ -115,10 +115,12 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
     for handler in (
         _intent_help,
         _intent_compare,
+        _intent_league_compare,
         _intent_h2h,
         _intent_match_centre,
         _intent_forecast,
         _intent_model,
+        _intent_value,
         _intent_honours,
         _intent_scout,
         _intent_top_scorers,
@@ -1142,6 +1144,123 @@ def _intent_scout(q: str, analytics_db: Path, live_db: Path | None) -> Reply | N
     )
 
 
+def _intent_value(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"value bets?|betting|make money|profitable|\broi\b|\byield\b|closing line"
+        r"|\bclv\b|worth (a )?bet|bet on|against the odds|expected value|\bev\b"
+        r"|beat the bookie|bookmaker|value on|any value",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+
+    from soccer.dashboard.data import market_edge
+
+    report = market_edge(analytics_db, season, division)
+    if report is None:
+        return Reply(
+            "I can only backtest betting value where bookmaker odds are loaded, and I don't "
+            f"have any for {division_name(division)} {season_label(season)} yet."
+        )
+    if report.beats_market and report.yield_pct > 0:
+        read = (
+            "a flattering result on this one slice, but it does not hold up across leagues and "
+            "seasons once the margin is paid"
+        )
+    else:
+        read = "the model neither beats the closing line nor turns a profit"
+    return Reply(
+        f"**Betting backtest — {division_name(division)} {season_label(season)}** "
+        f"({report.n_matches} matches with odds)\n\n"
+        f"- Flat-staking the model's value picks: **{report.n_bets} bets**, "
+        f"yield **{report.yield_pct:+.1f}%** (profit {report.profit:+.1f} on "
+        f"{report.staked:.0f} staked)\n"
+        f"- Model log-loss {report.model_log_loss:.3f} vs vig-free market "
+        f"{report.market_log_loss:.3f}\n\n"
+        f"Honest read: {read}. A near-zero or negative yield after the bookmaker's margin is "
+        "the expected outcome on free public data — there's no exploitable edge.",
+        suggestions=["How accurate is your model?", "Arsenal vs Chelsea, who wins?"],
+    )
+
+
+def _intent_league_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+    if not loaded:
+        return None
+    named: list[str] = []
+    for alias in sorted(_LEAGUE_ALIASES, key=len, reverse=True):
+        d = _LEAGUE_ALIASES[alias]
+        if alias in q and d in loaded and d not in named:
+            named.append(d)
+    which = re.search(r"\b(which|what) (league|division|country)\b", q)
+    metric_kw = re.search(
+        r"goals|scoring|attacking|entertaining|draws?|home advantage|competitiv|defensive|tight",
+        q,
+    )
+    if len(named) < 2 and not (which and metric_kw):
+        return None
+
+    from soccer.dashboard.data import league_profile
+
+    divs = named[:4] if len(named) >= 2 else list(loaded)
+    profiles = [p for p in (league_profile(analytics_db, loaded[d], d) for d in divs) if p]
+    if len(profiles) < 2:
+        return None
+
+    if re.search(r"draw|competitiv|unpredictable|\beven\b|tight", q):
+        metric, label = "draws", "draw rate"
+    elif re.search(r"home advantage|\bhome\b", q):
+        metric, label = "home", "home advantage"
+    elif re.search(r"defensive|low[- ]?scoring|fewe(r|st) goals", q):
+        metric, label = "fewest", "fewest goals"
+    else:
+        metric, label = "goals", "goals per game"
+
+    def metric_value(p) -> float:
+        if metric == "draws":
+            return p.draw_pct
+        if metric == "home":
+            return p.home_win_pct - p.away_win_pct
+        if metric == "fewest":
+            return -p.goals_per_game
+        return p.goals_per_game
+
+    profiles.sort(key=metric_value, reverse=True)
+    rows = [
+        {
+            "League": division_name(p.division),
+            "Season": season_label(p.season),
+            "Goals/g": round(p.goals_per_game, 2),
+            "Home %": round(p.home_win_pct),
+            "Draw %": round(p.draw_pct),
+            "Away %": round(p.away_win_pct),
+            "O2.5 %": round(p.over25_pct),
+            "BTTS %": round(p.btts_pct),
+        }
+        for p in profiles
+    ]
+    top = profiles[0]
+    if metric == "home":
+        detail = f"a {top.home_win_pct - top.away_win_pct:.0f}-point home-win edge"
+    elif metric == "draws":
+        detail = f"{top.draw_pct:.0f}% draws"
+    else:
+        detail = f"{top.goals_per_game:.2f} goals per game"
+    return Reply(
+        f"**League styles compared** — highest {label}: **{division_name(top.division)}** "
+        f"({detail}).",
+        table=rows,
+        suggestions=["Top scorers in La Liga", "Who will win the league?"],
+    )
+
+
 def _ordinal(n: int) -> str:
     suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
@@ -1151,7 +1270,8 @@ def _fallback(q: str, analytics_db: Path) -> Reply:
     return Reply(
         "I'm not sure how to answer that yet. I can help with match forecasts and predicted "
         "scores, team reports, league tables (any loaded league or past season), top scorers "
-        "and player comparisons, head-to-head records, current form, over/under-performance "
-        "(xG), in-season and all-time records, title odds, model accuracy and fixtures.",
+        "and player comparisons, scouting profiles, head-to-head records, form, "
+        "over/under-performance (xG), all-time records and titles, league style comparisons, "
+        "model accuracy and betting backtests, and fixtures.",
         suggestions=_EXAMPLES[:4],
     )

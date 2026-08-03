@@ -159,6 +159,31 @@ class TestRouting:
         assert "fixtures" in reply.text.lower()
         assert "1st" not in reply.text  # not the standings/dossier line
 
+    def test_value_backtest_routes_and_is_honest(self, tmp_path) -> None:
+        # A betting-value ask reaches the backtest intent (never the fallback) and answers
+        # honestly -- either the yield or the "no odds loaded" note, both mentioning odds.
+        reply = answer("are there any value bets in the premier league", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "odds" in reply.text.lower() or "yield" in reply.text.lower()
+
+    def test_league_compare_two_leagues(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        seed_results(path, division="SP1", teams=["Barca", "Madrid", "Sevilla", "Valencia"])
+        reply = answer("compare the premier league and la liga", path)
+        assert "not sure" not in reply.text.lower()
+        assert reply.table and len(reply.table) >= 2
+        assert "Goals/g" in reply.table[0]
+
+    def test_which_league_ranks_all_loaded(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        seed_results(path, division="SP1", teams=["Barca", "Madrid", "Sevilla", "Valencia"])
+        reply = answer("which league scores the most goals", path)
+        assert "goals per game" in reply.text.lower()
+        assert reply.table and len(reply.table) >= 2
+
+
     def test_fallback_is_honest(self, tmp_path) -> None:
         reply = answer("what is the weather tomorrow", _seed(tmp_path))
         assert "not sure" in reply.text.lower()

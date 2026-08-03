@@ -711,6 +711,22 @@ class TestLeagueHistory:
         assert league_history(path, "ZZ9") is None
 
 
+class TestLeagueProfile:
+    def test_style_fingerprint(self, tmp_path) -> None:
+        from soccer.dashboard.data import league_profile
+
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        prof = league_profile(path, "2526", "E0")
+        assert prof is not None
+        assert prof.played > 0
+        # The result split is a partition of 100%, and rates stay in range.
+        assert abs(prof.home_win_pct + prof.draw_pct + prof.away_win_pct - 100.0) < 1e-6
+        assert 0.0 <= prof.over25_pct <= 100.0
+        assert prof.goals_per_game >= 0.0
+        assert league_profile(path, "2526", "ZZ9") is None
+
+
 class TestFixtureForecasts:
     def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:
         add_match(

@@ -830,6 +830,49 @@ def league_history(analytics_db: Path, division: str) -> LeagueHistory | None:
     )
 
 
+@dataclass(frozen=True)
+class LeagueProfile:
+    division: str
+    season: str
+    played: int
+    goals_per_game: float
+    home_win_pct: float
+    draw_pct: float
+    away_win_pct: float
+    over25_pct: float
+    btts_pct: float
+
+
+def league_profile(analytics_db: Path, season: str, division: str) -> LeagueProfile | None:
+    """A league season's style-of-play fingerprint from its results, or None if empty.
+
+    Aggregates every result into the rates that characterise a competition -- goals per
+    game, the home/draw/away split, and how often games clear 2.5 goals or see both teams
+    score -- so two leagues (or a league across seasons) can be compared like for like.
+    """
+    with AnalyticsDB(analytics_db) as adb:
+        rows = adb.outcomes_for(season, division)
+    n = len(rows)
+    if not n:
+        return None
+    hw = sum(1 for r in rows if r.fthg > r.ftag)
+    dr = sum(1 for r in rows if r.fthg == r.ftag)
+    goals = sum(r.fthg + r.ftag for r in rows)
+    over = sum(1 for r in rows if r.fthg + r.ftag > 2.5)
+    btts = sum(1 for r in rows if r.fthg > 0 and r.ftag > 0)
+    return LeagueProfile(
+        division=division,
+        season=season,
+        played=n,
+        goals_per_game=goals / n,
+        home_win_pct=100.0 * hw / n,
+        draw_pct=100.0 * dr / n,
+        away_win_pct=100.0 * (n - hw - dr) / n,
+        over25_pct=100.0 * over / n,
+        btts_pct=100.0 * btts / n,
+    )
+
+
 def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
     """Closing-line-value backtest for a slice, or None if no odds are loaded.
 
