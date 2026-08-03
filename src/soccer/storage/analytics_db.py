@@ -690,6 +690,19 @@ class AnalyticsDB:
         ).fetchall()
         return [ResultRow(*r) for r in rows]
 
+    def head_to_head(self, a_norm: str, b_norm: str, *, limit: int = 200) -> list[tuple]:
+        """Every result between two teams (either orientation), across all loaded seasons.
+
+        Returns (season, division, match_date, home, away, fthg, ftag), most recent first --
+        the raw material for a head-to-head summary spanning the whole loaded history.
+        """
+        return self._con.execute(
+            "SELECT season, division, match_date, home, away, fthg, ftag FROM results "
+            "WHERE (home_norm=? AND away_norm=?) OR (home_norm=? AND away_norm=?) "
+            "ORDER BY match_date DESC LIMIT ?",
+            [a_norm, b_norm, b_norm, a_norm, limit],
+        ).fetchall()
+
     def recent_outcomes_through(
         self, division: str, season: str, *, n_seasons: int = 3
     ) -> list[ResultRow]:

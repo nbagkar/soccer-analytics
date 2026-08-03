@@ -1,9 +1,10 @@
 """A built-in, offline football assistant -- rule-based, no LLM, no network.
 
-Maps a plain-language question to one of a fixed set of intents (standings, top
-scorers, a player's stats, a match forecast, current form, records, title odds, fixtures)
-and answers it from the local store. Deterministic and private: nothing leaves the
-machine, and it says plainly what it can and cannot answer rather than guessing.
+Maps a plain-language question to one of a fixed set of intents (standings for any loaded
+league or past season, top scorers, a player's stats, a match forecast, head-to-head
+records, current form, over/under-performance vs xG, records, title odds, fixtures) and
+answers it from the local store. Deterministic and private: nothing leaves the machine, and
+it says plainly what it can and cannot answer rather than guessing.
 
 Kept free of Streamlit so the intent logic is unit-testable; the chat page is a thin
 render over `answer()`.
@@ -16,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from soccer.sources.football_data_co_uk import division_name, season_label
+from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
 from soccer.storage.analytics_db import AnalyticsDB
 
 
@@ -36,19 +37,29 @@ _LEAGUE_ALIASES = {
     "epl": "E0",
     "english": "E0",
     "championship": "E1",
+    "league one": "E2",
+    "league 1": "E2",
+    "league two": "E3",
+    "league 2": "E3",
     "la liga": "SP1",
     "laliga": "SP1",
     "spain": "SP1",
     "spanish": "SP1",
+    "la liga 2": "SP2",
+    "segunda": "SP2",
     "bundesliga": "D1",
     "germany": "D1",
     "german": "D1",
+    "2 bundesliga": "D2",
+    "bundesliga 2": "D2",
     "serie a": "I1",
     "italy": "I1",
     "italian": "I1",
+    "serie b": "I2",
     "ligue 1": "F1",
     "france": "F1",
     "french": "F1",
+    "ligue 2": "F2",
     "mls": "USA",
     "usa": "USA",
     "america": "USA",
@@ -102,10 +113,12 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
 
     for handler in (
         _intent_help,
+        _intent_h2h,
         _intent_forecast,
         _intent_top_scorers,
         _intent_player,
         _intent_title_odds,
+        _intent_underlying,
         _intent_records,
         _intent_form,
         _intent_standings,
@@ -121,17 +134,25 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
 
 
 def _loaded_divisions(adb: AnalyticsDB) -> dict[str, str]:
-    """{division: latest_season} for divisions with results, newest season each."""
+    """{division: latest_season} for divisions with results, newest season each.
+
+    Newest by chronology, not string order -- a 1990s code like "9900" is lexically larger
+    than "2526" but chronologically older.
+    """
     out: dict[str, str] = {}
     for season, division, _n in adb.seasons_loaded():
-        if division not in out or season > out[division]:
+        if division not in out or season_sort_key(season) > season_sort_key(out[division]):
             out[division] = season
     return out
 
 
 def _resolve_league(q: str, loaded: dict[str, str]) -> str | None:
-    """A division mentioned in the question (by name or nickname), if it's loaded."""
-    for alias, division in _LEAGUE_ALIASES.items():
+    """A division mentioned in the question (by name or nickname), if it's loaded.
+
+    Longest alias first, so 'bundesliga 2' resolves to D2 rather than matching 'bundesliga'.
+    """
+    for alias in sorted(_LEAGUE_ALIASES, key=len, reverse=True):
+        division = _LEAGUE_ALIASES[alias]
         if alias in q and division in loaded:
             return division
     return None
@@ -142,6 +163,58 @@ def _default_league(loaded: dict[str, str]) -> str | None:
         if preferred in loaded:
             return preferred
     return next(iter(loaded), None)
+
+
+def _season_years(code: str) -> tuple[int, int]:
+    """(start_year, end_year) for a season code: European halves span two years, calendar one."""
+    if len(code) == 4 and code.isdigit():
+        first, second = int(code[:2]), int(code[2:])
+        if (first + 1) % 100 == second:
+            start = (1900 if first >= 90 else 2000) + first
+            return start, start + 1
+    try:
+        return int(code), int(code)
+    except ValueError:
+        return 0, 0
+
+
+def _resolve_season(q: str, seasons: list[str]) -> str | None:
+    """A loaded season the question refers to (year, 'last season', ...), else None for default."""
+    if not seasons:
+        return None
+    ordered = sorted(seasons, key=season_sort_key)  # oldest -> newest
+    if re.search(r"\blast season\b", q):
+        return ordered[-2] if len(ordered) >= 2 else ordered[-1]
+    if re.search(r"\b(this season|current|currently|right now)\b", q):
+        return ordered[-1]
+    # explicit range e.g. 2003/04, 03/04 (normalisation turns the slash into a space)
+    m = re.search(r"\b(\d{2}(?:\d{2})?)[\s/-]+(\d{2}(?:\d{2})?)\b", q)
+    if m:
+        a2, b2 = int(m.group(1)[-2:]), int(m.group(2)[-2:])
+        if (a2 + 1) % 100 == b2:  # consecutive halves -> a European season range
+            end = (1900 if b2 >= 90 else 2000) + b2
+            for s in seasons:
+                if _season_years(s)[1] == end:
+                    return s
+    # a bare year: prefer the season ENDING that year (when a title is awarded), then starting it
+    for ym in re.findall(r"\b(?:19|20)\d{2}\b", q):
+        year = int(ym)
+        for s in seasons:
+            if _season_years(s)[1] == year:
+                return s
+        for s in seasons:
+            if _season_years(s)[0] == year:
+                return s
+    return None
+
+
+def _league_and_season(q: str, adb: AnalyticsDB, loaded: dict[str, str]) -> tuple[str | None, str]:
+    """Resolve both the division and the season the question asks about (default: latest)."""
+    division = _resolve_league(q, loaded) or _default_league(loaded)
+    if division is None:
+        return None, ""
+    seasons = [s for s, d, _n in adb.seasons_loaded() if d == division]
+    return division, (_resolve_season(q, seasons) or loaded[division])
 
 
 def _team_index(adb: AnalyticsDB, loaded: dict[str, str]) -> dict[str, tuple[str, str, str]]:
@@ -195,10 +268,11 @@ def _resolve_player(q: str, adb: AnalyticsDB) -> str | None:
 _EXAMPLES = [
     "Who's top of the Premier League?",
     "Arsenal vs Chelsea — who wins?",
+    "Who's overperforming their xG?",
+    "Arsenal vs Tottenham head to head",
+    "Who won the Premier League in 2004?",
     "Top scorers in La Liga",
     "How is Man City's form?",
-    "Longest unbeaten run in the Premier League",
-    "Who will win the league?",
     "Show upcoming fixtures",
 ]
 
@@ -346,10 +420,9 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
-        division = _resolve_league(q, loaded) or _default_league(loaded)
+        division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
-        season = loaded[division]
 
     from soccer.dashboard.data import season_briefing
 
@@ -382,10 +455,9 @@ def _intent_records(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
-        division = _resolve_league(q, loaded) or _default_league(loaded)
+        division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
-        season = loaded[division]
         streaks = adb.team_streaks(season, division)
         wins = adb.biggest_wins(season, division, limit=3)
         scoring = adb.highest_scoring(season, division, limit=3)
@@ -407,10 +479,9 @@ def _intent_form(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
-        division = _resolve_league(q, loaded) or _default_league(loaded)
+        division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
-        season = loaded[division]
         forms = adb.team_form(season, division, last_n=5)
     if not forms:
         return None
@@ -445,15 +516,16 @@ def _intent_form(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
 
 def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(table|standings?|top of|leading|who is top|whos top|position|rank|where are)\b", q
+        r"\b(table|standings?|top of|leading|who is top|whos top|position|rank|where are"
+        r"|who won|who lifted|who topped|winners?)\b",
+        q,
     ):
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
-        division = _resolve_league(q, loaded) or _default_league(loaded)
+        division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
-        season = loaded[division]
         table = adb.league_table(season, division)
         index = _team_index(adb, loaded)
     if not table:
@@ -526,6 +598,107 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     )
 
 
+def _intent_h2h(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"head ?to ?head|\bh2h\b|record against|\bmeetings?\b|\bagainst\b|"
+        r"history (with|against|between)",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        index = _team_index(adb, loaded)
+        teams = _resolve_teams(q, index)
+        if len(teams) < 2:
+            return None
+        a, b = teams[0], teams[1]
+        rows = adb.head_to_head(_norm(a[0]), _norm(b[0]), limit=200)
+    if not rows:
+        return Reply(f"No meetings between **{a[0]}** and **{b[0]}** in the loaded data.")
+    a_wins = b_wins = draws = 0
+    for _s, _d, _date, home, away, hg, ag in rows:
+        if hg == ag:
+            draws += 1
+        elif _norm(home if hg > ag else away) == _norm(a[0]):
+            a_wins += 1
+        else:
+            b_wins += 1
+    recent = [
+        {
+            "Date": md.strftime("%Y-%m-%d") if hasattr(md, "strftime") else str(md)[:10],
+            "Competition": division_name(div),
+            "Result": f"{home} {hg}-{ag} {away}",
+        }
+        for _s, div, md, home, away, hg, ag in rows[:6]
+    ]
+    return Reply(
+        f"**{a[0]} vs {b[0]} — head to head** ({len(rows)} meetings in the loaded data)\n\n"
+        f"- **{a[0]} {a_wins}** · **{draws} draws** · **{b[0]} {b_wins}**",
+        table=recent,
+        suggestions=[f"{a[0]} vs {b[0]}, who wins?", f"How is {a[0]}'s form?"],
+    )
+
+
+def _intent_underlying(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"overperform\w*|underperform\w*|over ?achiev\w*|under ?achiev\w*|\blucky\b|unlucky|"
+        r"deserv\w*|expected points|\bxp\b|xg table|regress\w*|flatter\w*|riding .*luck|"
+        r"punching above",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+        index = _team_index(adb, loaded)
+
+    from soccer.dashboard.data import underlying_table
+
+    table = underlying_table(analytics_db, season, division)
+    if not table:
+        return Reply(
+            f"I don't have shot data for {division_name(division)} {season_label(season)}, so I "
+            "can't work out expected points there — try a recent season of a major league."
+        )
+    named = _resolve_teams(q, index)
+    if named:
+        row = next((r for r in table if _norm(r.team) == _norm(named[0][0])), None)
+        if row:
+            if row.points_diff > 1.5:
+                verdict = "**overperforming** their underlying play (running hot, prone to cool)"
+            elif row.points_diff < -1.5:
+                verdict = "**underperforming** — creating more than the table shows (unlucky)"
+            else:
+                verdict = "roughly in line with their underlying numbers"
+            return Reply(
+                f"**{row.team}** ({division_name(division)} {season_label(season)}) — "
+                f"{row.points} pts vs **{row.xpoints:.1f} expected** ({row.points_diff:+.1f}). "
+                f"They're {verdict}. Goals {row.goals_for} vs {row.xgf:.1f} xG."
+            )
+    over = max(table, key=lambda r: r.points_diff)
+    under = min(table, key=lambda r: r.points_diff)
+    rows = [
+        {
+            "Team": r.team,
+            "Pts": r.points,
+            "xP": round(r.xpoints, 1),
+            "Diff": round(r.points_diff, 1),
+        }
+        for r in table[:8]
+    ]
+    return Reply(
+        f"**{division_name(division)} {season_label(season)} — over/under-performance.** "
+        f"Running hottest: **{over.team}** ({over.points_diff:+.1f} vs expected). "
+        f"Unluckiest: **{under.team}** ({under.points_diff:+.1f}).",
+        table=rows,
+        suggestions=["Who is in form?", "Who will win the league?"],
+    )
+
+
 def _ordinal(n: int) -> str:
     suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
@@ -533,7 +706,8 @@ def _ordinal(n: int) -> str:
 
 def _fallback(q: str, analytics_db: Path) -> Reply:
     return Reply(
-        "I'm not sure how to answer that yet. I can help with league tables, top scorers, "
-        "a player's stats, match forecasts, current form, records, title odds and fixtures.",
+        "I'm not sure how to answer that yet. I can help with league tables (any loaded "
+        "league or past season), top scorers, a player's stats, match forecasts, head-to-head "
+        "records, current form, over/under-performance (xG), records, title odds and fixtures.",
         suggestions=_EXAMPLES[:4],
     )

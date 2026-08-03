@@ -67,3 +67,30 @@ class TestRouting:
     def test_no_data_message(self, tmp_path) -> None:
         reply = answer("who is top?", tmp_path / "missing.duckdb")
         assert "data" in reply.text.lower()
+
+    def test_head_to_head(self, tmp_path) -> None:
+        # "vs" also triggers forecast, but the h2h keyword must win (checked first).
+        reply = answer("Arsenal vs Chelsea head to head", _seed(tmp_path))
+        assert "head to head" in reply.text.lower()
+        assert "Arsenal" in reply.text and "Chelsea" in reply.text
+        assert reply.table  # recent meetings listed
+
+    def test_overperformance_without_shots_is_honest(self, tmp_path) -> None:
+        # The seed carries no shots on target, so xP can't be computed -> honest note.
+        reply = answer("who is overperforming their xg in the premier league", _seed(tmp_path))
+        assert "shot data" in reply.text.lower()
+
+    def test_second_division_league_alias(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E1", teams=["Leeds", "Leicester", "Norwich", "Watford"])
+        reply = answer("who's top of the championship?", path)
+        assert "Championship" in reply.text
+        assert reply.table
+
+    def test_past_season_resolution(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2425")
+        seed_results(path, division="E0", teams=teams, season="2526")
+        reply = answer("premier league last season table", path)
+        assert "2024/25" in reply.text  # the season before the latest, not this one
