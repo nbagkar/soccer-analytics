@@ -473,6 +473,31 @@ def market_edge(analytics_db: Path, season: str, division: str, *, model: str = 
         return None
 
 
+def forecast_report(
+    analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "poisson"
+):
+    """Model-vs-market-vs-blend scorecard for a division's recent odds-bearing seasons.
+
+    The honest measurement instrument: walk-forward scores the model, the vig-free closing
+    line, and their log-opinion blend on log loss / RPS / Brier, plus a blend-weight curve
+    (its optimum near 0 means the market dominates), calibration, and the biggest
+    model-vs-market disagreements. Returns a ForecastReport, or None if no odds are loaded.
+    """
+    from soccer.models.evaluation import evaluate_forecasts
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        seasons = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division},
+            key=season_sort_key,
+            reverse=True,
+        )[:n_seasons]
+        rows = [r for s in seasons for r in adb.outcomes_with_odds(s, division)]
+    if not rows:
+        return None
+    return evaluate_forecasts(rows, model=model, min_history=60)
+
+
 def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
     """Player leaderboard (list[PlayerRow]) from ingested shots. [] if none."""
     if not Path(analytics_db).exists():

@@ -26,6 +26,7 @@ from soccer.dashboard.data import (
     analytics_available,
     analytics_snapshot,
     fixture_forecasts,
+    forecast_report,
     forecast_slate,
     forecast_teams,
     has_player_events,
@@ -408,6 +409,13 @@ def _cached_market_edge(db_path: str, season: str, division: str):
     from pathlib import Path
 
     return market_edge(Path(db_path), season, division)
+
+
+@st.cache_data(show_spinner="Scoring the model against the market over recent seasons…")
+def _cached_forecast_report(db_path: str, division: str, n_seasons: int):
+    from pathlib import Path
+
+    return forecast_report(Path(db_path), division, n_seasons=n_seasons)
 
 
 @st.cache_data(show_spinner="Simulating the season…")
@@ -980,6 +988,132 @@ def _render_market_edge(report) -> None:
     )
 
 
+def _blend_curve_chart(curve):
+    frame = pl.DataFrame(
+        {"weight": [p.weight for p in curve], "log_loss": [p.log_loss for p in curve]}
+    ).to_pandas()
+    best = min(curve, key=lambda p: p.log_loss)
+    line = alt.Chart(frame).mark_line(color="#3b82f6").encode(
+        x=alt.X(
+            "weight:Q",
+            title="model weight (0 = market, 1 = model)",
+            axis=alt.Axis(format="%"),
+        ),
+        y=alt.Y("log_loss:Q", title="log loss", scale=alt.Scale(zero=False)),
+    )
+    mark = (
+        alt.Chart(pl.DataFrame({"weight": [best.weight], "log_loss": [best.log_loss]}).to_pandas())
+        .mark_point(color="#16c784", size=90, filled=True)
+        .encode(x="weight:Q", y="log_loss:Q")
+    )
+    return (line + mark).properties(height=240)
+
+
+def _calibration_chart(bins):
+    frame = pl.DataFrame(
+        {
+            "predicted": [b.mean_predicted for b in bins],
+            "observed": [b.observed_rate for b in bins],
+            "count": [b.count for b in bins],
+        }
+    ).to_pandas()
+    diag = (
+        alt.Chart(pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]}).to_pandas())
+        .mark_line(strokeDash=[4, 4], color="#8b95a1")
+        .encode(x="x:Q", y="y:Q")
+    )
+    pts = alt.Chart(frame).mark_circle(color="#16c784", opacity=0.8).encode(
+        x=alt.X(
+            "predicted:Q",
+            title="predicted home-win",
+            scale=alt.Scale(domain=[0, 1]),
+            axis=alt.Axis(format="%"),
+        ),
+        y=alt.Y(
+            "observed:Q",
+            title="actual home-win",
+            scale=alt.Scale(domain=[0, 1]),
+            axis=alt.Axis(format="%"),
+        ),
+        size=alt.Size("count:Q", legend=None),
+    )
+    return (diag + pts).properties(height=240)
+
+
+def _render_report_card(report, division: str) -> None:
+    """Honest model-vs-market scorecard: proper scores, the blend curve, and calibration."""
+    st.caption(
+        f"{division_name(division)} — each match forecast from a model fit only on earlier "
+        f"matches ({report.n} scored), then judged against the vig-free closing line. Lower is "
+        "better. RPS is the standard 1X2 metric; the blend is a log-opinion pool of the two."
+    )
+    metrics = [
+        ("Baseline (base rates)", report.baseline),
+        ("Model", report.model),
+        ("Market (closing line)", report.market),
+        (f"Blend ({report.best_weight:.0%} model)", report.blend),
+    ]
+    best_ll = min(s.log_loss for _n, s in metrics)
+    best_rps = min(s.rps for _n, s in metrics)
+    rows = []
+    for name, s in metrics:
+        ll = (
+            f"<b style='color:{_YES}'>{s.log_loss:.4f}</b>"
+            if abs(s.log_loss - best_ll) < 1e-9
+            else f"{s.log_loss:.4f}"
+        )
+        rp = (
+            f"<b style='color:{_YES}'>{s.rps:.4f}</b>"
+            if abs(s.rps - best_rps) < 1e-9
+            else f"{s.rps:.4f}"
+        )
+        rows.append(
+            {"Forecaster": _esc(name), "Log loss": ll, "RPS": rp, "Brier": f"{s.brier:.4f}"}
+        )
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+
+    w = report.best_weight
+    verdict = (
+        "the model adds essentially nothing to the market — the closing line is the benchmark"
+        if w <= 0.1
+        else "the model carries real weight alongside the market"
+        if w >= 0.4
+        else "the model adds a little on top of the market"
+    )
+    st.info(
+        f"Best blend: **{w:.0%} model / {1 - w:.0%} market** over {report.n} matches — {verdict}.",
+        icon=":material/insights:",
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Blend-weight curve** — log loss as the mix shifts model↔market")
+        st.altair_chart(_blend_curve_chart(report.blend_curve), width="stretch")
+    with c2:
+        st.markdown("**Calibration** — model home-win probability vs how often it happened")
+        st.altair_chart(_calibration_chart(report.model_calibration), width="stretch")
+
+    st.markdown(
+        "**Biggest model↔market disagreements** — the market is usually right, so these are "
+        "the model's boldest departures, not value picks"
+    )
+    labels = ("Home", "Draw", "Away")
+    div_rows = [
+        {
+            "Match": f"{_esc(d.home)} v {_esc(d.away)}",
+            "Model H/D/A": f"{d.model[0]:.0%} / {d.model[1]:.0%} / {d.model[2]:.0%}",
+            "Market H/D/A": f"{d.market[0]:.0%} / {d.market[1]:.0%} / {d.market[2]:.0%}",
+            "Result": labels[d.actual],
+        }
+        for d in report.divergences
+    ]
+    st.markdown(_html_table(div_rows), unsafe_allow_html=True)
+    st.caption(
+        "Closing 1X2 odds from football-data.co.uk (Pinnacle preferred), de-vigged. "
+        "Model = ratio-method Poisson with the Dixon-Coles low-score correction."
+    )
+
+
 def _render_players(rows) -> None:
     st.caption(
         "StatsBomb shots across all ingested matches. G-xG > 0 = clinical finishing. "
@@ -1456,7 +1590,9 @@ def main() -> None:
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        upcoming_tab, match_tab, season_tab = st.tabs(["Upcoming", "Matchup", "Season"])
+        upcoming_tab, match_tab, season_tab, card_tab = st.tabs(
+            ["Upcoming", "Matchup", "Season", "Scorecard"]
+        )
 
         with upcoming_tab:
             _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
@@ -1508,6 +1644,25 @@ def main() -> None:
                     st.info("No results for that selection.")
                 else:
                     _render_season(briefing)
+
+        with card_tab:
+            if not available:
+                st.info(
+                    "No league data yet. Go to **About & sources** → **Add a league**.",
+                    icon=":material/download:",
+                )
+            else:
+                st.caption(
+                    "How good are these forecasts, really? Measured over the last few seasons "
+                    "against the bookmaker's closing line — the honest benchmark."
+                )
+                by_league = {division_name(d): d for _s, d, _n in available}
+                league = st.selectbox("League", sorted(by_league), key="card_league")
+                report = _cached_forecast_report(str(settings.analytics_db), by_league[league], 6)
+                if report is None:
+                    st.info("No closing odds loaded for that league yet.")
+                else:
+                    _render_report_card(report, by_league[league])
         return
 
     if page == "Analytics":
