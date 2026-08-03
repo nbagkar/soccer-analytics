@@ -26,6 +26,7 @@ from soccer.dashboard.data import (
     analytics_available,
     analytics_snapshot,
     fixture_forecasts,
+    forecast_explanation,
     forecast_report,
     forecast_slate,
     forecast_teams,
@@ -919,8 +920,71 @@ def _render_forecast(slate) -> None:
         )
     st.caption(
         "Prices are the model's fair probability in cents (100¢ = certain), no bookmaker "
-        "margin. Dixon-Coles on ~3 recent seasons, re-fit as results land. Directional, not advice."
+        "margin. Shots-on-target model over ~3 recent seasons, re-fit as results land. "
+        "Directional, not advice."
     )
+
+
+def _strength_bars(exp):
+    rows = [
+        (f"{exp.home} attack", exp.home_factor.attack),
+        (f"{exp.home} defence", exp.home_factor.solidity),
+        (f"{exp.away} attack", exp.away_factor.attack),
+        (f"{exp.away} defence", exp.away_factor.solidity),
+    ]
+    frame = pl.DataFrame({"label": [r[0] for r in rows], "value": [r[1] for r in rows]}).to_pandas()
+    bars = (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "value:Q",
+                title="rating vs league average (dashed = 1.0)",
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("label:N", sort=None, title=None),
+            color=alt.condition("datum.value >= 1", alt.value("#16c784"), alt.value("#ea3943")),
+        )
+    )
+    rule = (
+        alt.Chart(pl.DataFrame({"x": [1.0]}).to_pandas())
+        .mark_rule(color="#8b95a1", strokeDash=[4, 4])
+        .encode(x="x:Q")
+    )
+    return (bars + rule).properties(height=150)
+
+
+def _render_forecast_explanation(exp) -> None:
+    """The honest 'why': attribute the forecast to team ratings and flag how much data backs it."""
+    st.markdown("**Why this forecast**")
+    conf_colour = {"High": _YES, "Moderate": "#f0a020", "Low": "#ea3943"}[exp.confidence]
+    st.markdown(
+        f"<span style='color:{_MUTE}'>Confidence </span>"
+        f"<b style='color:{conf_colour}'>{exp.confidence}</b>"
+        f"<span style='color:{_MUTE}'> — ratings from {exp.home_factor.games} "
+        f"({_esc(exp.home)}) and {exp.away_factor.games} ({_esc(exp.away)}) recent matches.</span>",
+        unsafe_allow_html=True,
+    )
+    if exp.confidence == "Low":
+        st.caption(
+            "⚠ Limited data on one side (newly promoted or early season), so the forecast "
+            "leans on the league average — treat it with extra caution."
+        )
+    st.markdown(f"<span style='color:#e6e9ef'>{_esc(exp.summary)}</span>", unsafe_allow_html=True)
+    home_leak = 1.0 / max(exp.away_factor.solidity, 0.05)
+    away_leak = 1.0 / max(exp.home_factor.solidity, 0.05)
+    st.markdown(
+        f"<div style='font-size:0.9rem;color:{_MUTE};margin:6px 0'>"
+        f"{_esc(exp.home)} xG = {exp.league_home_avg:.2f} <i>home baseline</i> &times; "
+        f"{exp.home_factor.attack:.2f} <i>attack</i> &times; {home_leak:.2f} "
+        f"<i>opp. leakiness</i> = <b style='color:#e6e9ef'>{exp.home_xg:.2f}</b><br>"
+        f"{_esc(exp.away)} xG = {exp.league_away_avg:.2f} <i>away baseline</i> &times; "
+        f"{exp.away_factor.attack:.2f} <i>attack</i> &times; {away_leak:.2f} "
+        f"<i>opp. leakiness</i> = <b style='color:#e6e9ef'>{exp.away_xg:.2f}</b></div>",
+        unsafe_allow_html=True,
+    )
+    st.altair_chart(_strength_bars(exp), width="stretch")
+    st.caption("Attack and defence are each team's rate vs the league average (higher is better).")
 
 
 def _render_ev_calculator(slate) -> None:
@@ -1631,6 +1695,12 @@ def main() -> None:
                     else:
                         _render_forecast(slate)
                         st.divider()
+                        exp = forecast_explanation(
+                            settings.analytics_db, season, division, home, away
+                        )
+                        if exp is not None:
+                            _render_forecast_explanation(exp)
+                            st.divider()
                         _render_ev_calculator(slate)
                         report = _cached_market_edge(str(settings.analytics_db), season, division)
                         if report is not None:

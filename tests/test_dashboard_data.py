@@ -612,6 +612,20 @@ class TestForecastData:
         TestAnalyticsSnapshot()._seed_results(path)
         assert forecast_slate(path, "2526", "E0", "Arsenal", "Nobody") is None
 
+    def test_forecast_explanation_attributes_the_forecast(self, tmp_path) -> None:
+        from soccer.dashboard.data import forecast_explanation
+
+        path = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(path)
+        exp = forecast_explanation(path, "2526", "E0", "Arsenal", "Brentford")
+        assert exp is not None
+        # Strong home side out-projects the weak away side, and its attack rates higher.
+        assert exp.home_xg > exp.away_xg
+        assert exp.home_factor.attack > exp.away_factor.attack
+        assert exp.confidence in ("High", "Moderate", "Low")
+        assert exp.summary  # a non-empty plain-English "why"
+        assert forecast_explanation(path, "2526", "E0", "Arsenal", "Nobody") is None
+
 
 class TestFixtureForecasts:
     def test_upcoming_orders_and_filters(self, db: LiveDB) -> None:

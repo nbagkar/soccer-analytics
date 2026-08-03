@@ -467,6 +467,108 @@ def forecast_slate(
     return compute_markets(names.get(hn, home), names.get(an, away), lam, mu, model.rho)
 
 
+@dataclass(frozen=True)
+class TeamFactor:
+    name: str
+    attack: float  # scoring rate vs league average (1.0 = average, >1 = scores more)
+    solidity: float  # 1 / concede-rate vs league (1.0 = average, >1 = concedes fewer)
+    games: int  # matches backing the rating in the fitting window
+    data_weight: float  # games / (games + shrinkage): how much rating is data vs the prior
+
+
+@dataclass(frozen=True)
+class ForecastExplanation:
+    home: str
+    away: str
+    home_xg: float
+    away_xg: float
+    league_home_avg: float
+    league_away_avg: float
+    home_factor: TeamFactor
+    away_factor: TeamFactor
+    confidence: str  # High / Moderate / Low, from how much data backs the thinner side
+    summary: str  # plain-English "why"
+
+
+def _pm(multiplier: float) -> str:
+    """'35% above' / '8% below' — a strength multiplier as a readable deviation from average."""
+    d = multiplier - 1.0
+    return f"{abs(d):.0%} {'above' if d >= 0 else 'below'}"
+
+
+def _explain_summary(hf: TeamFactor, af: TeamFactor, lam: float, mu: float) -> str:
+    if abs(lam - mu) < 0.15:
+        return (
+            f"A close call — {hf.name} ({lam:.1f} xG) and {af.name} ({mu:.1f} xG) project "
+            "similarly, so the draw carries real weight."
+        )
+    fav, dog, fxg, dxg = (hf, af, lam, mu) if lam > mu else (af, hf, mu, lam)
+    reasons = []
+    if fav.attack - 1 > 0.10:
+        reasons.append(f"its attack runs {_pm(fav.attack)} the league rate")
+    if dog.solidity < 0.90:
+        reasons.append(f"{dog.name} concede about {(1 / dog.solidity - 1):.0%} more than average")
+    if not reasons:
+        reasons.append("it rates a shade stronger across the board")
+    return f"{fav.name} are favoured ({fxg:.1f} vs {dxg:.1f} xG): " + ", and ".join(reasons) + "."
+
+
+def forecast_explanation(
+    analytics_db: Path, season: str, division: str, home: str, away: str
+) -> ForecastExplanation | None:
+    """Decompose the default matchup forecast into its drivers, honestly. None if unknown.
+
+    Explains the same shots+shrinkage model the live forecast uses: each side's expected
+    goals is league-baseline x its own attack x the opponent's leakiness, so the number can
+    be attributed to concrete, checkable ratings -- and flagged for how much data backs them.
+    """
+    from soccer.domain.names import normalize_name
+
+    with AnalyticsDB(analytics_db) as adb:
+        outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+    if not outcomes:
+        return None
+    model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+    hn, an = normalize_name(home), normalize_name(away)
+    if hn not in model.strengths or an not in model.strengths:
+        return None
+
+    games: dict[str, int] = {}
+    names: dict[str, str] = {}
+    for o in outcomes:
+        for norm, disp in ((o.home_norm, o.home), (o.away_norm, o.away)):
+            games[norm] = games.get(norm, 0) + 1
+            names[norm] = disp
+
+    def factor(norm: str, fallback: str) -> TeamFactor:
+        st = model.strengths[norm]
+        g = games.get(norm, 0)
+        return TeamFactor(
+            name=names.get(norm, fallback),
+            attack=st.attack,
+            solidity=1.0 / max(st.defence, 0.05),
+            games=g,
+            data_weight=g / (g + FORECAST_SHRINKAGE) if g else 0.0,
+        )
+
+    hf, af = factor(hn, home), factor(an, away)
+    lam, mu = model.expected_goals(hn, an)
+    weight = min(hf.data_weight, af.data_weight)
+    confidence = "High" if weight >= 0.85 else "Low" if weight < 0.6 else "Moderate"
+    return ForecastExplanation(
+        home=hf.name,
+        away=af.name,
+        home_xg=lam,
+        away_xg=mu,
+        league_home_avg=model.home_avg,
+        league_away_avg=model.away_avg,
+        home_factor=hf,
+        away_factor=af,
+        confidence=confidence,
+        summary=_explain_summary(hf, af, lam, mu),
+    )
+
+
 def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
     """Closing-line-value backtest for a slice, or None if no odds are loaded.
 
