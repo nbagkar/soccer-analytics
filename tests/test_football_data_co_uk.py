@@ -209,6 +209,13 @@ class TestAdapter:
         with self.make_adapter(raw, transport) as adapter:
             assert adapter.fetch_division("9999", "ZZ") == []
 
+    def test_300_multiple_choices_treated_as_absent(self, raw: RawStore) -> None:
+        # football-data.co.uk answers some missing old-season files with a bare 300, not a
+        # 404; both mean "no such file" and must not abort a deep backfill sweep.
+        transport = httpx.MockTransport(lambda request: httpx.Response(300, text="Multiple"))
+        with self.make_adapter(raw, transport) as adapter:
+            assert adapter.fetch_division("9394", "I2") == []
+
     def test_server_error_raises(self, raw: RawStore) -> None:
         transport = httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
         with (

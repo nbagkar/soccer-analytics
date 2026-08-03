@@ -27,17 +27,23 @@ from soccer.storage.raw import RawStore
 LEAGUE_CHOICES = {
     "Premier League (England)": "E0",
     "Championship (England)": "E1",
+    "League One (England)": "E2",
+    "League Two (England)": "E3",
     "La Liga (Spain)": "SP1",
+    "La Liga 2 (Spain)": "SP2",
     "Bundesliga (Germany)": "D1",
+    "2. Bundesliga (Germany)": "D2",
     "Serie A (Italy)": "I1",
+    "Serie B (Italy)": "I2",
     "Ligue 1 (France)": "F1",
+    "Ligue 2 (France)": "F2",
     "MLS (USA)": "USA",
 }
 
 # The set a fresh install downloads itself on first launch, so it "just works" without any
 # clicks -- fast, token-free league results that power tables, forecasts, trends, records
 # and the season oracle. Kept to the leagues actually wanted.
-STARTER_LEAGUES = ["E0", "E1", "SP1", "D1", "I1", "F1", "USA"]
+STARTER_LEAGUES = ["E0", "E1", "E2", "E3", "SP1", "SP2", "D1", "D2", "I1", "I2", "F1", "F2", "USA"]
 
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
 EVENT_PACKS = {

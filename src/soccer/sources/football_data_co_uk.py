@@ -363,13 +363,15 @@ class FootballDataCoUk:
         """Download and parse one (season, division). Stores the raw CSV as a snapshot.
 
         `season` is football-data.co.uk's 4-digit form, e.g. "2526" for 2025/26.
-        Returns [] for a 404 (a division/season that does not exist) rather than raising,
-        since callers sweep many combinations of which some are absent.
+        Returns [] for an absent (season, division) rather than raising, since callers
+        sweep many combinations of which some do not exist. The server answers a missing
+        old-season file with either 404 or, for some, a bare 300 Multiple Choices; both
+        mean "no such file". Genuine transient failures (5xx) still raise.
         """
         url = f"{BASE_URL}/{season}/{division}.csv"
         response = self._client.get(url)
-        if response.status_code == 404:
-            logger.info("No data for %s/%s (404)", season, division)
+        if response.status_code in (300, 404):
+            logger.info("No data for %s/%s (HTTP %d)", season, division, response.status_code)
             return []
         response.raise_for_status()
 
