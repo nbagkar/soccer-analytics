@@ -214,6 +214,27 @@ def _render_chat_chart(chart) -> None:
         st.altair_chart(_team_trajectory_chart(chart["data"]), width="stretch")
     elif kind == "percentiles":
         st.altair_chart(_percentile_bars_chart(chart["data"]), width="stretch")
+    elif kind == "result_bar":
+        st.altair_chart(_outcome_bar_chart(chart["data"]), width="stretch")
+
+
+def _outcome_bar_chart(rows: list[dict]):
+    """Win/draw/away probability bars from [{outcome, pct}, ...] (home, draw, away order)."""
+    frame = pl.DataFrame(rows).to_pandas()
+    order = [r["outcome"] for r in rows]
+    colours = ["#16c784", "#8b95a1", "#ea3943"]  # home green / draw grey / away red
+    bars = (
+        alt.Chart(frame)
+        .mark_bar(cornerRadiusEnd=3, height=26)
+        .encode(
+            x=alt.X("pct:Q", scale=alt.Scale(domain=[0, 100]), title="Win probability (%)"),
+            y=alt.Y("outcome:N", sort=order, title=None),
+            color=alt.Color("outcome:N", scale=alt.Scale(domain=order, range=colours), legend=None),
+            tooltip=["outcome", alt.Tooltip("pct", title="%")],
+        )
+    )
+    labels = bars.mark_text(align="left", dx=3).encode(text=alt.Text("pct:Q", format=".0f"))
+    return (bars + labels).properties(height=110)
 
 
 def _render_assistant(settings) -> None:

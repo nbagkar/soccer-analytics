@@ -86,6 +86,25 @@ class TestRouting:
     def test_forecast_keeps_question_order(self, tmp_path) -> None:
         reply = answer("Chelsea vs Arsenal who wins?", _seed(tmp_path))
         assert reply.text.startswith("**Chelsea vs Arsenal")  # order preserved
+        assert reply.chart and reply.chart["kind"] == "result_bar"
+        assert len(reply.chart["data"]) == 3  # home / draw / away
+
+    def test_season_compare(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2425")
+        seed_results(path, division="E0", teams=teams, season="2526")
+        reply = answer("Arsenal this season vs last", path)
+        assert "not sure" not in reply.text.lower()
+        assert "Arsenal" in reply.text
+        assert reply.table and len(reply.table) == 2  # one row per season
+        assert {r["Season"] for r in reply.table} == {"2024/25", "2025/26"}
+
+    def test_season_compare_needs_two_seasons(self, tmp_path) -> None:
+        # Only one season loaded -> not enough to compare; falls through, no crash.
+        reply = answer("Arsenal this season vs last", _seed(tmp_path))
+        assert reply.text  # some answer (dossier/fallback), no exception
+
 
     def test_forecast_needs_two_teams(self, tmp_path) -> None:
         # Only one team named -> not a forecast; should not crash, routes elsewhere/fallback.

@@ -29,9 +29,9 @@ class Reply:
     table: list[dict] | None = None
     suggestions: list[str] = field(default_factory=list)
     chart: dict | None = None
-    """Optional chart spec: {"kind": "xg_race"|"trajectory"|"percentiles", "data": [...]}.
-    Kept as plain data (no Streamlit/Altair here) so the chat page can render it and it
-    survives session-state round-trips."""
+    """Optional chart spec: {"kind": "xg_race"|"trajectory"|"percentiles"|"result_bar",
+    "data": [...]}. Kept as plain data (no Streamlit/Altair here) so the chat page can
+    render it and it survives session-state round-trips."""
 
 
 # Plain-language league names/nicknames -> football-data.co.uk division codes (results
@@ -120,6 +120,7 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_help,
         _intent_compare,
         _intent_league_compare,
+        _intent_season_compare,
         _intent_h2h,
         _intent_match_centre,
         _intent_forecast,
@@ -411,6 +412,14 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             f"{home} vs {away} head to head",
             f"How is {home}'s form?",
         ],
+        chart={
+            "kind": "result_bar",
+            "data": [
+                {"outcome": home, "pct": round(100 * res[home])},
+                {"outcome": "Draw", "pct": round(100 * res["Draw"])},
+                {"outcome": away, "pct": round(100 * res[away])},
+            ],
+        },
     )
 
 
@@ -1276,6 +1285,71 @@ def _intent_league_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
         f"({detail}).",
         table=rows,
         suggestions=["Top scorers in La Liga", "Who will win the league?"],
+    )
+
+
+def _intent_season_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"(this season|form) (vs|versus|against|compared? to|and) [\w ]*(last|previous)"
+        r"|(vs|versus|compared? to|better than|worse than|improved (on|from|since)) "
+        r"(last|previous) (season|year|campaign)"
+        r"|season on season|season by season|year on year|last season vs this",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        index = _team_index(adb, loaded)
+        named = _resolve_teams(q, index)
+        if not named:
+            return None
+        display, division, _s = named[0]
+        seasons = sorted(
+            [s for s, d, _n in adb.seasons_loaded() if d == division], key=season_sort_key
+        )
+    if len(seasons) < 2:
+        return None
+    s_old, s_new = seasons[-2], seasons[-1]
+    years = [int(y) for y in re.findall(r"\b(19|20)\d{2}\b", q)]
+    if years:
+        matched = [
+            s for s in seasons if _season_years(s)[1] in years or _season_years(s)[0] in years
+        ]
+        if len(matched) >= 2:
+            s_old, s_new = matched[-2], matched[-1]
+
+    from soccer.dashboard.data import team_dossier
+
+    d_new = team_dossier(analytics_db, division, s_new, display)
+    d_old = team_dossier(analytics_db, division, s_old, display)
+    if d_new is None or d_old is None:
+        return None
+
+    def row(d) -> dict:
+        return {
+            "Season": season_label(d.season),
+            "Pos": d.position,
+            "P": d.played,
+            "W-D-L": f"{d.won}-{d.drawn}-{d.lost}",
+            "GF": d.goals_for,
+            "GA": d.goals_against,
+            "GD": d.goal_difference,
+            "Pts": d.points,
+            "PPG": round(d.points / d.played, 2) if d.played else 0.0,
+        }
+
+    delta = d_new.points - d_old.points
+    verb = "up" if delta > 0 else "down" if delta < 0 else "level with"
+    return Reply(
+        f"**{d_new.team} — {season_label(d_old.season)} to {season_label(d_new.season)}**\n\n"
+        f"- {season_label(d_new.season)}: **{d_new.points} pts** ({_ordinal(d_new.position)}), "
+        f"vs {d_old.points} pts ({_ordinal(d_old.position)}) in {season_label(d_old.season)}\n"
+        f"- That's **{verb} {abs(delta)} points** on the season "
+        f"({d_new.points / d_new.played:.2f} vs {d_old.points / d_old.played:.2f} ppg)",
+        table=[row(d_old), row(d_new)],
+        suggestions=[f"Tell me about {d_new.team}", f"Is {d_new.team} overperforming their xG?"],
     )
 
 
