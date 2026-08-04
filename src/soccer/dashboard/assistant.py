@@ -18,7 +18,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
+from soccer.sources.football_data_co_uk import (
+    CUP_DIVISIONS,
+    division_name,
+    season_label,
+    season_sort_key,
+)
 from soccer.storage.analytics_db import AnalyticsDB
 
 
@@ -108,7 +113,7 @@ _LEAGUE_ALIASES = {
 # UEFA knockout competitions: stored as results so head-to-head and records use them, but
 # they have no domestic-style league title, so they're kept out of team resolution and the
 # title/honours projections (which would otherwise read a phase table as a trophy).
-_CUP_DIVISIONS = {"UCL", "UEL", "UECL"}
+_CUP_DIVISIONS = CUP_DIVISIONS
 
 # Common team nicknames -> the football-data.co.uk spelling, for name resolution.
 _TEAM_ALIASES = {
@@ -294,10 +299,13 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
     for norm_name in sorted(index, key=len, reverse=True):  # longest first, so 'man city' wins
         if not norm_name:
             continue
-        pos = aliased.find(norm_name)
+        # Whole-word match, so a short club name never matches inside a longer word
+        # ("Aris" must not fire on "Paris", "Inter" not on "Internacional"). The optional
+        # trailing "s" keeps possessives working ("Arsenal's" normalises to "arsenals").
+        m = re.search(rf"\b{re.escape(norm_name)}s?\b", aliased)
         display = index[norm_name][0]
-        if pos != -1 and display not in hits:
-            hits[display] = (pos, index[norm_name])
+        if m and display not in hits:
+            hits[display] = (m.start(), index[norm_name])
     return [entry for _pos, entry in sorted(hits.values(), key=lambda pe: pe[0])]
 
 

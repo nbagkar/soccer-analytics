@@ -220,8 +220,12 @@ def load_full_history(
 CHAMPIONS_LEAGUE_SEASONS = (2023, 2024, 2025)  # start years -> 2023/24, 2024/25, 2025/26
 
 
-def _fdorg_result(match: dict, division: str, season_code: str):
-    """Map a finished football-data.org match to a MatchResult, or None if not final."""
+def _fdorg_result(match: dict, division: str, season_code: str, registry: dict | None = None):
+    """Map a finished football-data.org match to a MatchResult, or None if not final.
+
+    When a `registry` (norm -> canonical display) is given, team names are bridged to their
+    loaded domestic spelling so cross-source head-to-head and records line up.
+    """
     from soccer.domain.names import normalize_name
     from soccer.sources.football_data_co_uk import MatchResult
 
@@ -230,6 +234,13 @@ def _fdorg_result(match: dict, division: str, season_code: str):
     if hg is None or ag is None:
         return None
     home, away = match["homeTeam"]["name"], match["awayTeam"]["name"]
+    if registry is not None:
+        from soccer.dashboard.data import resolve_canonical_name
+
+        home, home_norm = resolve_canonical_name(home, registry)
+        away, away_norm = resolve_canonical_name(away, registry)
+    else:
+        home_norm, away_norm = normalize_name(home), normalize_name(away)
     ht = match.get("score", {}).get("halfTime") or {}
     kickoff = datetime.fromisoformat(match["utcDate"].replace("Z", "+00:00")).date()
     return MatchResult(
@@ -238,8 +249,8 @@ def _fdorg_result(match: dict, division: str, season_code: str):
         match_date=kickoff,
         home=home,
         away=away,
-        home_norm=normalize_name(home),
-        away_norm=normalize_name(away),
+        home_norm=home_norm,
+        away_norm=away_norm,
         fthg=int(hg),
         ftag=int(ag),
         ftr="H" if hg > ag else "A" if ag > hg else "D",
@@ -257,6 +268,24 @@ def _fdorg_result(match: dict, division: str, season_code: str):
         away_reds=None,
         referee=None,
     )
+
+
+def _canonical_registry(adb: AnalyticsDB) -> dict[str, str]:
+    """{norm: display} of loaded domestic team names (latest season each), to bridge to."""
+    from soccer.sources.football_data_co_uk import CUP_DIVISIONS, season_sort_key
+
+    latest: dict[str, str] = {}
+    for season, division, _n in adb.seasons_loaded():
+        if division in CUP_DIVISIONS:
+            continue
+        if division not in latest or season_sort_key(season) > season_sort_key(latest[division]):
+            latest[division] = season
+    registry: dict[str, str] = {}
+    for division, season in latest.items():
+        for o in adb.outcomes_for(season, division):
+            registry.setdefault(o.home_norm, o.home)
+            registry.setdefault(o.away_norm, o.away)
+    return registry
 
 
 def load_champions_league(
@@ -278,6 +307,8 @@ def load_champions_league(
         )
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        registry = _canonical_registry(adb)
 
     async def run() -> list:
         import httpx
@@ -298,7 +329,7 @@ def load_champions_league(
                     continue  # season not on the free tier
                 for m in res.payload.get("matches", []):
                     if m.get("status") == "FINISHED":
-                        r = _fdorg_result(m, "UCL", code)
+                        r = _fdorg_result(m, "UCL", code, registry)
                         if r:
                             out.append(r)
                 if on_progress:

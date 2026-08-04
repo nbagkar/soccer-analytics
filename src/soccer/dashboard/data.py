@@ -1102,8 +1102,44 @@ _FDCOUK_ALIASES_RAW = {
     "CA Paranaense": "Athletico-PR",
     "Botafogo FR": "Botafogo RJ",
     "CR Flamengo": "Flamengo RJ",
+    # UEFA cup participants whose football-data.org name isn't a token-subset of the terse
+    # domestic one (or which a subset would mis-match). Bridges Champions League results to
+    # each club's league so head-to-head and records line up across the two sources.
+    "FC Bayern München": "Bayern Munich",
+    "FC Internazionale Milano": "Inter",
+    "Manchester City FC": "Man City",
+    "Manchester United FC": "Man United",
+    "Eintracht Frankfurt": "Ein Frankfurt",
+    "Racing Club de Lens": "Lens",
+    "Stade Brestois 29": "Brest",
+    "Royale Union Saint-Gilloise": "St. Gilloise",
+    "Paris Saint-Germain FC": "Paris SG",  # else a token-subset grabs the new "Paris FC"
 }
 FDCOUK_ALIASES: dict[str, str] = {normalize_name(k): v for k, v in _FDCOUK_ALIASES_RAW.items()}
+
+
+def resolve_canonical_name(name: str, registry: dict[str, str]) -> tuple[str, str]:
+    """Map a source team name to a loaded team's (display, norm), for cross-source bridging.
+
+    Tries an exact normalized match, then the curated FDCOUK_ALIASES, then a unique
+    token-subset (verbose "Borussia Dortmund" -> "Dortmund"). Falls back to the source name
+    when nothing matches, so a club from an unloaded league keeps its own name. `registry` is
+    {norm: display} of the canonical (football-data.co.uk) names to bridge to; aliases are
+    checked before the token-subset so a curated entry overrides a wrong subset hit.
+    """
+    n = normalize_name(name)
+    if n in registry:
+        return registry[n], n
+    aliased = FDCOUK_ALIASES.get(n)
+    if aliased:
+        an = normalize_name(aliased)
+        if an in registry:
+            return registry[an], an
+    tokens = set(n.split())
+    subset = [norm for norm in registry if set(norm.split()) < tokens or tokens < set(norm.split())]
+    if len(subset) == 1:
+        return registry[subset[0]], subset[0]
+    return name, n
 
 
 @dataclass(frozen=True)

@@ -269,6 +269,19 @@ class TestRouting:
         reply = answer("tell me about Arsenal", path)
         assert "Premier League" in reply.text  # its league, not the Champions League
 
+    def test_team_resolution_is_whole_word(self) -> None:
+        # "Aris" (Greek club) must not match inside "Paris"; "Arsenal" must still resolve.
+        from soccer.dashboard.assistant import _resolve_teams
+
+        index = {
+            "aris": ("Aris", "G1", "2526"),
+            "arsenal": ("Arsenal", "E0", "2526"),
+            "paris sg": ("Paris SG", "F1", "2526"),
+        }
+        names = [t[0] for t in _resolve_teams("paris sg vs arsenal head to head", index)]
+        assert names[:2] == ["Paris SG", "Arsenal"]
+        assert "Aris" not in names
+
     def test_past_season_resolution(self, tmp_path) -> None:
         path = tmp_path / "analytics.duckdb"
         teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]

@@ -711,6 +711,29 @@ class TestLeagueHistory:
         assert league_history(path, "ZZ9") is None
 
 
+class TestCanonicalNames:
+    def test_resolve_bridges_aliases_and_overrides_bad_subset(self) -> None:
+        from soccer.dashboard.data import resolve_canonical_name
+
+        registry = {
+            "bayern munich": "Bayern Munich",
+            "paris sg": "Paris SG",
+            "paris": "Paris FC",  # the new Ligue 1 club a subset would wrongly grab
+            "dortmund": "Dortmund",
+        }
+        # curated alias bridges the verbose football-data.org name
+        assert resolve_canonical_name("FC Bayern München", registry) == (
+            "Bayern Munich",
+            "bayern munich",
+        )
+        # the alias wins over a token-subset, so PSG never becomes Paris FC
+        assert resolve_canonical_name("Paris Saint-Germain FC", registry)[0] == "Paris SG"
+        # a clean token-subset still bridges
+        assert resolve_canonical_name("Borussia Dortmund", registry)[0] == "Dortmund"
+        # a club from an unloaded league keeps its own name
+        assert resolve_canonical_name("Shakhtar Donetsk", registry)[0] == "Shakhtar Donetsk"
+
+
 class TestLeagueProfile:
     def test_style_fingerprint(self, tmp_path) -> None:
         from soccer.dashboard.data import league_profile

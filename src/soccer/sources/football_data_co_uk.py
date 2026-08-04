@@ -68,6 +68,10 @@ DIVISION_NAMES = {
     "UECL": "Conference League",
 }
 
+# Cross-national knockout competitions: stored as results for head-to-head and records, but
+# kept out of domestic team resolution and league-title projections.
+CUP_DIVISIONS = frozenset({"UCL", "UEL", "UECL"})
+
 
 def division_name(code: str) -> str:
     """Human league name for a division code, or the code itself if unmapped."""
