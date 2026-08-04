@@ -176,7 +176,7 @@ def seed_player_events(path) -> None:
 
 
 class TestLiveSnapshot:
-    def test_kpis_count_correctly(self, db: LiveDB) -> None:
+    def test_kpis_reflect_the_live_view(self, db: LiveDB) -> None:
         add_match(
             db, match_id="1", home="A", away="B", competition="EPL", status=MatchStatus.SECOND_HALF
         )
@@ -192,14 +192,16 @@ class TestLiveSnapshot:
             status=MatchStatus.NOT_STARTED,
         )
 
+        # A live match exists, so the live centre shows the live view -- KPIs describe that,
+        # not the whole tracked set (which is dominated by fixtures and old results).
         snap = live_snapshot(db)
-        assert snap.kpis.total == 3
+        assert snap.mode == "live"
         assert snap.kpis.in_play == 1
-        assert snap.kpis.finished == 1
-        assert snap.kpis.competitions == 2
+        assert snap.kpis.total == 1
+        assert snap.kpis.competitions == 1
         assert snap.kpis.sources == 1
 
-    def test_in_play_filter_narrows_rows_but_not_kpis(self, db: LiveDB) -> None:
+    def test_live_view_excludes_finished_while_something_is_on(self, db: LiveDB) -> None:
         add_match(
             db, match_id="1", home="A", away="B", competition="EPL", status=MatchStatus.SECOND_HALF
         )
@@ -207,9 +209,10 @@ class TestLiveSnapshot:
             db, match_id="2", home="C", away="D", competition="EPL", status=MatchStatus.FINISHED
         )
 
-        snap = live_snapshot(db, in_play_only=True)
-        assert len(snap.matches) == 1  # rows filtered
-        assert snap.kpis.total == 2  # KPIs stay honest about the whole set
+        snap = live_snapshot(db)
+        assert snap.mode == "live"
+        assert len(snap.matches) == 1
+        assert snap.matches[0].status.is_in_play
 
     def test_competition_filter(self, db: LiveDB) -> None:
         add_match(
@@ -885,6 +888,50 @@ class TestPlayerProfileData:
         path = tmp_path / "analytics.duckdb"
         seed_player_events(path)
         assert player_percentiles(path, "Nobody", min_minutes=1) == []
+
+
+class TestLiveCentreModes:
+    def test_shows_live_matches_first(self, tmp_path) -> None:
+        from soccer.dashboard.data import live_snapshot
+
+        db = LiveDB(tmp_path / "live.sqlite")
+        add_match(
+            db,
+            match_id="1",
+            home="Arsenal",
+            away="Chelsea",
+            competition="Premier League",
+            status=MatchStatus.SECOND_HALF,
+        )
+        add_match(
+            db,
+            match_id="2",
+            home="Barca",
+            away="Madrid",
+            competition="La Liga",
+            status=MatchStatus.FINISHED,
+        )
+        snap = live_snapshot(db)
+        assert snap.mode == "live"
+        assert snap.matches and all(v.status.is_in_play for v in snap.matches)
+        db.close()
+
+    def test_falls_back_to_recent_results_when_nothing_live(self, tmp_path) -> None:
+        from soccer.dashboard.data import live_snapshot
+
+        db = LiveDB(tmp_path / "live.sqlite")
+        add_match(
+            db,
+            match_id="2",
+            home="Barca",
+            away="Madrid",
+            competition="La Liga",
+            status=MatchStatus.FINISHED,
+        )
+        snap = live_snapshot(db)
+        assert snap.mode == "recent"
+        assert len(snap.matches) == 1 and snap.matches[0].status.is_concluded
+        db.close()
 
 
 class TestUpcomingSeasonBriefing:

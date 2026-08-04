@@ -54,36 +54,46 @@ class LiveSnapshot:
     matches: list[MatchView]
     competition_counts: list[tuple[str, int]]
     """(competition, match count), most matches first -- coverage at a glance."""
+    mode: str = "live"
+    """'live' when matches are in play, else 'recent' (full-time results, last 7 days)."""
 
 
 def live_snapshot(
     db: LiveDB, *, in_play_only: bool = False, competition: str | None = None
 ) -> LiveSnapshot:
+    """The live centre: whatever is in play now, or -- if nothing is -- the last week's
+    full-time results. Ordered by relevance, not by the oldest kickoff on file."""
     store = MatchStateStore(db)
-    all_views = store.list_current()  # unfiltered, for honest KPIs
+    live = store.list_current(in_play_only=True, limit=2000)
+    if live:
+        pool, mode = live, "live"
+    else:
+        pool, mode = store.recent_finished(days=7, limit=300), "recent"
 
     kpis = LiveKpis(
-        total=len(all_views),
-        in_play=sum(1 for v in all_views if v.status.is_in_play),
-        finished=sum(1 for v in all_views if v.status.is_concluded),
-        competitions=len({v.competition for v in all_views}),
-        sources=len({v.source for v in all_views}),
+        total=len(pool),
+        in_play=sum(1 for v in pool if v.status.is_in_play),
+        finished=sum(1 for v in pool if v.status.is_concluded),
+        competitions=len({v.competition for v in pool}),
+        sources=len({v.source for v in pool}),
         last_updated=_last_updated(db),
-        any_stale=any(v.is_stale for v in all_views),
+        any_stale=any(v.is_stale for v in pool),
     )
 
     counts: dict[str, int] = {}
-    for view in all_views:
+    for view in pool:
         counts[view.competition] = counts.get(view.competition, 0) + 1
     competition_counts = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
-    shown = all_views
+    shown = pool
     if in_play_only:
         shown = [v for v in shown if v.status.is_in_play]
     if competition:
         shown = [v for v in shown if v.competition == competition]
 
-    return LiveSnapshot(kpis=kpis, matches=shown, competition_counts=competition_counts)
+    return LiveSnapshot(
+        kpis=kpis, matches=shown, competition_counts=competition_counts, mode=mode
+    )
 
 
 def _last_updated(db: LiveDB) -> datetime | None:

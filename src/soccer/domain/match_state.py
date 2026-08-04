@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from soccer.sources.registry import SOURCES, SourceId
@@ -201,6 +201,21 @@ class MatchStateStore:
         return [v for v in self.list_current(limit=10_000) if v.status is MatchStatus.NOT_STARTED][
             :limit
         ]
+
+    def recent_finished(self, *, days: int = 7, limit: int = 300) -> list[MatchView]:
+        """Concluded matches whose kickoff was within the last `days`, most recent first.
+
+        The everyday fallback when nothing is live: recent full-time results, rather than the
+        oldest rows a plain kickoff-ordered list surfaces once deep fixture history is loaded.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        recent = [
+            v
+            for v in self.list_current(limit=1_000_000)
+            if v.status.is_concluded and v.kickoff_utc >= cutoff
+        ]
+        recent.sort(key=lambda v: v.kickoff_utc, reverse=True)
+        return recent[:limit]
 
 
 @dataclass(frozen=True)

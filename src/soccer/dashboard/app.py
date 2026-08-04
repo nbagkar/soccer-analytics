@@ -2210,17 +2210,21 @@ def main() -> None:
 
     with LiveDB(settings.live_db) as db:
         if page == "Live Centre":
-            snap = live_snapshot(db)  # unfiltered KPIs; filters applied below
+            snap = live_snapshot(db)  # live now, or last week's results if nothing's on
             comps = sorted({c for c, _ in snap.competition_counts})
-            fcols = st.columns([1, 2])
-            only_live = fcols[0].toggle("In play only", value=False)
-            chosen = fcols[1].selectbox("Competition", ["All", *comps])
-            _render_live(
-                live_snapshot(
-                    db,
-                    in_play_only=only_live,
-                    competition=None if chosen == "All" else chosen,
+            if snap.mode == "live":
+                st.caption(
+                    f"**{snap.kpis.in_play} live** across {snap.kpis.competitions} competitions. "
+                    "Refresh on **Home** for the latest."
                 )
+            elif snap.matches:
+                st.caption(
+                    "Nothing is live right now — showing **full-time results from the last "
+                    "7 days**. Refresh on **Home**, or check back on a matchday."
+                )
+            chosen = st.selectbox("Competition", ["All", *comps])
+            _render_live(
+                live_snapshot(db, competition=None if chosen == "All" else chosen)
             )
         else:
             _render_health(health_snapshot(settings, db))
