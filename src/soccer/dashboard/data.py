@@ -400,6 +400,94 @@ def season_briefing(
     )
 
 
+def _next_season_code(code: str) -> str:
+    """The season after `code` (European "2526" -> "2627"); unchanged if not that form."""
+    if len(code) == 4 and code.isdigit():
+        first, second = int(code[:2]), int(code[2:])
+        if (first + 1) % 100 == second:
+            return f"{second % 100:02d}{(second + 1) % 100:02d}"
+    return code
+
+
+def upcoming_season_briefing(
+    live_db: Path,
+    analytics_db: Path,
+    division: str,
+    *,
+    n_sims: int = 10_000,
+    top_n: int = 4,
+    relegation: int = 3,
+    seed: int = 1,
+):
+    """Monte Carlo the UPCOMING season for a division from its real loaded fixtures.
+
+    The team set is the actual new-season line-up -- taken from the loaded fixtures, so it
+    includes promoted clubs and drops relegated ones -- rated by the recency-weighted model
+    and simulated as a round-robin (schedule order doesn't affect a full-season points
+    projection). A club with no recent top-flight history is given a 'typical promoted side'
+    prior (the average of the model's three weakest teams), so the projection is honest about
+    their unknown level. Returns (SeasonBriefing, promoted_display_names) or None.
+    """
+    from soccer.models.dixon_coles import fit_dixon_coles
+    from soccer.models.simulation import simulate_season
+
+    if not Path(live_db).exists():
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        anchor_season = adb.latest_season(division)
+        window = (
+            adb.recent_outcomes_through(division, anchor_season, n_seasons=FORECAST_SEASONS)
+            if anchor_season
+            else []
+        )
+    if not window:
+        return None
+    model = fit_dixon_coles(window, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
+    model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
+
+    comps = {c for c, d in COMPETITION_TO_DIVISION.items() if d == division}
+    with LiveDB(live_db) as db:
+        fixture_teams = {
+            side
+            for v in MatchStateStore(db).upcoming(limit=5000)
+            if v.competition in comps
+            for side in (v.home, v.away)
+        }
+    if len(fixture_teams) < 4:
+        return None
+
+    names: dict[str, str] = {}
+    for raw in fixture_teams:
+        disp, norm = resolve_canonical_name(raw, model_names)
+        names.setdefault(norm, disp)
+
+    promoted = sorted(n for n in names if n not in model.strengths)
+    if promoted:
+        # A newly promoted side with no top-flight history: rate it like the league's three
+        # weakest established teams -- honest that it is an unknown likely to struggle.
+        weakest = sorted(model.strengths, key=lambda t: model.strengths[t] + model.defence[t])[:3]
+        prior_attack = sum(model.strengths[t] for t in weakest) / len(weakest)
+        prior_defence = sum(model.defence[t] for t in weakest) / len(weakest)
+        for norm in promoted:
+            model.add_team(norm, prior_attack, prior_defence)
+
+    teams = sorted(names)
+    fixtures = [(home, away) for home in teams for away in teams if home != away]
+    result = simulate_season(
+        model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
+    )
+    briefing = SeasonBriefing(
+        season=_next_season_code(anchor_season),
+        division=division,
+        n_sims=n_sims,
+        top_n=top_n,
+        relegation=relegation,
+        projections=result.projections,
+        names=names,
+    )
+    return briefing, [names[n] for n in promoted]
+
+
 # Recency-aware forecasting: fit on the last few seasons and re-fit as new results land,
 # so the model tracks current form instead of one frozen old season. Time-decay was the
 # obvious next knob, but a walk-forward backtest measured it DOWN skill monotonically
@@ -1114,6 +1202,15 @@ _FDCOUK_ALIASES_RAW = {
     "Stade Brestois 29": "Brest",
     "Royale Union Saint-Gilloise": "St. Gilloise",
     "Paris Saint-Germain FC": "Paris SG",  # else a token-subset grabs the new "Paris FC"
+    # Established clubs whose football-data.org name isn't a token-subset of the terse
+    # football-data.co.uk one, so a season projection wouldn't recognise them.
+    "Nottingham Forest": "Nott'm Forest",
+    "Nottingham Forest FC": "Nott'm Forest",
+    "Wolverhampton Wanderers FC": "Wolves",
+    "Borussia Mönchengladbach": "M'gladbach",
+    "Hamburger SV": "Hamburg",
+    "Olympique Lyonnais": "Lyon",
+    "Stade Rennais FC 1901": "Rennes",
 }
 FDCOUK_ALIASES: dict[str, str] = {normalize_name(k): v for k, v in _FDCOUK_ALIASES_RAW.items()}
 

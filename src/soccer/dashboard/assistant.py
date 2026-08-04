@@ -826,9 +826,16 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     if division in _CUP_DIVISIONS:
         return _cup_note(division)
 
-    from soccer.dashboard.data import season_briefing
+    from soccer.dashboard.data import season_briefing, upcoming_season_briefing
 
-    briefing = season_briefing(analytics_db, season, division, n_sims=4000)
+    # Prefer the upcoming-season projection (the real new-season line-up from fixtures) when
+    # fixtures are loaded; otherwise fall back to the latest loaded season.
+    upcoming = (
+        upcoming_season_briefing(live_db, analytics_db, division, n_sims=4000) if live_db else None
+    )
+    briefing = (
+        upcoming[0] if upcoming else season_briefing(analytics_db, season, division, n_sims=4000)
+    )
     if briefing is None:
         return None
     names = briefing.names
@@ -842,7 +849,7 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
             name = names.get(proj.team, proj.team)
             return Reply(
                 f"**{name}** — {division_name(division)} "
-                f"{season_label(season)}: **{proj.title_pct:.0%}** to win the title, "
+                f"{season_label(briefing.season)}: **{proj.title_pct:.0%}** to win the title, "
                 f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation. "
                 "A Monte-Carlo sim off recent strengths, blind to transfers.",
                 suggestions=["Who are the favourites?", f"How is {name}'s form?"],
@@ -860,9 +867,9 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     ]
     fav = projs[0]
     return Reply(
-        f"**{division_name(division)} {season_label(season)} projection** — "
+        f"**{division_name(division)} {season_label(briefing.season)} projection** — "
         f"{names.get(fav.team, fav.team)} are favourites at **{fav.title_pct:.0%}** to win it. "
-        "A pre-season model off last season's strengths, blind to transfers.",
+        "A pre-season model off recent strengths, blind to transfers.",
         table=rows,
         suggestions=["Who is in form?", "Show upcoming fixtures"],
     )

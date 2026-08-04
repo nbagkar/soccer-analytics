@@ -48,6 +48,7 @@ from soccer.dashboard.data import (
     team_dossier,
     team_form,
     underlying_table,
+    upcoming_season_briefing,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
@@ -146,6 +147,7 @@ def _render_home(settings) -> None:
             with st.spinner("Fetching upcoming fixtures…"):
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
+            _cached_upcoming_season_briefing.clear()  # re-project on the new fixtures
             _go("Home")
 
     st.caption(
@@ -485,6 +487,13 @@ def _cached_season_briefing(db_path: str, season: str, division: str):
     from pathlib import Path
 
     return season_briefing(Path(db_path), season, division)
+
+
+@st.cache_data(ttl=600, show_spinner="Projecting the upcoming season…")
+def _cached_upcoming_season_briefing(live_db: str, analytics_db: str, division: str):
+    from pathlib import Path
+
+    return upcoming_season_briefing(Path(live_db), Path(analytics_db), division)
 
 
 @st.cache_data(ttl=600, show_spinner="Forecasting the season's fixtures…")
@@ -2050,17 +2059,51 @@ def main() -> None:
                     icon=":material/download:",
                 )
             else:
-                season, division = _league_season_pickers(
-                    available, key="pred_season", latest_only=True
+                # The projection is always for the UPCOMING season, so pick a league only.
+                by_league = {division_name(d): d for _s, d, _n in available}
+                league_names = sorted(by_league)
+                default_idx = (
+                    league_names.index("Premier League")
+                    if "Premier League" in league_names
+                    else 0
                 )
-                st.caption(
-                    "Title, top-four and relegation odds from simulating the rest of the season."
+                league = st.selectbox(
+                    "League", league_names, index=default_idx, key="pred_season_league"
                 )
-                briefing = _cached_season_briefing(str(settings.analytics_db), season, division)
-                if briefing is None:
-                    st.info("No results for that selection.")
-                else:
+                division = by_league[league]
+                result = _cached_upcoming_season_briefing(
+                    str(settings.live_db), str(settings.analytics_db), division
+                )
+                if result is not None:
+                    briefing, promoted = result
+                    st.caption(
+                        f"Projecting the **{season_label(briefing.season)}** season from the "
+                        "loaded fixtures and the current model — title, top-four and relegation "
+                        "odds. A clean round-robin among the actual new-season line-up."
+                    )
                     _render_season(briefing)
+                    if promoted:
+                        st.caption(
+                            ":material/info: Newly promoted, with no recent top-flight history "
+                            "— rated as a typical promoted side, so treat their odds as a rough "
+                            f"prior: {', '.join(promoted)}."
+                        )
+                else:
+                    # No upcoming fixtures for this league -> project the latest loaded season.
+                    seasons = [s for s, d, _n in available if d == division]
+                    season = max(seasons, key=season_sort_key)
+                    briefing = _cached_season_briefing(
+                        str(settings.analytics_db), season, division
+                    )
+                    if briefing is None:
+                        st.info("No results or fixtures for that selection.")
+                    else:
+                        st.caption(
+                            f"No upcoming fixtures loaded for {league}, so this projects the "
+                            f"latest loaded season ({season_label(season)}). Load fixtures via "
+                            "**Home → Update fixtures** for an upcoming-season projection."
+                        )
+                        _render_season(briefing)
 
         with card_tab:
             if not available:

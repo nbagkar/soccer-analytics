@@ -47,6 +47,17 @@ class DixonColesModel:
         self.strengths = attack
 
     @property
+    def defence(self) -> dict[str, float]:
+        """Per-team defence strengths (higher = concedes fewer), keyed by normalized name."""
+        return self._defence
+
+    def add_team(self, name: str, attack: float, defence: float) -> None:
+        """Register an extra team the fit never saw (e.g. a newly promoted side) with an
+        explicit attack/defence prior, so it can be included in a simulation."""
+        self._attack[name] = attack
+        self._defence[name] = defence
+
+    @property
     def teams(self) -> list[str]:
         return sorted(self._attack)
 

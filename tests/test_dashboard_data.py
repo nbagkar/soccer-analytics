@@ -887,6 +887,38 @@ class TestPlayerProfileData:
         assert player_percentiles(path, "Nobody", min_minutes=1) == []
 
 
+class TestUpcomingSeasonBriefing:
+    def test_projects_the_fixture_lineup_with_promoted_prior(self, tmp_path) -> None:
+        from soccer.dashboard.data import upcoming_season_briefing
+
+        analytics = tmp_path / "analytics.duckdb"
+        seed_results(analytics, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+
+        # Upcoming PL fixtures: three established clubs plus one with no top-flight history.
+        live = tmp_path / "live.sqlite"
+        db = LiveDB(live)
+        teams = ["Arsenal", "Chelsea", "Fulham", "Newcomers FC"]
+        pairs = [(h, a) for h in teams for a in teams if h != a]
+        for i, (home, away) in enumerate(pairs):
+            add_match(
+                db,
+                match_id=str(i),
+                home=home,
+                away=away,
+                competition="Premier League",
+                status=MatchStatus.NOT_STARTED,
+            )
+        db.close()
+
+        result = upcoming_season_briefing(live, analytics, "E0", n_sims=500, relegation=1)
+        assert result is not None
+        briefing, promoted = result
+        projected = {briefing.names.get(p.team, p.team) for p in briefing.projections}
+        assert projected == set(teams)  # exactly the fixtures' line-up, not last season's
+        assert "Newcomers FC" in promoted  # the club with no history got the promoted prior
+        assert "Brentford" not in projected  # in results but not in the new fixtures -> dropped
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
