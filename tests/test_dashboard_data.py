@@ -1001,3 +1001,25 @@ class TestAppSmoke:
             assert not at.exception, f"Analysis players profile raised: {at.exception}"
         finally:
             config._settings = None
+
+    def test_password_gate_blocks_until_entered(self, tmp_path, monkeypatch) -> None:
+        # With SOCCER_DASHBOARD_PASSWORD set (a public tunnel), the app must stop at a
+        # password prompt before rendering the nav or reaching any data action.
+        pytest.importorskip("streamlit")
+        from importlib.resources import files
+
+        import soccer.config as config
+
+        monkeypatch.setenv("SOCCER_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("SOCCER_DASHBOARD_PASSWORD", "secret")
+        config._settings = None
+        try:
+            from streamlit.testing.v1 import AppTest
+
+            app_path = str(files("soccer.dashboard") / "app.py")
+            at = AppTest.from_file(app_path, default_timeout=60).run()
+            assert not at.exception
+            assert at.text_input, "expected a password field"
+            assert not at.radio, "nav must not render before the password is entered"
+        finally:
+            config._settings = None

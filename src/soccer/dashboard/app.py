@@ -1885,12 +1885,38 @@ def _render_players_page(settings) -> None:
             _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
 
 
+def _require_password() -> None:
+    """Gate the whole app behind SOCCER_DASHBOARD_PASSWORD when it is set.
+
+    Unset (ordinary local use) -> open, unchanged. Set (e.g. when exposing the app over a
+    public Cloudflare tunnel) -> a password is required before anything renders, which also
+    protects the data-download actions on the Home page from the open internet.
+    """
+    import os
+
+    password = os.environ.get("SOCCER_DASHBOARD_PASSWORD")
+    if not password or st.session_state.get("_authed"):
+        return
+    st.title("Soccer Analytics")
+    st.caption("This dashboard is password-protected.")
+    entered = st.text_input(
+        "Password", type="password", label_visibility="collapsed", placeholder="Password"
+    )
+    if entered and entered == password:
+        st.session_state._authed = True
+        st.rerun()
+    elif entered:
+        st.error("Incorrect password.")
+    st.stop()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Soccer Analytics",
         page_icon=":material/sports_soccer:",
         layout="wide",
     )
+    _require_password()
 
     settings = get_settings()
     with st.sidebar:

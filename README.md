@@ -117,6 +117,28 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer prune` | Delete old live-feed snapshots |
 | `soccer init` | Create data directories |
 
+## Share the dashboard (free, public)
+
+The dashboard is a Streamlit **server**, so it can't run on serverless hosts (Vercel,
+Netlify) — and free PaaS tiers (Streamlit Cloud, Render, HF Spaces) use ephemeral disks, so
+they'd re-download the data on every cold start rather than use your loaded-up store.
+
+The free way to expose *this* instance — with all your data, nothing to re-fetch — is a
+Cloudflare quick tunnel to your own machine:
+
+```bash
+brew install cloudflared
+./scripts/serve_public.sh          # prompts for a password, prints a public https URL
+```
+
+It runs the dashboard locally and hands back a `https://<random>.trycloudflare.com` URL. The
+tunnel is up only while the script runs (while your machine is on). Because the Home page can
+trigger data downloads, the script requires a password: set `SOCCER_DASHBOARD_PASSWORD` (or
+enter one when prompted) and the app gates on it. Ctrl-C stops the tunnel and the app.
+
+Note the data licences: fetch-at-runtime for personal analysis is the permitted use — be
+mindful before exposing a public instance widely.
+
 ## Architecture
 
 ```
