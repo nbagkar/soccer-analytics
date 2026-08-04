@@ -292,8 +292,9 @@ class TestRouting:
 
     def test_forecast_gives_a_predicted_scoreline(self, tmp_path) -> None:
         reply = answer("what's the predicted score for Chelsea vs Arsenal", _seed(tmp_path))
-        assert "Predicted score" in reply.text
-        assert re.search(r"\d-\d", reply.text)  # an actual scoreline
+        assert "Expected goals" in reply.text  # leads with the differentiated signal
+        assert "scoreline" in reply.text.lower()
+        assert re.search(r"\d-\d", reply.text)  # an actual scoreline is still shown
 
     def test_forecast_fires_on_two_teams_without_a_keyword(self, tmp_path) -> None:
         # "scoreline" + two clubs must forecast, not get hijacked by a player-name collision.

@@ -1720,11 +1720,13 @@ def _render_fixtures(fixtures) -> None:
         _render_uncovered_fixtures(uncovered)
         return
 
-    hdr = ["Date (UTC)", "Competition", "Match", "Pred", "1", "X", "2", "O2.5", "BTTS", "Favourite"]
+    hdr = [
+        "Date (UTC)", "Competition", "Match", "Exp gls",
+        "1", "X", "2", "O2.5", "BTTS", "Favourite",
+    ]
     body = ""
     for f in forecastable:
         s = f.slate
-        x, y, _ = s.most_likely_score
         home_p, draw_p, away_p = (m.probability for m in s.result)
         over25 = next(o for o in s.over_under if o.line == 2.5).over
         btts_yes = next(m.probability for m in s.btts if m.name == "Yes")
@@ -1733,7 +1735,8 @@ def _render_fixtures(fixtures) -> None:
             f.kickoff_utc.strftime("%m-%d %H:%M"),
             f'<span style="color:#8b8b8b">{_esc(f.competition)}</span>',
             f"{_esc(f.home)} v {_esc(f.away)}",
-            f"<b>{x}-{y}</b>",
+            f'<span style="font-variant-numeric:tabular-nums">'
+            f"{s.home_expected:.1f}-{s.away_expected:.1f}</span>",
             _pct_cell(home_p, home_p >= max(draw_p, away_p)),
             _pct_cell(draw_p, draw_p >= max(home_p, away_p)),
             _pct_cell(away_p, away_p >= max(home_p, draw_p)),
@@ -1749,7 +1752,11 @@ def _render_fixtures(fixtures) -> None:
         f'<table style="{table_style}">{head}{body}</table>',
         unsafe_allow_html=True,
     )
-    st.caption("1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score.")
+    st.caption(
+        "Exp gls = the model's expected goals per side (this is where matches differ — the "
+        "single most-likely scoreline is 1-1 for most games and only ~12% likely, so it's not "
+        "shown). 1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score."
+    )
     _render_uncovered_fixtures(uncovered)
 
 

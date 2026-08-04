@@ -478,10 +478,13 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     lead = max(res, key=res.get)
     text = (
         f"**{home} vs {away}** ({division_name(division)})\n\n"
-        f"- Predicted score: **{x}-{y}** ({p0:.0%}) — then {others}\n"
+        f"- Expected goals: {home} **{slate.home_expected:.1f}**, "
+        f"{away} **{slate.away_expected:.1f}**\n"
         f"- {home} win **{res[home]:.0%}** · draw **{res['Draw']:.0%}** · "
         f"{away} win **{res[away]:.0%}**\n"
-        f"- Over 2.5 goals **{over:.0%}** · both teams score **{btts:.0%}**"
+        f"- Over 2.5 goals **{over:.0%}** · both teams score **{btts:.0%}**\n"
+        f"- Likeliest scoreline {x}-{y} ({p0:.0%}), then {others} — but no single score is "
+        "likely; the expected goals and win odds are the real read"
     )
     expl = forecast_explanation(analytics_db, season, division, home, away)
     if expl is not None:
