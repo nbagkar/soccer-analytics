@@ -105,6 +105,38 @@ _LEAGUE_ALIASES = {
     "liga mx": "MEX",
     "mexico": "MEX",
     "mexican": "MEX",
+    "austrian bundesliga": "AUT",
+    "austria": "AUT",
+    "austrian": "AUT",
+    "danish superliga": "DNK",
+    "superliga": "DNK",
+    "denmark": "DNK",
+    "danish": "DNK",
+    "eliteserien": "NOR",
+    "norway": "NOR",
+    "norwegian": "NOR",
+    "allsvenskan": "SWE",
+    "sweden": "SWE",
+    "swedish": "SWE",
+    "j1 league": "JPN",
+    "j league": "JPN",
+    "japan": "JPN",
+    "japanese": "JPN",
+    "ekstraklasa": "POL",
+    "poland": "POL",
+    "polish": "POL",
+    "liga i": "ROU",
+    "romania": "ROU",
+    "romanian": "ROU",
+    "veikkausliiga": "FIN",
+    "finland": "FIN",
+    "finnish": "FIN",
+    "league of ireland": "IRL",
+    "ireland": "IRL",
+    "irish": "IRL",
+    "chinese super league": "CHN",
+    "china": "CHN",
+    "chinese": "CHN",
     "champions league": "UCL",
     "champions league table": "UCL",
     "ucl": "UCL",
@@ -128,6 +160,7 @@ _TEAM_ALIASES = {
     "reds": "liverpool",
     "toffees": "everton",
     "hammers": "west ham",
+    "psg": "paris sg",
 }
 
 _STOP = {"fc", "afc", "cf", "real", "the", "de", "city", "united", "town", "club"}
@@ -967,15 +1000,18 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
 
     from soccer.dashboard.data import fixture_forecasts
 
+    with AnalyticsDB(analytics_db) as adb:
+        index = _team_index(adb, _loaded_divisions(adb))
+    named = _resolve_teams(q, index)
+    # A named club's next match can be weeks out, past the first slice by kickoff, so pull
+    # the whole loaded window when filtering to a club; stay cheap for the league-wide view.
+    limit = 1000 if named else 60
     fixtures = [
-        f for f in fixture_forecasts(live_db, analytics_db, limit=200) if f.slate is not None
+        f for f in fixture_forecasts(live_db, analytics_db, limit=limit) if f.slate is not None
     ]
     if not fixtures:
         return Reply("No upcoming fixtures with a forecast yet — try **Home → Update fixtures**.")
 
-    with AnalyticsDB(analytics_db) as adb:
-        index = _team_index(adb, _loaded_divisions(adb))
-    named = _resolve_teams(q, index)
     if named:  # a club is named -> that club's own schedule, team-first
         tnorm = _norm(named[0][0])
         mine = [f for f in fixtures if tnorm in _norm(f.home) or tnorm in _norm(f.away)]
@@ -1313,7 +1349,7 @@ def _intent_league_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
 
     from soccer.dashboard.data import league_profile
 
-    divs = named[:4] if len(named) >= 2 else list(loaded)
+    divs = named[:4] if len(named) >= 2 else [d for d in loaded if d not in _CUP_DIVISIONS]
     profiles = [p for p in (league_profile(analytics_db, loaded[d], d) for d in divs) if p]
     if len(profiles) < 2:
         return None

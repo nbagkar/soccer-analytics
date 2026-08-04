@@ -47,6 +47,16 @@ LEAGUE_CHOICES = {
     "Serie A (Brazil)": "BRA",
     "Primera (Argentina)": "ARG",
     "Liga MX (Mexico)": "MEX",
+    "Bundesliga (Austria)": "AUT",
+    "Superliga (Denmark)": "DNK",
+    "Eliteserien (Norway)": "NOR",
+    "Allsvenskan (Sweden)": "SWE",
+    "J1 League (Japan)": "JPN",
+    "Ekstraklasa (Poland)": "POL",
+    "Liga I (Romania)": "ROU",
+    "Veikkausliiga (Finland)": "FIN",
+    "League of Ireland": "IRL",
+    "Super League (China)": "CHN",
 }
 
 # The set a fresh install downloads itself on first launch, so it "just works" without any
@@ -75,6 +85,16 @@ STARTER_LEAGUES = [
     "BRA",
     "ARG",
     "MEX",
+    "AUT",
+    "DNK",
+    "NOR",
+    "SWE",
+    "JPN",
+    "POL",
+    "ROU",
+    "FIN",
+    "IRL",
+    "CHN",
 ]
 
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
@@ -122,8 +142,19 @@ def refresh_scores(settings: Settings) -> str:
     return asyncio.run(run())
 
 
+# How far ahead to sweep fixtures. Chunked into 10-day requests (the API cap), so this is
+# ~5 requests of a 10/min budget -- enough to always find a club's next match, in or out of
+# season, without pulling a whole season's schedule.
+FIXTURE_HORIZON_DAYS = 45
+
+
 def update_fixtures(settings: Settings) -> str:
-    """Pull upcoming fixtures from football-data.org (needs a free token)."""
+    """Pull upcoming fixtures from football-data.org (needs a free token).
+
+    Sweeps the next `FIXTURE_HORIZON_DAYS` across every free competition (chunked past the
+    API's 10-day cap), so a club's next match is found even weeks out or pre-season -- not
+    just whatever falls in the next ten days.
+    """
     if not settings.football_data_org_token:
         return (
             "To load fixtures, add a free football-data.org token to your `.env` "
@@ -143,7 +174,7 @@ def update_fixtures(settings: Settings) -> str:
                 rate_limit_per_minute=settings.football_data_org_rpm,
             ) as fd:
                 summary = await IngestPipeline(db).ingest_football_data(
-                    fd, today, today + timedelta(days=10)
+                    fd, today, today + timedelta(days=FIXTURE_HORIZON_DAYS)
                 )
         return str(summary)
 

@@ -45,12 +45,15 @@ class IngestSummary:
     """States written -- excludes those a more-authoritative source already held."""
     stale: bool = False
     """True if the source served cached data rather than a fresh fetch."""
+    skipped: int = 0
+    """Records skipped as unresolvable -- e.g. a not-yet-drawn knockout tie with no teams."""
 
     def __str__(self) -> str:
         flag = " [STALE]" if self.stale else ""
+        skip = f", {self.skipped} skipped" if self.skipped else ""
         return (
             f"{self.source}: {self.matches_seen} seen, "
-            f"{self.matches_created} new, {self.state_changed} state updates{flag}"
+            f"{self.matches_created} new, {self.state_changed} state updates{skip}{flag}"
         )
 
 
@@ -85,10 +88,16 @@ class IngestPipeline:
             if result.is_stale:
                 summary.stale = True
             for record in result.payload.get("matches", []):
-                observation, state = map_football_data_match(
-                    record, observed_at=result.fetched_at, is_stale=result.is_stale
-                )
-                created, changed = self._apply(observation, state)
+                try:
+                    observation, state = map_football_data_match(
+                        record, observed_at=result.fetched_at, is_stale=result.is_stale
+                    )
+                    created, changed = self._apply(observation, state)
+                except ValueError:
+                    # A not-yet-drawn knockout tie has placeholder/None teams; a wide
+                    # fixture sweep will hit these. Skip the record, keep the sweep going.
+                    summary.skipped += 1
+                    continue
                 summary.matches_seen += 1
                 summary.matches_created += created
                 summary.state_changed += changed

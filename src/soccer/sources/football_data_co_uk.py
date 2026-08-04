@@ -62,6 +62,16 @@ DIVISION_NAMES = {
     "ARG": "Argentina Primera",
     "USA": "MLS",
     "MEX": "Liga MX",
+    "AUT": "Austrian Bundesliga",
+    "DNK": "Danish Superliga",
+    "NOR": "Eliteserien",
+    "SWE": "Allsvenskan",
+    "JPN": "J1 League",
+    "POL": "Ekstraklasa",
+    "ROU": "Liga I",
+    "FIN": "Veikkausliiga",
+    "IRL": "League of Ireland",
+    "CHN": "Chinese Super League",
     # UEFA club competitions (not from football-data.co.uk; ingested via football-data.org).
     "UCL": "Champions League",
     "UEL": "Europa League",
@@ -118,7 +128,22 @@ def season_sort_key(season: str) -> int:
 # European division codes (E0, SP1, ...). Used to route a loaded division to the right
 # fetcher when refreshing the current season.
 NEW_LEAGUE_CODES = frozenset(
-    {"ARG", "AUT", "BRA", "CHN", "DNK", "FIN", "IRL", "JPN", "MEX", "NOR", "POL", "ROU", "USA"}
+    {
+        "ARG",
+        "AUT",
+        "BRA",
+        "CHN",
+        "DNK",
+        "FIN",
+        "IRL",
+        "JPN",
+        "MEX",
+        "NOR",
+        "POL",
+        "ROU",
+        "SWE",
+        "USA",
+    }
 )
 
 

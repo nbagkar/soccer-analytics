@@ -29,6 +29,17 @@ FD_MATCH = {
     "score": {"fullTime": {"home": 3, "away": 1}, "halfTime": {"home": 1, "away": 0}},
 }
 
+# A not-yet-drawn knockout tie: the API returns null teams. A wide fixture sweep hits these.
+FD_TBD_MATCH = {
+    "id": 999999,
+    "utcDate": "2026-08-09T18:00:00Z",
+    "status": "SCHEDULED",
+    "competition": {"id": 2001, "name": "UEFA Champions League", "area": {"name": "Europe"}},
+    "homeTeam": {"id": None, "name": None},
+    "awayTeam": {"id": None, "name": None},
+    "score": {"fullTime": {"home": None, "away": None}, "halfTime": {"home": None, "away": None}},
+}
+
 
 class TestFootballDataMapper:
     def test_maps_identity_and_state(self) -> None:
@@ -206,5 +217,33 @@ class TestPipelineIntegration:
         assert view[0].score == "3-1"
         assert view[0].competition == "Eredivisie"
         assert view[0].status is MatchStatus.FINISHED
+        await adapter.aclose()
+        db.close()
+
+    async def test_pipeline_skips_unresolvable_fixture(self, tmp_path) -> None:
+        # A wide fixture sweep can include a not-yet-drawn tie (null teams). It must be
+        # skipped, not abort the whole ingest, and the real match still lands.
+        import httpx
+
+        from soccer.ingest.pipeline import IngestPipeline
+        from soccer.sources.football_data_org import FootballDataOrg
+        from soccer.storage.raw import RawStore
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"matches": [FD_TBD_MATCH, FD_MATCH]})
+        )
+        client = httpx.AsyncClient(
+            base_url="https://api.football-data.org/v4",
+            transport=transport,
+            headers={"X-Auth-Token": "test"},
+        )
+        adapter = FootballDataOrg("test", RawStore(tmp_path / "raw"), client=client)
+        db = LiveDB(tmp_path / "live.sqlite")
+        target = date(2026, 8, 8)
+
+        summary = await IngestPipeline(db).ingest_football_data(adapter, target, target)
+        assert summary.skipped == 1  # the TBD tie skipped, not fatal
+        assert summary.matches_seen == 1  # the real match still ingested
+        assert summary.matches_created == 1
         await adapter.aclose()
         db.close()

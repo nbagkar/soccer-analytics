@@ -1188,6 +1188,7 @@ def fixture_forecasts(
         ups = MatchStateStore(db).upcoming(limit=limit)
 
     models: dict[str, object] = {}
+    model_names: dict[str, dict[str, str]] = {}  # division -> {norm: canonical display}
 
     def model_for(division: str):
         if division not in models:
@@ -1206,19 +1207,27 @@ def fixture_forecasts(
                     model = fit_poisson_shots(
                         outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE
                     )
+                    model_names[division] = {o.home_norm: o.home for o in outcomes} | {
+                        o.away_norm: o.away for o in outcomes
+                    }
             models[division] = model
         return models[division]
 
     out: list[FixtureForecast] = []
     for v in ups:
         slate = None
+        home, away = v.home, v.away
         division = COMPETITION_TO_DIVISION.get(v.competition)
         if division:
             model = model_for(division)
             if model:
                 hn, an = resolve(v.home, model), resolve(v.away, model)
                 if hn and an:
+                    # Show the league's own spelling ("Bayern Munich", not "FC Bayern
+                    # München"), so fixtures read consistently and a club filter matches.
+                    names = model_names.get(division, {})
+                    home, away = names.get(hn, v.home), names.get(an, v.away)
                     lam, mu = model.expected_goals(hn, an)
-                    slate = compute_markets(v.home, v.away, lam, mu, model.rho)
-        out.append(FixtureForecast(v.kickoff_utc, v.competition, v.home, v.away, slate))
+                    slate = compute_markets(home, away, lam, mu, model.rho)
+        out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate))
     return out
