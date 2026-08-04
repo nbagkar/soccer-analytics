@@ -37,13 +37,45 @@ LEAGUE_CHOICES = {
     "Serie B (Italy)": "I2",
     "Ligue 1 (France)": "F1",
     "Ligue 2 (France)": "F2",
+    "Eredivisie (Netherlands)": "N1",
+    "Primeira Liga (Portugal)": "P1",
+    "Pro League (Belgium)": "B1",
+    "Süper Lig (Turkey)": "T1",
+    "Super League (Greece)": "G1",
+    "Premiership (Scotland)": "SC0",
     "MLS (USA)": "USA",
+    "Serie A (Brazil)": "BRA",
+    "Primera (Argentina)": "ARG",
+    "Liga MX (Mexico)": "MEX",
 }
 
 # The set a fresh install downloads itself on first launch, so it "just works" without any
 # clicks -- fast, token-free league results that power tables, forecasts, trends, records
-# and the season oracle. Kept to the leagues actually wanted.
-STARTER_LEAGUES = ["E0", "E1", "E2", "E3", "SP1", "SP2", "D1", "D2", "I1", "I2", "F1", "F2", "USA"]
+# and the season oracle. The top divisions of the major football nations.
+STARTER_LEAGUES = [
+    "E0",
+    "E1",
+    "E2",
+    "E3",
+    "SP1",
+    "SP2",
+    "D1",
+    "D2",
+    "I1",
+    "I2",
+    "F1",
+    "F2",
+    "N1",
+    "P1",
+    "B1",
+    "T1",
+    "G1",
+    "SC0",
+    "USA",
+    "BRA",
+    "ARG",
+    "MEX",
+]
 
 # Friendly player-data pack -> (StatsBomb competition_id, season_id, approx match count).
 EVENT_PACKS = {

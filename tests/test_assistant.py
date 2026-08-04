@@ -238,6 +238,14 @@ class TestRouting:
         assert "Championship" in reply.text
         assert reply.table
 
+    def test_new_league_alias(self, tmp_path) -> None:
+        # A newly added league (Eredivisie) resolves from its plain name.
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="N1", teams=["Ajax", "PSV", "Feyenoord", "AZ"])
+        reply = answer("who's top of the eredivisie?", path)
+        assert "Eredivisie" in reply.text
+        assert reply.table
+
     def test_past_season_resolution(self, tmp_path) -> None:
         path = tmp_path / "analytics.duckdb"
         teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
