@@ -214,6 +214,105 @@ def load_full_history(
     return f"Loaded {total} matches of history across {len(STARTER_LEAGUES)} leagues."
 
 
+# football-data.org's free tier serves only recent seasons of the Champions League (older
+# ones 403); its competition endpoint returns a whole season, sidestepping the 10-day
+# /matches cap. Europa and Conference League are above the free tier -- not reachable at $0.
+CHAMPIONS_LEAGUE_SEASONS = (2023, 2024, 2025)  # start years -> 2023/24, 2024/25, 2025/26
+
+
+def _fdorg_result(match: dict, division: str, season_code: str):
+    """Map a finished football-data.org match to a MatchResult, or None if not final."""
+    from soccer.domain.names import normalize_name
+    from soccer.sources.football_data_co_uk import MatchResult
+
+    ft = match.get("score", {}).get("fullTime", {})
+    hg, ag = ft.get("home"), ft.get("away")
+    if hg is None or ag is None:
+        return None
+    home, away = match["homeTeam"]["name"], match["awayTeam"]["name"]
+    ht = match.get("score", {}).get("halfTime") or {}
+    kickoff = datetime.fromisoformat(match["utcDate"].replace("Z", "+00:00")).date()
+    return MatchResult(
+        season=season_code,
+        division=division,
+        match_date=kickoff,
+        home=home,
+        away=away,
+        home_norm=normalize_name(home),
+        away_norm=normalize_name(away),
+        fthg=int(hg),
+        ftag=int(ag),
+        ftr="H" if hg > ag else "A" if ag > hg else "D",
+        hthg=ht.get("home"),
+        htag=ht.get("away"),
+        home_shots=None,
+        away_shots=None,
+        home_shots_target=None,
+        away_shots_target=None,
+        home_corners=None,
+        away_corners=None,
+        home_yellows=None,
+        away_yellows=None,
+        home_reds=None,
+        away_reds=None,
+        referee=None,
+    )
+
+
+def load_champions_league(
+    settings: Settings,
+    *,
+    seasons: tuple[int, ...] = CHAMPIONS_LEAGUE_SEASONS,
+    on_progress: Callable | None = None,
+) -> str:
+    """Backfill Champions League results (football-data.org) into the analytics store.
+
+    Only the free-tier-reachable recent seasons load; an out-of-window season 403s and is
+    skipped. Stored under division "UCL" so head-to-head and records pick them up without
+    disturbing the domestic-league tables.
+    """
+    if not settings.football_data_org_token:
+        return (
+            "The Champions League needs a free football-data.org token "
+            "(SOCCER_FOOTBALL_DATA_ORG_TOKEN in your .env)."
+        )
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+
+    async def run() -> list:
+        import httpx
+
+        from soccer.sources.football_data_org import FootballDataOrg
+
+        out: list = []
+        async with FootballDataOrg(
+            settings.football_data_org_token,
+            raw,
+            rate_limit_per_minute=settings.football_data_org_rpm,
+        ) as fd:
+            for i, year in enumerate(seasons, 1):
+                code = f"{year % 100:02d}{(year + 1) % 100:02d}"
+                try:
+                    res = await fd.competition_matches("CL", season=year)
+                except httpx.HTTPStatusError:
+                    continue  # season not on the free tier
+                for m in res.payload.get("matches", []):
+                    if m.get("status") == "FINISHED":
+                        r = _fdorg_result(m, "UCL", code)
+                        if r:
+                            out.append(r)
+                if on_progress:
+                    on_progress(i, len(seasons))
+        return out
+
+    results = asyncio.run(run())
+    if not results:
+        return "No Champions League matches were reachable on the free tier."
+    with AnalyticsDB(settings.analytics_db) as adb:
+        adb.load_results(results)
+    return f"Loaded {len(results)} Champions League matches (division UCL)."
+
+
 def remove_league(settings: Settings, division: str) -> str:
     """Delete a league's results so it no longer appears in the dashboard."""
     if not settings.analytics_db.exists():

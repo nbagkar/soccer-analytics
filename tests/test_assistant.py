@@ -246,6 +246,29 @@ class TestRouting:
         assert "Eredivisie" in reply.text
         assert reply.table
 
+    def test_cup_standings_carry_a_caveat(self, tmp_path) -> None:
+        # Champions League table is reachable but honestly flagged (knockouts decide it).
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="UCL", teams=["Real Madrid", "Bayern", "PSG", "Inter"])
+        reply = answer("champions league standings", path)
+        assert "Champions League" in reply.text
+        assert "trophy winner" in reply.text.lower()  # the caveat
+        assert reply.table
+
+    def test_who_wins_a_cup_is_honest(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="UCL", teams=["Real Madrid", "Bayern", "PSG", "Inter"])
+        reply = answer("who will win the champions league", path)
+        assert "knockout" in reply.text.lower()  # no fake title projection
+
+    def test_cup_does_not_hijack_domestic_resolution(self, tmp_path) -> None:
+        # A club that plays in both its league and a cup must resolve to its league.
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        seed_results(path, division="UCL", teams=["Arsenal", "Real Madrid", "Bayern", "PSG"])
+        reply = answer("tell me about Arsenal", path)
+        assert "Premier League" in reply.text  # its league, not the Champions League
+
     def test_past_season_resolution(self, tmp_path) -> None:
         path = tmp_path / "analytics.duckdb"
         teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]

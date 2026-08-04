@@ -100,7 +100,15 @@ _LEAGUE_ALIASES = {
     "liga mx": "MEX",
     "mexico": "MEX",
     "mexican": "MEX",
+    "champions league": "UCL",
+    "champions league table": "UCL",
+    "ucl": "UCL",
 }
+
+# UEFA knockout competitions: stored as results so head-to-head and records use them, but
+# they have no domestic-style league title, so they're kept out of team resolution and the
+# title/honours projections (which would otherwise read a phase table as a trophy).
+_CUP_DIVISIONS = {"UCL", "UEL", "UECL"}
 
 # Common team nicknames -> the football-data.co.uk spelling, for name resolution.
 _TEAM_ALIASES = {
@@ -263,9 +271,13 @@ def _league_and_season(q: str, adb: AnalyticsDB, loaded: dict[str, str]) -> tupl
 
 
 def _team_index(adb: AnalyticsDB, loaded: dict[str, str]) -> dict[str, tuple[str, str, str]]:
-    """{normalized team name: (display, division, season)} across each league's latest season."""
+    """{normalized team name: (display, division, season)} across each league's latest season.
+
+    Domestic leagues are indexed before cup competitions, so a club that plays in both maps
+    to its league (Real Madrid -> La Liga), never to a cup it also appeared in.
+    """
     index: dict[str, tuple[str, str, str]] = {}
-    for division, season in loaded.items():
+    for division, season in sorted(loaded.items(), key=lambda kv: kv[0] in _CUP_DIVISIONS):
         for outcome in adb.outcomes_for(season, division):
             for display in (outcome.home, outcome.away):
                 index.setdefault(_norm(display), (display, division, season))
@@ -652,6 +664,9 @@ def _intent_honours(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         if division is None:
             return None
 
+    if division in _CUP_DIVISIONS:
+        return _cup_note(division)
+
     from soccer.dashboard.data import league_history
 
     hist = league_history(analytics_db, division)
@@ -733,11 +748,23 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
     )
 
 
+def _cup_note(division: str) -> Reply:
+    """Honest deflection for a knockout competition: no league title / roll of honour."""
+    name = division_name(division)
+    return Reply(
+        f"The {name} is a knockout competition, so I don't hold a league title race or a roll "
+        f"of honour for it — only the match results. I can show its **standings** (the league "
+        f"or group phase), **records** (biggest wins, highest-scoring), or a **head-to-head** "
+        f"between two clubs.",
+        suggestions=[f"{name} standings", f"{name} records"],
+    )
+
+
 def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
         r"win the (league|title|season)|winning the (league|title|season)"
         r"|chances? (of|to) win|chance to win|odds (of|to) win|likely to win"
-        r"|who will win|who wins|\btitle\b|champions?|relegat|top four|top 4"
+        r"|who will win|who wins|\btitle\b|champions?\b(?! league)|relegat|top four|top 4"
         r"|finish|title race|win it\b",
         q,
     ):
@@ -754,6 +781,9 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
             division, season = _league_and_season(q, adb, loaded)
         if division is None:
             return None
+
+    if division in _CUP_DIVISIONS:
+        return _cup_note(division)
 
     from soccer.dashboard.data import season_briefing
 
@@ -798,7 +828,7 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
 
 
 def _intent_records(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
-    if not re.search(r"\b(unbeaten|streak|biggest win|highest scoring|record|thrash)\b", q):
+    if not re.search(r"\b(unbeaten|streak|biggest win|highest scoring|records?|thrash)\b", q):
         return None
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
@@ -901,12 +931,20 @@ def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply
         for r in table[:8]
     ]
     leader = table[0]
-    return Reply(
-        f"**{division_name(division)} {season_label(season)}** — "
-        f"**{leader.team}** lead on {leader.points} points.",
-        table=rows,
-        suggestions=[f"Who is in form in {division_name(division)}?", "Who will win the league?"],
-    )
+    if division in _CUP_DIVISIONS:
+        headline = (
+            f"**{division_name(division)} {season_label(season)}** — **{leader.team}** top the "
+            f"table on {leader.points} pts. Note: combined league-phase and knockout points, "
+            "not the trophy winner."
+        )
+        suggestions = [f"Biggest {division_name(division)} wins", "Who is in form?"]
+    else:
+        headline = (
+            f"**{division_name(division)} {season_label(season)}** — "
+            f"**{leader.team}** lead on {leader.points} points."
+        )
+        suggestions = [f"Who is in form in {division_name(division)}?", "Who will win the league?"]
+    return Reply(headline, table=rows, suggestions=suggestions)
 
 
 def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:

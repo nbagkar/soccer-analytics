@@ -344,3 +344,17 @@ class FootballDataOrg:
             )
         params = {"season": season} if season is not None else None
         return await self._get(f"/competitions/{competition}/standings", params)
+
+    async def competition_matches(self, competition: str, season: int | None = None) -> FetchResult:
+        """All matches for one competition-season (e.g. Champions League).
+
+        The competition-scoped endpoint returns a whole season at once, so it sidesteps the
+        10-day cap on the global `/matches`. The free tier only serves recent seasons for a
+        given competition (older ones 403); callers should skip a 403 rather than fail.
+        """
+        if competition not in ALL_KNOWN_COMPETITIONS:
+            raise ValueError(
+                f"Unknown competition code {competition!r}. Known: {sorted(ALL_KNOWN_COMPETITIONS)}"
+            )
+        params = {"season": season} if season is not None else None
+        return await self._get(f"/competitions/{competition}/matches", params)

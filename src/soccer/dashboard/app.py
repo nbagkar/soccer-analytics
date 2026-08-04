@@ -176,6 +176,13 @@ def _render_data_manager(settings) -> None:
             )
             bar.empty()
             st.success(msg)
+        st.caption(
+            "Champions League results (recent seasons, via football-data.org) — powers "
+            "head-to-head and records. Needs a free football-data.org token."
+        )
+        if st.button("Load Champions League", key="add_ucl"):
+            with st.spinner("Fetching Champions League results…"):
+                st.success(actions.load_champions_league(settings))
 
     with st.expander("Add player data (StatsBomb events)", icon=":material/groups:"):
         st.caption(

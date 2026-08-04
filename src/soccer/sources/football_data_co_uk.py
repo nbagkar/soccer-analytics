@@ -62,6 +62,10 @@ DIVISION_NAMES = {
     "ARG": "Argentina Primera",
     "USA": "MLS",
     "MEX": "Liga MX",
+    # UEFA club competitions (not from football-data.co.uk; ingested via football-data.org).
+    "UCL": "Champions League",
+    "UEL": "Europa League",
+    "UECL": "Conference League",
 }
 
 
