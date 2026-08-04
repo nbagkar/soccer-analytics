@@ -1664,6 +1664,13 @@ def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> Non
 
 
 def _render_fixtures(fixtures) -> None:
+    comps = sorted({f.competition for f in fixtures})
+    if len(comps) > 1:
+        choice = st.selectbox(
+            "Competition", ["All competitions", *comps], key="fixtures_competition"
+        )
+        if choice != "All competitions":
+            fixtures = [f for f in fixtures if f.competition == choice]
     forecastable = [f for f in fixtures if f.slate is not None]
     uncovered = [f for f in fixtures if f.slate is None]
     st.caption(
@@ -1672,10 +1679,11 @@ def _render_fixtures(fixtures) -> None:
     )
     if not forecastable:
         st.info(
-            "No forecastable fixtures yet. Go to **Home** to update fixtures and add a "
+            "No forecastable fixtures here yet. Go to **Home** to update fixtures and add a "
             "league, then check back.",
             icon=":material/event_upcoming:",
         )
+        _render_uncovered_fixtures(uncovered)
         return
 
     hdr = ["Date (UTC)", "Competition", "Match", "Pred", "1", "X", "2", "O2.5", "BTTS", "Favourite"]
@@ -1708,22 +1716,26 @@ def _render_fixtures(fixtures) -> None:
         unsafe_allow_html=True,
     )
     st.caption("1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score.")
+    _render_uncovered_fixtures(uncovered)
 
-    if uncovered:
-        with st.expander(f"{len(uncovered)} upcoming fixtures without a forecast"):
-            st.caption(
-                "No loaded model covers these -- a promoted team absent from last season, "
-                "or a competition without loaded history. Listed honestly, not hidden."
-            )
-            st.markdown(
-                "".join(
-                    f'<div style="font-size:0.85rem;padding:1px 0">'
-                    f'<span style="color:#8b8b8b">{f.kickoff_utc.strftime("%m-%d")} · '
-                    f"{_esc(f.competition)}</span> &nbsp; {_esc(f.home)} v {_esc(f.away)}</div>"
-                    for f in uncovered
-                ),
-                unsafe_allow_html=True,
-            )
+
+def _render_uncovered_fixtures(uncovered) -> None:
+    if not uncovered:
+        return
+    with st.expander(f"{len(uncovered)} upcoming fixtures without a forecast"):
+        st.caption(
+            "No loaded model covers these -- a promoted team absent from last season, "
+            "or a competition without loaded history. Listed honestly, not hidden."
+        )
+        st.markdown(
+            "".join(
+                f'<div style="font-size:0.85rem;padding:1px 0">'
+                f'<span style="color:#8b8b8b">{f.kickoff_utc.strftime("%m-%d")} · '
+                f"{_esc(f.competition)}</span> &nbsp; {_esc(f.home)} v {_esc(f.away)}</div>"
+                for f in uncovered
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 def _pct_cell(p: float, is_max: bool) -> str:

@@ -1002,6 +1002,53 @@ class TestAppSmoke:
         finally:
             config._settings = None
 
+    def test_upcoming_competition_filter(self, tmp_path, monkeypatch) -> None:
+        # With upcoming fixtures across two competitions, the Upcoming tab offers a
+        # Competition filter, and picking one narrows the list without error.
+        pytest.importorskip("streamlit")
+        from importlib.resources import files
+
+        import soccer.config as config
+
+        analytics = tmp_path / "analytics.duckdb"
+        seed_results(analytics, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        seed_results(analytics, division="N1", teams=["Ajax", "PSV", "Feyenoord", "AZ"])
+        build = LiveDB(tmp_path / "live.sqlite")
+        add_match(
+            build,
+            match_id="1",
+            home="Arsenal",
+            away="Chelsea",
+            competition="Premier League",
+            status=MatchStatus.NOT_STARTED,
+        )
+        add_match(
+            build,
+            match_id="2",
+            home="Ajax",
+            away="PSV",
+            competition="Eredivisie",
+            status=MatchStatus.NOT_STARTED,
+        )
+        build.close()
+
+        monkeypatch.setenv("SOCCER_DATA_DIR", str(tmp_path))
+        config._settings = None
+        try:
+            from streamlit.testing.v1 import AppTest
+
+            app_path = str(files("soccer.dashboard") / "app.py")
+            at = AppTest.from_file(app_path, default_timeout=120).run()
+            at.radio[0].set_value("Predictions").run()
+            assert not at.exception, f"Predictions raised: {at.exception}"
+            sb = [s for s in at.selectbox if s.label == "Competition"]
+            assert sb, "expected a Competition filter on the Upcoming tab"
+            assert {"Premier League", "Eredivisie"} <= set(sb[0].options)
+            sb[0].set_value("Eredivisie").run()
+            assert not at.exception, f"filtering raised: {at.exception}"
+        finally:
+            config._settings = None
+
     def test_password_gate_blocks_until_entered(self, tmp_path, monkeypatch) -> None:
         # With SOCCER_DASHBOARD_PASSWORD set (a public tunnel), the app must stop at a
         # password prompt before rendering the nav or reaching any data action.
