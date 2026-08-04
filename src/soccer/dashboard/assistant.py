@@ -147,14 +147,13 @@ _LEAGUE_ALIASES = {
 # title/honours projections (which would otherwise read a phase table as a trophy).
 _CUP_DIVISIONS = CUP_DIVISIONS
 
-# Common team nicknames -> the football-data.co.uk spelling, for name resolution.
+# Common team nicknames -> the football-data.co.uk spelling, for name resolution. These are
+# distinctive, so appending the canonical whenever the nickname appears is safe.
 _TEAM_ALIASES = {
     "spurs": "tottenham",
     "man city": "man city",
-    "city": "man city",
     "man utd": "man united",
     "man u": "man united",
-    "united": "man united",
     "wolves": "wolves",
     "gunners": "arsenal",
     "reds": "liverpool",
@@ -162,6 +161,26 @@ _TEAM_ALIASES = {
     "hammers": "west ham",
     "psg": "paris sg",
 }
+
+# Bare "United"/"City" colloquially mean the Manchester clubs -- but they're also the tail of
+# a dozen other clubs (Sheffield/Leeds/Newcastle United, Leicester/Norwich City). Resolving
+# these by blind substring made "Sheffield United" drag in Man United, so they get a guarded
+# pass (see _resolve_teams): fire only when the word isn't part of a real club reference.
+_AMBIGUOUS_ALIASES = {
+    "united": "man united",
+    "city": "man city",
+}
+
+# Words that may sit right before a bare "United"/"City" without making it a club's suffix
+# ("vs United", "is City") -- as opposed to a club-name word ("Sheffield United").
+_ALIAS_STOPWORDS = frozenset(
+    {
+        "vs", "v", "versus", "against", "and", "or", "the", "a", "an", "is", "are",
+        "was", "were", "how", "hows", "will", "for", "about", "of", "to", "beat",
+        "play", "playing", "between", "with", "predicted", "score", "on", "at",
+        "this", "that", "do", "does", "did", "who", "whos", "what", "whats",
+    }
+)
 
 _STOP = {"fc", "afc", "cf", "real", "the", "de", "city", "united", "town", "club"}
 
@@ -329,6 +348,7 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
         if alias in q:
             aliased = f"{aliased} {canonical}"
     hits: dict[str, tuple[int, tuple[str, str, str]]] = {}
+    consumed: list[tuple[int, int]] = []  # spans of real club names within the question
     for norm_name in sorted(index, key=len, reverse=True):  # longest first, so 'man city' wins
         if not norm_name:
             continue
@@ -339,6 +359,25 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
         display = index[norm_name][0]
         if m and display not in hits:
             hits[display] = (m.start(), index[norm_name])
+            if m.start() < len(q):  # a literal club in the query, not an appended alias
+                consumed.append((m.start(), m.end()))
+    # Bare "United"/"City" -> the Manchester clubs, but only where the word isn't already
+    # part of a real club: inside a resolved name ("Sheffield United"), directly after one
+    # (a suffix the index omits, "Newcastle United" stored as "Newcastle"), or trailing a
+    # club-name word even for an unloaded side. Otherwise it's the colloquial Manchester ref.
+    for alias, canonical in _AMBIGUOUS_ALIASES.items():
+        display = index.get(canonical, (None,))[0]
+        if display is None or display in hits:
+            continue
+        for am in re.finditer(rf"\b{re.escape(alias)}\b", q):
+            start = am.start()
+            if any(s <= start < e or (e <= start and not q[e:start].strip()) for s, e in consumed):
+                continue
+            prev = q[:start].split()
+            if prev and prev[-1] not in _ALIAS_STOPWORDS and len(prev[-1]) >= 5:
+                continue
+            hits[display] = (start, index[canonical])
+            break
     return [entry for _pos, entry in sorted(hits.values(), key=lambda pe: pe[0])]
 
 

@@ -282,6 +282,34 @@ class TestRouting:
         assert names[:2] == ["Paris SG", "Arsenal"]
         assert "Aris" not in names
 
+    def test_united_city_suffix_does_not_summon_manchester(self) -> None:
+        # "Sheffield United" must not drag in Man United (the "united" nickname alias), and a
+        # suffix the index omits ("Newcastle United" stored as "Newcastle") must stay itself.
+        from soccer.dashboard.assistant import _resolve_teams
+
+        index = {
+            "sheffield united": ("Sheffield United", "E0", "2526"),
+            "man united": ("Man United", "E0", "2526"),
+            "newcastle": ("Newcastle", "E0", "2526"),
+            "leicester": ("Leicester", "E0", "2526"),
+            "man city": ("Man City", "E0", "2526"),
+            "arsenal": ("Arsenal", "E0", "2526"),
+        }
+        # A real "United"/"City" club must resolve to itself and NOTHING from Manchester.
+        assert [t[0] for t in _resolve_teams("sheffield united vs arsenal", index)] == [
+            "Sheffield United",
+            "Arsenal",
+        ]
+        assert [t[0] for t in _resolve_teams("newcastle united vs leicester city", index)] == [
+            "Newcastle",
+            "Leicester",
+        ]
+        # But the bare colloquial reference must STILL reach the Manchester clubs.
+        assert [t[0] for t in _resolve_teams("united vs city", index)] == [
+            "Man United",
+            "Man City",
+        ]
+
     def test_past_season_resolution(self, tmp_path) -> None:
         path = tmp_path / "analytics.duckdb"
         teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
