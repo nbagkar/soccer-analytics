@@ -247,3 +247,30 @@ class TestPipelineIntegration:
         assert summary.matches_created == 1
         await adapter.aclose()
         db.close()
+
+    async def test_pipeline_ingests_competition_fixtures(self, tmp_path) -> None:
+        # The per-competition path pulls a whole season at once; each competition's matches
+        # flow through the same map -> resolve -> persist as the date-range sweep.
+        import httpx
+
+        from soccer.ingest.pipeline import IngestPipeline
+        from soccer.sources.football_data_org import FootballDataOrg
+        from soccer.storage.raw import RawStore
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"matches": [FD_MATCH]})
+        )
+        client = httpx.AsyncClient(
+            base_url="https://api.football-data.org/v4",
+            transport=transport,
+            headers={"X-Auth-Token": "test"},
+        )
+        adapter = FootballDataOrg("test", RawStore(tmp_path / "raw"), client=client)
+        db = LiveDB(tmp_path / "live.sqlite")
+
+        summary = await IngestPipeline(db).ingest_football_data_competitions(adapter, ["DED"])
+        assert summary.matches_seen == 1
+        assert summary.matches_created == 1
+        assert MatchStateStore(db).list_current()[0].competition == "Eredivisie"
+        await adapter.aclose()
+        db.close()

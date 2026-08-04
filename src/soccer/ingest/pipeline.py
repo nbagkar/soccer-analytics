@@ -82,26 +82,48 @@ class IngestPipeline:
         self, adapter: FootballDataOrg, date_from: date, date_to: date
     ) -> IngestSummary:
         summary = IngestSummary(source="football_data_org")
-        results = await adapter.matches_over_range(date_from, date_to)
-
-        for result in results:
-            if result.is_stale:
-                summary.stale = True
-            for record in result.payload.get("matches", []):
-                try:
-                    observation, state = map_football_data_match(
-                        record, observed_at=result.fetched_at, is_stale=result.is_stale
-                    )
-                    created, changed = self._apply(observation, state)
-                except ValueError:
-                    # A not-yet-drawn knockout tie has placeholder/None teams; a wide
-                    # fixture sweep will hit these. Skip the record, keep the sweep going.
-                    summary.skipped += 1
-                    continue
-                summary.matches_seen += 1
-                summary.matches_created += created
-                summary.state_changed += changed
+        for result in await adapter.matches_over_range(date_from, date_to):
+            self._apply_fd_result(result, summary)
         return summary
+
+    async def ingest_football_data_competitions(
+        self, adapter: FootballDataOrg, competitions: list[str]
+    ) -> IngestSummary:
+        """Full current-season fixtures for each competition (whole seasons at once).
+
+        The competition-scoped endpoint returns an entire season, so this reaches the full
+        released fixture list -- not just the next few days a date-range sweep can. A
+        competition the free tier cannot serve for the current season is skipped.
+        """
+        import httpx
+
+        summary = IngestSummary(source="football_data_org")
+        for competition in competitions:
+            try:
+                result = await adapter.competition_matches(competition)
+            except httpx.HTTPStatusError:
+                continue
+            self._apply_fd_result(result, summary)
+        return summary
+
+    def _apply_fd_result(self, result, summary: IngestSummary) -> None:
+        """Apply every football-data.org match in one fetch, skipping unresolvable records."""
+        if result.is_stale:
+            summary.stale = True
+        for record in result.payload.get("matches", []):
+            try:
+                observation, state = map_football_data_match(
+                    record, observed_at=result.fetched_at, is_stale=result.is_stale
+                )
+                created, changed = self._apply(observation, state)
+            except ValueError:
+                # A not-yet-drawn knockout tie has placeholder/None teams; skip it and
+                # keep going rather than aborting the whole sweep.
+                summary.skipped += 1
+                continue
+            summary.matches_seen += 1
+            summary.matches_created += created
+            summary.state_changed += changed
 
     async def ingest_thesportsdb(self, adapter: TheSportsDB) -> IngestSummary:
         summary = IngestSummary(source="thesportsdb")

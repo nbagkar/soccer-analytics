@@ -1003,9 +1003,10 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     with AnalyticsDB(analytics_db) as adb:
         index = _team_index(adb, _loaded_divisions(adb))
     named = _resolve_teams(q, index)
-    # A named club's next match can be weeks out, past the first slice by kickoff, so pull
-    # the whole loaded window when filtering to a club; stay cheap for the league-wide view.
-    limit = 1000 if named else 60
+    # A named club's next match can be weeks out, past the first slice by kickoff, so pull a
+    # wide window when filtering to a club (its next game is always near the front); stay
+    # cheap for the league-wide view. Slates are computed per fixture, so keep this bounded.
+    limit = 500 if named else 60
     fixtures = [
         f for f in fixture_forecasts(live_db, analytics_db, limit=limit) if f.slate is not None
     ]

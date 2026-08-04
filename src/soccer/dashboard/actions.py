@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from soccer.config import Settings
 from soccer.ingest.pipeline import IngestPipeline
@@ -142,18 +142,18 @@ def refresh_scores(settings: Settings) -> str:
     return asyncio.run(run())
 
 
-# How far ahead to sweep fixtures. Chunked into 10-day requests (the API cap), so this is
-# ~5 requests of a 10/min budget -- enough to always find a club's next match, in or out of
-# season, without pulling a whole season's schedule.
-FIXTURE_HORIZON_DAYS = 45
+# football-data.org free competitions to pull full current-season fixtures for: the league
+# competitions plus the Champions League and Copa Libertadores. Euro / World Cup are left out
+# -- they have no ordinary league season. Each is one request that returns the whole season.
+FIXTURE_COMPETITIONS = ["PL", "ELC", "FL1", "BL1", "SA", "DED", "PPL", "PD", "BSA", "CLI", "CL"]
 
 
 def update_fixtures(settings: Settings) -> str:
-    """Pull upcoming fixtures from football-data.org (needs a free token).
+    """Pull the full upcoming-season fixtures from football-data.org (needs a free token).
 
-    Sweeps the next `FIXTURE_HORIZON_DAYS` across every free competition (chunked past the
-    API's 10-day cap), so a club's next match is found even weeks out or pre-season -- not
-    just whatever falls in the next ten days.
+    Fetches each competition's whole current season (past the API's 10-day /matches cap), so
+    the entire released fixture list loads -- every club's schedule for the season, not just
+    the next few days. A competition the free tier can't serve yet is skipped.
     """
     if not settings.football_data_org_token:
         return (
@@ -166,15 +166,14 @@ def update_fixtures(settings: Settings) -> str:
     async def run() -> str:
         from soccer.sources.football_data_org import FootballDataOrg
 
-        today = datetime.now(UTC).date()
         with LiveDB(settings.live_db) as db:
             async with FootballDataOrg(
                 settings.football_data_org_token,
                 raw,
                 rate_limit_per_minute=settings.football_data_org_rpm,
             ) as fd:
-                summary = await IngestPipeline(db).ingest_football_data(
-                    fd, today, today + timedelta(days=FIXTURE_HORIZON_DAYS)
+                summary = await IngestPipeline(db).ingest_football_data_competitions(
+                    fd, FIXTURE_COMPETITIONS
                 )
         return str(summary)
 

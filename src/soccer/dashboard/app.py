@@ -145,6 +145,7 @@ def _render_home(settings) -> None:
         if st.button("Update fixtures", icon=":material/event:", width="stretch"):
             with st.spinner("Fetching upcoming fixtures…"):
                 st.toast(actions.update_fixtures(settings), icon="✅")
+            _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
             _go("Home")
 
     st.caption(
@@ -484,6 +485,16 @@ def _cached_season_briefing(db_path: str, season: str, division: str):
     from pathlib import Path
 
     return season_briefing(Path(db_path), season, division)
+
+
+@st.cache_data(ttl=600, show_spinner="Forecasting the season's fixtures…")
+def _cached_fixture_forecasts(live_db: str, analytics_db: str, limit: int):
+    """Cached full-season fixtures + forecasts. Forecasting a whole season's ~3k fixtures
+    is a few seconds, so it's cached (TTL, and cleared when fixtures are refreshed) rather
+    than recomputed on every rerun and filter change."""
+    from pathlib import Path
+
+    return fixture_forecasts(Path(live_db), Path(analytics_db), limit=limit)
 
 
 def _render_season(briefing) -> None:
@@ -1987,7 +1998,11 @@ def main() -> None:
         )
 
         with upcoming_tab:
-            _render_fixtures(fixture_forecasts(settings.live_db, settings.analytics_db))
+            _render_fixtures(
+                _cached_fixture_forecasts(
+                    str(settings.live_db), str(settings.analytics_db), 5000
+                )
+            )
 
         with match_tab:
             if not available:
