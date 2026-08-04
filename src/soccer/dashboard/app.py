@@ -551,7 +551,11 @@ def _render_season(briefing) -> None:
 
 
 def _league_season_pickers(
-    available: list[tuple[str, str, int]], *, extra: int = 0, key: str = "ls"
+    available: list[tuple[str, str, int]],
+    *,
+    extra: int = 0,
+    key: str = "ls",
+    latest_only: bool = False,
 ) -> tuple:
     """Dependent League + Season selectors laid out as a row on the page.
 
@@ -559,6 +563,10 @@ def _league_season_pickers(
     page's own controls (the returned tuple then also yields those columns). The season
     list follows the chosen league, newest first with its latest entry tagged. Widget keys
     derive from `key`, so pages that show two pickers at once pass distinct keys.
+
+    With `latest_only`, the season is locked (read-only) to each league's most recent loaded
+    season -- for the Predictions tabs, where projecting a finished past season is not a
+    forecast.
     """
     by_league: dict[str, list] = {}
     for season, division, _n in available:
@@ -569,8 +577,14 @@ def _league_season_pickers(
     league = cols[0].selectbox("League", sorted(by_league), key=f"{key}_league")
     division, seasons = by_league[league]
     seasons = sorted(set(seasons), key=season_sort_key, reverse=True)
-    tagged = {f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)}
-    season = tagged[cols[1].selectbox("Season", list(tagged), key=f"{key}_season")]
+    if latest_only:
+        season = seasons[0]
+        cols[1].selectbox("Season", [season_label(season)], disabled=True, key=f"{key}_season")
+    else:
+        tagged = {
+            f"{season_label(s)}{' · latest' if i == 0 else ''}": s for i, s in enumerate(seasons)
+        }
+        season = tagged[cols[1].selectbox("Season", list(tagged), key=f"{key}_season")]
     if extra:
         return season, division, cols[2:]
     return season, division
@@ -1982,8 +1996,10 @@ def main() -> None:
                     icon=":material/download:",
                 )
             else:
-                season, division = _league_season_pickers(available, key="pred_match")
-                st.caption("Odds and a likely score for any matchup in this slice.")
+                season, division = _league_season_pickers(
+                    available, key="pred_match", latest_only=True
+                )
+                st.caption("Odds and a likely score for any upcoming matchup this season.")
                 teams = forecast_teams(settings.analytics_db, season, division)
                 fc = st.columns([2, 2, 1])
                 home = fc[0].selectbox("Home", teams, index=0)
@@ -2019,7 +2035,9 @@ def main() -> None:
                     icon=":material/download:",
                 )
             else:
-                season, division = _league_season_pickers(available, key="pred_season")
+                season, division = _league_season_pickers(
+                    available, key="pred_season", latest_only=True
+                )
                 st.caption(
                     "Title, top-four and relegation odds from simulating the rest of the season."
                 )

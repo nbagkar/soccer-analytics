@@ -1049,6 +1049,34 @@ class TestAppSmoke:
         finally:
             config._settings = None
 
+    def test_predictions_locks_to_latest_season(self, tmp_path, monkeypatch) -> None:
+        # Predictions must not offer past seasons -- projecting a finished season is not a
+        # forecast. With two seasons loaded, the Matchup/Season pickers show only the latest.
+        pytest.importorskip("streamlit")
+        from importlib.resources import files
+
+        import soccer.config as config
+
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(tmp_path / "analytics.duckdb", division="E0", teams=teams, season="2425")
+        seed_results(tmp_path / "analytics.duckdb", division="E0", teams=teams, season="2526")
+        monkeypatch.setenv("SOCCER_DATA_DIR", str(tmp_path))
+        config._settings = None
+        try:
+            from streamlit.testing.v1 import AppTest
+
+            app_path = str(files("soccer.dashboard") / "app.py")
+            at = AppTest.from_file(app_path, default_timeout=120).run()
+            at.radio[0].set_value("Predictions").run()
+            assert not at.exception, f"Predictions raised: {at.exception}"
+            seasons = [s for s in at.selectbox if s.label == "Season"]
+            assert seasons, "expected a Season selector on Predictions"
+            for s in seasons:
+                assert s.options == ["2025/26"], f"expected only the latest season: {s.options}"
+                assert s.disabled, "the Predictions season must be locked"
+        finally:
+            config._settings = None
+
     def test_password_gate_blocks_until_entered(self, tmp_path, monkeypatch) -> None:
         # With SOCCER_DASHBOARD_PASSWORD set (a public tunnel), the app must stop at a
         # password prompt before rendering the nav or reaching any data action.
