@@ -87,3 +87,15 @@ class TestEvaluateForecasts:
 
     def test_none_when_too_little_data(self) -> None:
         assert evaluate_forecasts(_synthetic_rows()[:20], min_history=60) is None
+
+    def test_calibration_covers_all_three_outcomes(self) -> None:
+        report = evaluate_forecasts(_synthetic_rows(), min_history=20)
+        assert report is not None
+        assert [oc.label for oc in report.calibration_by_outcome] == ["Home", "Draw", "Away"]
+        for oc in report.calibration_by_outcome:
+            # Every scored match lands in exactly one bin of each outcome's reliability diagram.
+            assert sum(b.count for b in oc.bins) == report.n
+            assert oc.ece >= 0.0
+            for b in oc.bins:
+                assert 0.0 <= b.mean_predicted <= 1.0
+                assert 0.0 <= b.observed_rate <= 1.0

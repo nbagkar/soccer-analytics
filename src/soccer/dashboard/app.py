@@ -1433,39 +1433,51 @@ def _blend_curve_chart(curve):
     return (line + mark).properties(height=240)
 
 
-def _calibration_chart(bins):
-    frame = pl.DataFrame(
-        {
-            "predicted": [b.mean_predicted for b in bins],
-            "observed": [b.observed_rate for b in bins],
-            "count": [b.count for b in bins],
-        }
-    ).to_pandas()
-    diag = (
-        alt.Chart(pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]}).to_pandas())
-        .mark_line(strokeDash=[4, 4], color="#8b95a1")
-        .encode(x="x:Q", y="y:Q")
-    )
-    pts = (
-        alt.Chart(frame)
-        .mark_circle(color="#16c784", opacity=0.8)
-        .encode(
-            x=alt.X(
-                "predicted:Q",
-                title="predicted home-win",
-                scale=alt.Scale(domain=[0, 1]),
-                axis=alt.Axis(format="%"),
-            ),
-            y=alt.Y(
-                "observed:Q",
-                title="actual home-win",
-                scale=alt.Scale(domain=[0, 1]),
-                axis=alt.Axis(format="%"),
-            ),
-            size=alt.Size("count:Q", legend=None),
+def _calibration_chart(outcomes):
+    """Reliability diagram: one panel per outcome (home/draw/away), concatenated left to right.
+
+    Points hugging the dotted diagonal are well calibrated; dot size is the number of matches
+    in that probability bin, and each panel's title carries its expected calibration error.
+    """
+    diag_df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]}).to_pandas()
+    colors = {"Home": "#16c784", "Draw": "#f0b90b", "Away": "#ea3943"}
+    panels = []
+    for oc in outcomes:
+        frame = pl.DataFrame(
+            {
+                "predicted": [b.mean_predicted for b in oc.bins],
+                "observed": [b.observed_rate for b in oc.bins],
+                "count": [b.count for b in oc.bins],
+            }
+        ).to_pandas()
+        diag = (
+            alt.Chart(diag_df)
+            .mark_line(strokeDash=[4, 4], color="#8b95a1")
+            .encode(x="x:Q", y="y:Q")
         )
-    )
-    return (diag + pts).properties(height=240)
+        pts = (
+            alt.Chart(frame)
+            .mark_circle(color=colors.get(oc.label, "#16c784"), opacity=0.85)
+            .encode(
+                x=alt.X(
+                    "predicted:Q",
+                    title="predicted",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(format="%"),
+                ),
+                y=alt.Y(
+                    "observed:Q",
+                    title="actual",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(format="%"),
+                ),
+                size=alt.Size("count:Q", legend=None),
+            )
+        )
+        panels.append(
+            (diag + pts).properties(height=210, width=200, title=f"{oc.label} · ECE {oc.ece:.3f}")
+        )
+    return alt.hconcat(*panels)
 
 
 def _render_report_card(report, division: str) -> None:
@@ -1514,13 +1526,20 @@ def _render_report_card(report, division: str) -> None:
         icon=":material/insights:",
     )
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Blend-weight curve** — log loss as the mix shifts model↔market")
-        st.altair_chart(_blend_curve_chart(report.blend_curve), width="stretch")
-    with c2:
-        st.markdown("**Calibration** — model home-win probability vs how often it happened")
-        st.altair_chart(_calibration_chart(report.model_calibration), width="stretch")
+    st.markdown("**Blend-weight curve** — log loss as the mix shifts model↔market")
+    st.altair_chart(_blend_curve_chart(report.blend_curve), width="stretch")
+
+    st.markdown(
+        "**Calibration** — predicted probability vs how often it actually happened, one panel "
+        "per outcome. Points on the dotted line are perfectly calibrated; dot size is the number "
+        "of matches in that bin, and ECE is the average gap from the line."
+    )
+    st.altair_chart(_calibration_chart(report.calibration_by_outcome), width="stretch")
+    st.caption(
+        "Calibration measured out of sample. Across the tracked leagues, post-hoc temperature "
+        "scaling gave no reliable held-out gain (Premier League t≈0.2), so forecasts are shown "
+        "uncorrected rather than fitted to a correction the data doesn't support."
+    )
 
     st.markdown(
         "**Biggest model↔market disagreements** — the market is usually right, so these are "

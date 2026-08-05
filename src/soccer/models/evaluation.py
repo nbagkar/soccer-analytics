@@ -17,7 +17,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from soccer.models.backtest import CalibrationBin, _calibration, _outcome_index
+from soccer.models.backtest import (
+    CalibrationBin,
+    _calibration,
+    _outcome_index,
+    expected_calibration_error,
+)
 from soccer.models.value import implied_probabilities
 
 _EPS = 1e-15
@@ -86,6 +91,16 @@ class Divergence:
 
 
 @dataclass(frozen=True)
+class OutcomeCalibration:
+    """Reliability of one outcome's probability: its bins and their expected calibration error."""
+
+    label: str  # "Home" / "Draw" / "Away"
+    outcome: int  # 0 home / 1 draw / 2 away
+    bins: list[CalibrationBin]
+    ece: float
+
+
+@dataclass(frozen=True)
 class ForecastReport:
     n: int
     model: Score
@@ -97,6 +112,7 @@ class ForecastReport:
     blend: Score  # blend scored at best_weight
     model_calibration: list[CalibrationBin]
     blend_calibration: list[CalibrationBin]
+    calibration_by_outcome: list[OutcomeCalibration]  # home/draw/away reliability of the model
     divergences: list[Divergence]
 
     @property
@@ -208,6 +224,16 @@ def evaluate_forecasts(
         reverse=True,
     )[:top_divergences]
 
+    # Reliability of the model across all three outcomes (home/draw/away), not just home.
+    calibration_by_outcome = []
+    for i, label in enumerate(("Home", "Draw", "Away")):
+        cbins = _calibration(model_preds, outcome=i)
+        calibration_by_outcome.append(
+            OutcomeCalibration(
+                label=label, outcome=i, bins=cbins, ece=expected_calibration_error(cbins)
+            )
+        )
+
     return ForecastReport(
         n=n,
         model=_score(model_preds),
@@ -219,5 +245,6 @@ def evaluate_forecasts(
         blend=_score(best_blend),
         model_calibration=_calibration(model_preds),
         blend_calibration=_calibration(best_blend),
+        calibration_by_outcome=calibration_by_outcome,
         divergences=divergences,
     )

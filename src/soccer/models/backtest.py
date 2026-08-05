@@ -73,14 +73,19 @@ def _brier(probs: tuple[float, float, float], actual: int) -> float:
 
 
 def _calibration(
-    predictions: list[tuple[tuple[float, float, float], int]], bins: int = 10
+    predictions: list[tuple[tuple[float, float, float], int]],
+    bins: int = 10,
+    outcome: int = 0,
 ) -> list[CalibrationBin]:
-    """Calibration of the home-win probability, in equal-width bins."""
+    """Calibration of the probability of `outcome` (0 home / 1 draw / 2 away), equal-width bins.
+
+    Defaults to the home-win probability, so existing callers are unchanged.
+    """
     buckets: list[list[tuple[float, bool]]] = [[] for _ in range(bins)]
     for probs, actual in predictions:
-        p_home = probs[0]
-        idx = min(int(p_home * bins), bins - 1)
-        buckets[idx].append((p_home, actual == 0))
+        p = probs[outcome]
+        idx = min(int(p * bins), bins - 1)
+        buckets[idx].append((p, actual == outcome))
 
     result: list[CalibrationBin] = []
     for i, bucket in enumerate(buckets):
@@ -96,6 +101,14 @@ def _calibration(
             )
         )
     return result
+
+
+def expected_calibration_error(bins: list[CalibrationBin]) -> float:
+    """Count-weighted mean gap between predicted probability and observed rate (0 = perfect)."""
+    total = sum(b.count for b in bins)
+    if total == 0:
+        return 0.0
+    return sum(abs(b.mean_predicted - b.observed_rate) * b.count for b in bins) / total
 
 
 def backtest_poisson(
