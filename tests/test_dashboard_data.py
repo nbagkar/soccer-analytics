@@ -282,10 +282,12 @@ class TestHealthSnapshot:
         assert couk.licence_unresolved
 
     def test_unavailable_capabilities_shown(self, tmp_path, db: LiveDB) -> None:
-        settings = Settings(data_dir=tmp_path)
+        # FPL carries Opta xG but is grey-area and off by default; with it off, no *free*
+        # source provides live xG, so the capability is honestly surfaced as unavailable.
+        # Pin the flag rather than inherit the ambient .env so the assertion is deterministic.
+        settings = Settings(data_dir=tmp_path, enable_fpl=False)
         snap = health_snapshot(settings, db)
         by_cap = {c.capability: c for c in snap.coverage}
-        # Nothing free provides live xG -> not available, honestly surfaced.
         assert by_cap["expected_goals"].available is False
 
 

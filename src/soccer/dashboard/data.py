@@ -532,7 +532,7 @@ def _expected_for(
     home: str,
     away: str,
     *,
-    mle: bool = True,
+    mle: bool = False,
     weighted: bool = True,
 ) -> tuple[str, str, str, str, float, float, float] | None:
     """Fit the forecast model and return the raw expected goals for a matchup.
@@ -541,6 +541,11 @@ def _expected_for(
     team is unknown or the league has no history. The single seam every forecast is built on:
     the plain slate and the availability-adjusted slate both start here, so they agree on the
     base numbers and differ only by the team-news nudge.
+
+    `mle=False` (the default) fits the shots-on-target-blended Poisson -- measured
+    walk-forward across the top leagues at roughly half the goals-only model's log-loss gap
+    to the closing line, so it is the default everywhere the forecast is shown. `mle=True`
+    switches to goals-only Dixon-Coles MLE (the dashboard's optional toggle).
     """
     from soccer.models.dixon_coles import fit_dixon_coles
 
@@ -571,7 +576,7 @@ def forecast_slate(
     home: str,
     away: str,
     *,
-    mle: bool = True,
+    mle: bool = False,
     weighted: bool = True,
 ):
     """Full market slate for a matchup, or None if a team is unknown.
@@ -618,7 +623,7 @@ def availability_adjusted_slate(
     home: str,
     away: str,
     *,
-    mle: bool = True,
+    mle: bool = False,
     weighted: bool = True,
 ) -> AdjustedForecast | None:
     """The base forecast plus one nudged for current PL team news, or None when it doesn't apply.
