@@ -108,13 +108,20 @@ EVENT_PACKS = {
 
 def data_status(settings: Settings) -> dict:
     """Counts for the Home page: leagues, history matches, player competitions, fixtures."""
-    status = {"leagues": 0, "history_matches": 0, "player_competitions": 0, "upcoming": 0}
+    status = {
+        "leagues": 0,
+        "history_matches": 0,
+        "player_competitions": 0,
+        "upcoming": 0,
+        "squad_players": 0,
+    }
     if settings.analytics_db.exists():
         with AnalyticsDB(settings.analytics_db) as adb:
             loaded = adb.seasons_loaded()
             status["leagues"] = len({d for _s, d, _n in loaded})
             status["history_matches"] = sum(n for _s, _d, n in loaded)
             status["player_competitions"] = len(adb.competitions_loaded())
+            status["squad_players"] = adb.squad_count()
     if settings.live_db.exists():
         from soccer.domain.match_state import MatchStateStore
 
@@ -372,6 +379,68 @@ def load_champions_league(
     with AnalyticsDB(settings.analytics_db) as adb:
         adb.load_results(results)
     return f"Loaded {len(results)} Champions League matches (division UCL)."
+
+
+# Domestic free-tier leagues whose clubs carry full squads on football-data.org. National-
+# team competitions (EC, WC) and partial-tier Copa Libertadores are skipped; a Champions
+# League club's roster is already covered by its domestic league. Nine requests against the
+# 10/min budget, so this is a deliberate button press, not part of a routine refresh.
+SQUAD_COMPETITIONS = ["PL", "ELC", "FL1", "BL1", "SA", "DED", "PPL", "PD", "BSA"]
+
+
+def update_squads(settings: Settings, *, on_progress: Callable | None = None) -> str:
+    """Pull every club's current squad for the domestic leagues (needs a free token).
+
+    `/competitions/{code}/teams` returns a whole league's rosters in a single request, so the
+    cost is one request per competition. Team names are bridged to their loaded domestic
+    spelling ("Manchester City FC" -> "Man City") so a squad joins onto results and the
+    assistant resolves it from the names it already knows. A competition the free tier can't
+    serve is skipped rather than failing the whole run.
+    """
+    if not settings.football_data_org_token:
+        return (
+            "To load squads, add a free football-data.org token to your `.env` "
+            "(SOCCER_FOOTBALL_DATA_ORG_TOKEN)."
+        )
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        registry = _canonical_registry(adb)
+
+    async def run() -> list:
+        from dataclasses import replace
+
+        import httpx
+
+        from soccer.dashboard.data import resolve_canonical_name
+        from soccer.ingest.mappers import map_football_data_squad
+        from soccer.sources.football_data_org import FootballDataOrg
+
+        members: list = []
+        async with FootballDataOrg(
+            settings.football_data_org_token,
+            raw,
+            rate_limit_per_minute=settings.football_data_org_rpm,
+        ) as fd:
+            for i, code in enumerate(SQUAD_COMPETITIONS, 1):
+                try:
+                    res = await fd.competition_teams(code)
+                except httpx.HTTPStatusError:
+                    continue  # competition not reachable on the free tier
+                for member in map_football_data_squad(code, res.payload):
+                    display, norm = resolve_canonical_name(member.team, registry)
+                    members.append(replace(member, team=display, team_norm=norm))
+                if on_progress:
+                    on_progress(i, len(SQUAD_COMPETITIONS))
+        return members
+
+    members = asyncio.run(run())
+    if not members:
+        return "No squads were reachable on the free tier."
+    with AnalyticsDB(settings.analytics_db) as adb:
+        adb.load_squads(members)
+    clubs = len({m.team_norm for m in members})
+    return f"Loaded {len(members)} players across {clubs} clubs."
 
 
 def remove_league(settings: Settings, division: str) -> str:

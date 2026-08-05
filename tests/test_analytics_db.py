@@ -143,3 +143,59 @@ class TestInventory:
         loaded = adb.seasons_loaded()
         assert ("2526", "E0", 1) in loaded
         assert loaded[0][0] == "2526"  # newest season first
+
+
+def _member(team: str, player: str, position: str | None, *, competition="PL", dob=None):
+    from soccer.domain.names import normalize_name
+    from soccer.storage.analytics_db import SquadMember
+
+    return SquadMember(
+        competition=competition,
+        team=team,
+        team_norm=normalize_name(team),
+        team_id=1,
+        player=player,
+        player_norm=normalize_name(player),
+        position=position,
+        nationality=None,
+        date_of_birth=dob,
+        fetched_at="2026-08-01",
+    )
+
+
+class TestSquads:
+    def test_squad_for_orders_keepers_then_out_by_line(self, adb: AnalyticsDB) -> None:
+        adb.load_squads(
+            [
+                _member("Arsenal", "Saka", "Right Winger"),
+                _member("Arsenal", "Raya", "Goalkeeper"),
+                _member("Arsenal", "Saliba", "Centre-Back"),
+                _member("Arsenal", "Rice", "Defensive Midfield"),
+            ]
+        )
+        squad = adb.squad_for("arsenal")
+        assert [m.player for m in squad] == ["Raya", "Saliba", "Rice", "Saka"]
+
+    def test_reload_replaces_competition_wholesale(self, adb: AnalyticsDB) -> None:
+        adb.load_squads([_member("Arsenal", "Old Player", "Goalkeeper")])
+        adb.load_squads([_member("Arsenal", "New Player", "Goalkeeper")])
+        # The competition is the reload unit, so the stale roster is gone, not appended.
+        assert [m.player for m in adb.squad_for("arsenal")] == ["New Player"]
+
+    def test_squad_deduplicates_across_competitions(self, adb: AnalyticsDB) -> None:
+        # A club in both its league and a cup keeps a row per competition, but reads back once.
+        adb.load_squads([_member("Arsenal", "Saka", "Right Winger", competition="PL")])
+        adb.load_squads([_member("Arsenal", "Saka", "Right Winger", competition="CL")])
+        assert len(adb.squad_for("arsenal")) == 1
+
+    def test_age_from_date_of_birth(self, adb: AnalyticsDB) -> None:
+        adb.load_squads([_member("Arsenal", "Saka", "Right Winger", dob="2001-09-05")])
+        (row,) = adb.squad_for("arsenal")
+        assert row.age is not None and row.age >= 23  # born 2001, well into their twenties
+
+    def test_counts(self, adb: AnalyticsDB) -> None:
+        adb.load_squads(
+            [_member("Arsenal", "Raya", "Goalkeeper"), _member("Chelsea", "Sánchez", "Goalkeeper")]
+        )
+        assert adb.squad_count() == 2
+        assert adb.teams_with_squads() == 2

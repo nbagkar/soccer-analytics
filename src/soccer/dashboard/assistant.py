@@ -18,13 +18,14 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from soccer.domain.names import normalize_name
 from soccer.sources.football_data_co_uk import (
     CUP_DIVISIONS,
     division_name,
     season_label,
     season_sort_key,
 )
-from soccer.storage.analytics_db import AnalyticsDB
+from soccer.storage.analytics_db import AnalyticsDB, _position_rank
 
 
 @dataclass
@@ -224,6 +225,7 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_value,
         _intent_honours,
         _intent_scout,
+        _intent_squad,
         _intent_top_scorers,
         _intent_player,
         _intent_title_odds,
@@ -549,6 +551,63 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     )
 
 
+_SQUAD_KW = re.compile(
+    r"\bsquad\b|\broster\b|\bline[- ]?up\b|who plays for|players (?:for|at|in|of)\b"
+)
+# Buckets align with analytics_db._position_rank: 0 keeper, 1 defence, 2 midfield, 3 forward.
+_SQUAD_POS_LABELS = ("GK", "DEF", "MID", "FWD", "")
+
+
+def _intent_squad(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """A club's current roster: 'squad for Arsenal', 'who plays for Man City', 'Wolves squad'.
+
+    Looks up by `normalize_name(display)` (not the assistant's lighter `_norm`), because that
+    is the exact key `update_squads` stored the roster under -- the two normalizers diverge on
+    punctuation ("Nott'm Forest"), so only this one joins.
+    """
+    if not _SQUAD_KW.search(q):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        if not loaded:
+            return None
+        named = _resolve_teams(q, _team_index(adb, loaded))
+        if not named:
+            return None
+        display = named[0][0]
+        squad = adb.squad_for(normalize_name(display))
+        have_any = adb.squad_count() > 0
+    if not squad:
+        if not have_any:
+            return Reply(
+                "I don't have squads loaded yet. Go to **Home → Update squads** to pull "
+                "every club's current roster (needs a free football-data.org token)."
+            )
+        return Reply(
+            f"I don't have a squad loaded for **{display}** yet — try **Home → Update "
+            f"squads**, or check the club name.",
+            suggestions=[f"Tell me about {display}"],
+        )
+    counts = [0, 0, 0, 0, 0]
+    for member in squad:
+        counts[_position_rank(member.position)] += 1
+    breakdown = ", ".join(f"{counts[i]} {_SQUAD_POS_LABELS[i]}" for i in range(4) if counts[i])
+    rows = [
+        {
+            "Pos": member.position or "—",
+            "Player": member.player,
+            "Nat": member.nationality or "—",
+            "Age": member.age if member.age is not None else "—",
+        }
+        for member in squad
+    ]
+    return Reply(
+        f"**{display}** squad — **{len(squad)}** players ({breakdown}).",
+        table=rows,
+        suggestions=[f"Tell me about {display}", f"{display} fixtures"],
+    )
+
+
 def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
         r"top scorer|scorers?|most goals|golden boot|leading scorer|goalscorer"
@@ -792,6 +851,7 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         if not named:
             return None
         display, division, season = named[0]
+        squad_size = len(adb.squad_for(normalize_name(display)))
 
     from soccer.dashboard.data import team_dossier
 
@@ -819,14 +879,19 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         lines.append(f"- On a **{d.winning}-game winning run**")
     elif d.unbeaten >= 4:
         lines.append(f"- **Unbeaten in {d.unbeaten}**")
+    if squad_size:
+        lines.append(f"- Squad: **{squad_size}** players — ask '{d.team} squad' for the roster")
     rows = [
         {"Opponent": r["opponent"], "H/A": r["venue"], "Score": r["score"], "Res": r["result"]}
         for r in d.recent
     ]
+    suggestions = [f"Is {d.team} overperforming their xG?", f"How is {d.team}'s form?"]
+    if squad_size:
+        suggestions.append(f"{d.team} squad")
     return Reply(
         "\n".join(lines),
         table=rows,
-        suggestions=[f"Is {d.team} overperforming their xG?", f"How is {d.team}'s form?"],
+        suggestions=suggestions,
         chart={"kind": "trajectory", "data": d.trajectory} if d.trajectory else None,
     )
 

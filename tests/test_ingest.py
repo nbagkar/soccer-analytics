@@ -12,7 +12,11 @@ from datetime import UTC, date, datetime
 import pytest
 
 from soccer.domain.match_state import MatchState, MatchStateStore, MatchStatus
-from soccer.ingest.mappers import map_football_data_match, map_thesportsdb_live
+from soccer.ingest.mappers import (
+    map_football_data_match,
+    map_football_data_squad,
+    map_thesportsdb_live,
+)
 from soccer.sources.registry import SourceId
 from soccer.sources.thesportsdb import parse_live_match
 from soccer.storage.live_db import LiveDB
@@ -38,6 +42,33 @@ FD_TBD_MATCH = {
     "homeTeam": {"id": None, "name": None},
     "awayTeam": {"id": None, "name": None},
     "score": {"fullTime": {"home": None, "away": None}, "halfTime": {"home": None, "away": None}},
+}
+
+# One /competitions/{code}/teams payload: rosters inline, plus the two shapes the mapper must
+# survive -- a club with no published squad, and a squad entry missing a name.
+FD_TEAMS = {
+    "teams": [
+        {
+            "id": 57,
+            "name": "Arsenal FC",
+            "squad": [
+                {
+                    "name": "David Raya",
+                    "position": "Goalkeeper",
+                    "nationality": "Spain",
+                    "dateOfBirth": "1995-09-15",
+                },
+                {
+                    "name": "Bukayo Saka",
+                    "position": "Right Winger",
+                    "nationality": "England",
+                    "dateOfBirth": "2001-09-05",
+                },
+            ],
+        },
+        {"id": 61, "name": "Chelsea FC", "squad": None},
+        {"id": 65, "name": "Manchester City FC", "squad": [{"name": None}]},
+    ]
 }
 
 
@@ -78,6 +109,21 @@ class TestFootballDataMapper:
         }
         _, state = map_football_data_match(record, observed_at=OBSERVED, is_stale=False)
         assert state.home_score is None
+
+
+class TestFootballDataSquadMapper:
+    def test_maps_players_with_normalized_names(self) -> None:
+        members = map_football_data_squad("PL", FD_TEAMS)
+        assert len(members) == 2  # empty squad + nameless player both dropped
+        raya = members[0]
+        assert (raya.competition, raya.team, raya.team_norm) == ("PL", "Arsenal FC", "arsenal")
+        assert raya.player_norm == "david raya"
+        assert raya.position == "Goalkeeper"
+        assert raya.date_of_birth == "1995-09-15"
+        assert raya.fetched_at  # stamped, so a reload knows the snapshot's age
+
+    def test_missing_teams_key_is_empty_not_an_error(self) -> None:
+        assert map_football_data_squad("PL", {}) == []
 
 
 class TestTheSportsDBMapper:

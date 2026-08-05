@@ -13,8 +13,10 @@ from typing import Any
 
 from soccer.domain.match_state import MatchState, MatchStatus
 from soccer.domain.matches import MatchObservation, SourceRef
+from soccer.domain.names import normalize_name
 from soccer.sources.registry import SourceId
 from soccer.sources.thesportsdb import LiveMatch
+from soccer.storage.analytics_db import SquadMember
 
 # football-data.org status vocabulary -> canonical. It reports IN_PLAY/PAUSED without a
 # half, so those map to the generic live statuses. Verified against the live API:
@@ -108,6 +110,42 @@ def map_thesportsdb_live(
         is_stale=is_stale,
     )
     return observation, state
+
+
+def map_football_data_squad(competition: str, payload: dict[str, Any]) -> list[SquadMember]:
+    """One football-data.org `/competitions/{code}/teams` payload -> squad members.
+
+    Each team carries its roster inline under `squad`; a club with no published squad
+    (pre-season, lower-profile competitions) simply contributes no rows rather than a
+    placeholder. `team_norm`/`player_norm` are normalised so squad rows join cleanly onto
+    results (home_norm/away_norm) and StatsBomb player names.
+    """
+    fetched_at = _utcnow().date().isoformat()
+    members: list[SquadMember] = []
+    for team in payload.get("teams", []):
+        team_name = team.get("name") or "Unknown"
+        team_norm = normalize_name(team_name)
+        raw_id = team.get("id")
+        team_id = int(raw_id) if isinstance(raw_id, int) else None
+        for player in team.get("squad") or []:
+            name = player.get("name")
+            if not name:
+                continue
+            members.append(
+                SquadMember(
+                    competition=competition,
+                    team=team_name,
+                    team_norm=team_norm,
+                    team_id=team_id,
+                    player=name,
+                    player_norm=normalize_name(name),
+                    position=player.get("position"),
+                    nationality=player.get("nationality"),
+                    date_of_birth=player.get("dateOfBirth"),
+                    fetched_at=fetched_at,
+                )
+            )
+    return members
 
 
 def _utcnow() -> datetime:

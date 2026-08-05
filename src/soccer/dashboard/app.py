@@ -124,11 +124,12 @@ def _render_home(settings) -> None:
         "player stats. It sets itself up on first launch; top up any time below. "
         "**No terminal needed.**"
     )
-    c = st.columns(4)
+    c = st.columns(5)
     c[0].metric("Leagues", status["leagues"], border=True)
     c[1].metric("History matches", f"{status['history_matches']:,}", border=True)
     c[2].metric("Player datasets", status["player_competitions"], border=True)
     c[3].metric("Upcoming fixtures", status["upcoming"], border=True)
+    c[4].metric("Squad players", f"{status['squad_players']:,}", border=True)
 
     left, right = st.columns(2)
     with left, st.container(border=True):
@@ -148,6 +149,10 @@ def _render_home(settings) -> None:
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
             _cached_upcoming_season_briefing.clear()  # re-project on the new fixtures
+            _go("Home")
+        if st.button("Update squads", icon=":material/groups:", width="stretch"):
+            with st.spinner("Fetching club squads…"):
+                st.toast(actions.update_squads(settings), icon="✅")
             _go("Home")
 
     st.caption(

@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS match_meta (
     home_team      VARCHAR,
     away_team      VARCHAR
 );
+
+CREATE TABLE IF NOT EXISTS squads (
+    competition   VARCHAR NOT NULL,
+    team          VARCHAR NOT NULL,
+    team_norm     VARCHAR NOT NULL,
+    team_id       INTEGER,
+    player        VARCHAR NOT NULL,
+    player_norm   VARCHAR NOT NULL,
+    position      VARCHAR,
+    nationality   VARCHAR,
+    date_of_birth VARCHAR,
+    fetched_at    VARCHAR NOT NULL
+);
 """
 
 # Sortable expressions for the player-profile leaderboard, allowlisted so `order` can
@@ -199,6 +212,24 @@ class TableRow:
 
 def _pts(gf: int, ga: int) -> int:
     return 3 if gf > ga else 1 if gf == ga else 0
+
+
+# football-data.org squad positions are specific ("Centre-Back", "Right Winger", "Defensive
+# Midfield"), so rank a roster by keyword rather than an exact lookup: keepers, then back,
+# midfield, attack, with anything unrecognised last.
+def _position_rank(position: str | None) -> int:
+    p = (position or "").casefold()
+    if "keeper" in p:
+        return 0
+    # Midfield before defence: football-data.org's "Defensive Midfield" is a midfielder, and
+    # would otherwise be caught by the "defen" test below and mis-ranked as a defender.
+    if "midfield" in p:
+        return 2
+    if "back" in p or "defen" in p:
+        return 1
+    if any(w in p for w in ("forward", "wing", "striker", "offence", "attack")):
+        return 3
+    return 4
 
 
 def _res(gf: int, ga: int) -> str:
@@ -418,6 +449,48 @@ class MatchMeta:
     @property
     def label(self) -> str:
         return f"{self.home_team} v {self.away_team}"
+
+
+@dataclass(frozen=True)
+class SquadMember:
+    """One player on a club's current roster, from football-data.org's teams endpoint.
+
+    `team_norm`/`player_norm` are `normalize_name` outputs so a squad row joins straight
+    onto results (`home_norm`) and StatsBomb player rows without a second identity system.
+    """
+
+    competition: str
+    team: str
+    team_norm: str
+    team_id: int | None
+    player: str
+    player_norm: str
+    position: str | None
+    nationality: str | None
+    date_of_birth: str | None
+    fetched_at: str
+
+
+@dataclass(frozen=True)
+class SquadRow:
+    """A squad member as read back for display."""
+
+    player: str
+    position: str | None
+    nationality: str | None
+    date_of_birth: str | None
+
+    @property
+    def age(self) -> int | None:
+        """Whole years from date_of_birth to today, or None if the DOB is missing/bad."""
+        if not self.date_of_birth:
+            return None
+        try:
+            born = date.fromisoformat(self.date_of_birth[:10])
+        except ValueError:
+            return None
+        today = date.today()
+        return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
 
 
 class AnalyticsDB:
@@ -1031,3 +1104,61 @@ class AnalyticsDB:
         if not row:
             return None
         return f"{row[0]} v {row[1]} ({row[2]} {row[3]})"
+
+    def load_squads(self, members: list[SquadMember]) -> int:
+        """Replace each competition's roster wholesale, so a re-fetch stays current.
+
+        One `competition_teams` call returns a whole league's squads, so the competition is
+        the natural reload unit: drop its rows, insert the fresh set. A club that appears in
+        several competitions (a league and a cup) keeps a row per competition.
+        """
+        if not members:
+            return 0
+        frame = pl.DataFrame([asdict(m) for m in members])
+        competitions = {m.competition for m in members}
+        self._con.register("incoming_squads", frame)
+        try:
+            self._con.execute("BEGIN")
+            for competition in competitions:
+                self._con.execute("DELETE FROM squads WHERE competition = ?", [competition])
+            self._con.execute("INSERT INTO squads BY NAME SELECT * FROM incoming_squads")
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        finally:
+            self._con.unregister("incoming_squads")
+        return len(members)
+
+    def squad_for(self, team_norm: str) -> list[SquadRow]:
+        """A club's current roster by normalized name, keepers first then out by line.
+
+        Deduplicates across competitions (a club in both its league and a cup) on player
+        name. football-data.org gives specific positions ('Centre-Back', 'Right Winger'),
+        so ordering is by keyword bucket, not an exact match.
+        """
+        rows = self._con.execute(
+            "SELECT player, position, nationality, date_of_birth "
+            "FROM squads WHERE team_norm = ?",
+            [team_norm],
+        ).fetchall()
+        seen: set[str] = set()
+        members: list[SquadRow] = []
+        for player, position, nationality, dob in rows:
+            key = player.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            members.append(SquadRow(player, position, nationality, dob))
+        members.sort(key=lambda m: (_position_rank(m.position), m.player))
+        return members
+
+    def squad_count(self) -> int:
+        """Distinct players across all loaded squads -- for the doctor/home summary."""
+        return int(
+            self._con.execute("SELECT COUNT(DISTINCT player_norm) FROM squads").fetchone()[0]
+        )
+
+    def teams_with_squads(self) -> int:
+        """How many clubs have a roster loaded."""
+        return int(self._con.execute("SELECT COUNT(DISTINCT team_norm) FROM squads").fetchone()[0])

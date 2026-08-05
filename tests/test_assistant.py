@@ -20,6 +20,36 @@ def _seed(tmp_path):
     return path
 
 
+def _seed_squad(path, team="Arsenal"):
+    """Seed a small squad for `team` so 'squad for X' has a roster to read back."""
+    from soccer.domain.names import normalize_name
+    from soccer.storage.analytics_db import AnalyticsDB, SquadMember
+
+    roster = [
+        ("Raya", "Goalkeeper", "Spain", "1995-09-15"),
+        ("Saliba", "Centre-Back", "France", "2001-03-24"),
+        ("Rice", "Defensive Midfield", "England", "1999-01-14"),
+        ("Saka", "Right Winger", "England", "2001-09-05"),
+    ]
+    members = [
+        SquadMember(
+            competition="PL",
+            team=team,
+            team_norm=normalize_name(team),
+            team_id=1,
+            player=player,
+            player_norm=normalize_name(player),
+            position=position,
+            nationality=nationality,
+            date_of_birth=dob,
+            fetched_at="2026-08-01",
+        )
+        for player, position, nationality, dob in roster
+    ]
+    with AnalyticsDB(path) as adb:
+        adb.load_squads(members)
+
+
 def _seed_shots(path):
     """A single StatsBomb match (Argentina v France) with a few shots, for the match centre."""
     from soccer.sources.statsbomb import Shot
@@ -309,6 +339,33 @@ class TestRouting:
             "Man United",
             "Man City",
         ]
+
+    def test_squad_lists_the_roster(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        _seed_squad(path, "Arsenal")
+        reply = answer("squad for Arsenal", path)
+        assert "Arsenal" in reply.text and "squad" in reply.text.lower()
+        assert reply.table and {r["Player"] for r in reply.table} >= {"Raya", "Saka"}
+        assert reply.table[0]["Pos"] == "Goalkeeper"  # keepers sort first
+
+    def test_who_plays_for_reaches_squad(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        _seed_squad(path, "Arsenal")
+        reply = answer("who plays for arsenal", path)
+        assert reply.table and any(r["Player"] == "Saka" for r in reply.table)
+
+    def test_squad_is_honest_when_none_loaded(self, tmp_path) -> None:
+        # A club is named but no squads are loaded -> point at the action, never fall back.
+        reply = answer("squad for Arsenal", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "update squads" in reply.text.lower()
+
+    def test_dossier_notes_squad_when_loaded(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        _seed_squad(path, "Arsenal")
+        reply = answer("tell me about Arsenal", path)
+        assert "squad" in reply.text.lower()
+        assert "Arsenal squad" in reply.suggestions
 
     def test_past_season_resolution(self, tmp_path) -> None:
         path = tmp_path / "analytics.duckdb"

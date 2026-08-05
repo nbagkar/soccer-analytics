@@ -1,9 +1,10 @@
 """football-data.org adapter.
 
 Scope is deliberately narrow, matching what the free tier actually grants: fixtures,
-results and standings for the twelve TIER_ONE competitions. No lineups, scorers or
-squads -- those require the EUR 29/mo tier and are absent from this source's declared
-capabilities.
+results and standings for the twelve TIER_ONE competitions, plus current squads.
+Lineups and scorers still require the paid tier, but squads do NOT -- verified live:
+`/competitions/{code}/teams` returns every club's full roster (name, position,
+nationality, DOB) inline, one request per competition, on a free token.
 
 Two behaviours matter more than the endpoint coverage:
 
@@ -358,3 +359,17 @@ class FootballDataOrg:
             )
         params = {"season": season} if season is not None else None
         return await self._get(f"/competitions/{competition}/matches", params)
+
+    async def competition_teams(self, competition: str) -> FetchResult:
+        """Every club in a competition WITH its full current squad, in one request.
+
+        `/competitions/{code}/teams` returns each team's `squad` inline (name, position,
+        nationality, dateOfBirth), so a whole league's rosters cost a single request rather
+        than one per club -- the only affordable shape against the 10/min budget. Free-tier
+        reachable despite the module's old note to the contrary; verified live.
+        """
+        if competition not in ALL_KNOWN_COMPETITIONS:
+            raise ValueError(
+                f"Unknown competition code {competition!r}. Known: {sorted(ALL_KNOWN_COMPETITIONS)}"
+            )
+        return await self._get(f"/competitions/{competition}/teams")
