@@ -114,6 +114,7 @@ def data_status(settings: Settings) -> dict:
         "player_competitions": 0,
         "upcoming": 0,
         "squad_players": 0,
+        "injuries": 0,
     }
     if settings.analytics_db.exists():
         with AnalyticsDB(settings.analytics_db) as adb:
@@ -123,10 +124,12 @@ def data_status(settings: Settings) -> dict:
             status["player_competitions"] = len(adb.competitions_loaded())
             status["squad_players"] = adb.squad_count()
     if settings.live_db.exists():
+        from soccer.domain.availability import AvailabilityStore
         from soccer.domain.match_state import MatchStateStore
 
         with LiveDB(settings.live_db) as db:
             status["upcoming"] = len(MatchStateStore(db).upcoming(limit=1000))
+            status["injuries"] = AvailabilityStore(db).flagged_count()
     return status
 
 
@@ -441,6 +444,57 @@ def update_squads(settings: Settings, *, on_progress: Callable | None = None) ->
         adb.load_squads(members)
     clubs = len({m.team_norm for m in members})
     return f"Loaded {len(members)} players across {clubs} clubs."
+
+
+def update_availability(settings: Settings) -> str:
+    """Pull current player availability (injuries, suspensions, doubts) from FPL.
+
+    Premier League only, and OFF by default: the FPL terms bar 'creating a database', so this
+    caches only ephemerally in the live store and must be switched on knowingly
+    (SOCCER_ENABLE_FPL=true in `.env`). One request fetches every club's team news at once.
+    Club names are bridged to the loaded domestic spelling ("Man Utd" -> "Man United") so the
+    assistant resolves them from the names it already knows.
+    """
+    if not settings.enable_fpl:
+        return (
+            "Player availability comes from the Fantasy Premier League API, off by default "
+            "because the Premier League terms bar 'creating a database'. To enable it for "
+            "personal use, set SOCCER_ENABLE_FPL=true in your `.env`."
+        )
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        registry = _canonical_registry(adb)
+
+    async def run() -> tuple[list, bool]:
+        from dataclasses import replace
+
+        from soccer.dashboard.data import resolve_canonical_name
+        from soccer.sources.fpl import FantasyPremierLeague, parse_availability
+
+        async with FantasyPremierLeague(raw) as fpl:
+            fetch = await fpl.bootstrap()
+        records = parse_availability(fetch.payload, fetched_at=fetch.fetched_at.isoformat())
+        reconciled = []
+        for r in records:
+            display, norm = resolve_canonical_name(r.team, registry)
+            reconciled.append(replace(r, team=display, team_norm=norm))
+        return reconciled, fetch.is_stale
+
+    from soccer.domain.availability import FLAGGED_STATUSES, AvailabilityStore
+    from soccer.sources.registry import SourceId
+
+    records, is_stale = asyncio.run(run())
+    if not records:
+        return "FPL returned no players."
+    with LiveDB(settings.live_db) as db:
+        AvailabilityStore(db).replace_source(SourceId.FPL.value, records)
+    flagged = sum(1 for r in records if r.status in FLAGGED_STATUSES)
+    stale = " (served from cache — the live fetch failed)" if is_stale else ""
+    return (
+        f"Loaded availability for {len(records)} players — "
+        f"{flagged} flagged as team news{stale}."
+    )
 
 
 def remove_league(settings: Settings, division: str) -> str:

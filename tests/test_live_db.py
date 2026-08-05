@@ -17,6 +17,17 @@ def test_fresh_db_is_stamped_current(tmp_path) -> None:
         assert db.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
+def test_migration_creates_player_availability(tmp_path) -> None:
+    # The ephemeral FPL availability cache is a plain new table, so a bare migration must
+    # materialize it (and its lookup index) on a fresh stamp.
+    with LiveDB(tmp_path / "live.sqlite") as db:
+        assert "player_availability" in {
+            row[0]
+            for row in db.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "team_norm" in _columns(db, "player_availability")
+
+
 def test_ensure_column_adds_missing_and_is_idempotent(tmp_path) -> None:
     # The safeguard for the case a bare CREATE TABLE IF NOT EXISTS can't handle: adding a
     # column to an already-existing table. Must add once and be a no-op thereafter.

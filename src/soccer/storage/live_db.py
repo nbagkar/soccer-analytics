@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -109,6 +109,29 @@ CREATE TABLE IF NOT EXISTS entity_alias (
     created_at           TEXT NOT NULL,
     PRIMARY KEY (entity_type, alias_normalized, country_key)
 );
+
+-- Ephemeral player availability (injuries, suspensions, doubts) from FPL. Lives HERE, in
+-- the mutable live store, not the analytics DB, and is replaced wholesale on each refresh:
+-- Premier League terms bar 'creating a database', so this is a current-state cache like the
+-- live scores, never an accumulating committed dataset. Keyed per source so enabling a
+-- second provider later would not collide. team_norm joins onto squads and results.
+CREATE TABLE IF NOT EXISTS player_availability (
+    source        TEXT NOT NULL,
+    team          TEXT NOT NULL,
+    team_norm     TEXT NOT NULL,
+    player        TEXT NOT NULL,
+    full_name     TEXT,
+    status        TEXT NOT NULL,      -- FPL code: a|d|i|s|u|n
+    availability  TEXT NOT NULL,      -- humanized: Available|Doubtful|Injured|Suspended|...
+    chance        INTEGER,            -- chance_of_playing_next_round (0-100), or NULL
+    news          TEXT,               -- free-text blurb ("Ankle injury - 75% chance")
+    news_added    TEXT,               -- ISO timestamp the provider stamped the news
+    fetched_at    TEXT NOT NULL,
+    PRIMARY KEY (source, team_norm, player)
+);
+
+CREATE INDEX IF NOT EXISTS idx_availability_team
+    ON player_availability (team_norm);
 """
 
 

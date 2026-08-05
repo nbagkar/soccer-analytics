@@ -1221,6 +1221,11 @@ _FDCOUK_ALIASES_RAW = {
     "Hamburger SV": "Hamburg",
     "Olympique Lyonnais": "Lyon",
     "Stade Rennais FC 1901": "Rennes",
+    # Fantasy Premier League spells two clubs shorter than football-data.co.uk does, and a
+    # token-subset can't bridge them ("utd" != "united", "spurs" shares no word with
+    # "tottenham"). Curated so FPL availability joins onto the loaded Premier League names.
+    "Man Utd": "Man United",
+    "Spurs": "Tottenham",
 }
 FDCOUK_ALIASES: dict[str, str] = {normalize_name(k): v for k, v in _FDCOUK_ALIASES_RAW.items()}
 

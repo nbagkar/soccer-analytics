@@ -454,6 +454,7 @@ class TestDataActions:
             "player_competitions": 0,
             "upcoming": 0,
             "squad_players": 0,
+            "injuries": 0,
         }
 
     def test_load_full_history_honours_depth_and_is_idempotent(self, tmp_path, monkeypatch) -> None:

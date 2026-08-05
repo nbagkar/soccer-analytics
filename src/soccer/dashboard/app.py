@@ -124,12 +124,13 @@ def _render_home(settings) -> None:
         "player stats. It sets itself up on first launch; top up any time below. "
         "**No terminal needed.**"
     )
-    c = st.columns(5)
+    c = st.columns(6)
     c[0].metric("Leagues", status["leagues"], border=True)
     c[1].metric("History matches", f"{status['history_matches']:,}", border=True)
     c[2].metric("Player datasets", status["player_competitions"], border=True)
     c[3].metric("Upcoming fixtures", status["upcoming"], border=True)
     c[4].metric("Squad players", f"{status['squad_players']:,}", border=True)
+    c[5].metric("Injuries flagged", f"{status['injuries']:,}", border=True)
 
     left, right = st.columns(2)
     with left, st.container(border=True):
@@ -153,6 +154,10 @@ def _render_home(settings) -> None:
         if st.button("Update squads", icon=":material/groups:", width="stretch"):
             with st.spinner("Fetching club squads…"):
                 st.toast(actions.update_squads(settings), icon="✅")
+            _go("Home")
+        if st.button("Update injuries", icon=":material/personal_injury:", width="stretch"):
+            with st.spinner("Fetching team news…"):
+                st.toast(actions.update_availability(settings), icon="✅")
             _go("Home")
 
     st.caption(

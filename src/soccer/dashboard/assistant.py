@@ -225,6 +225,7 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         _intent_value,
         _intent_honours,
         _intent_scout,
+        _intent_availability,
         _intent_squad,
         _intent_top_scorers,
         _intent_player,
@@ -551,6 +552,142 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     )
 
 
+_AVAIL_KW = re.compile(
+    r"\binjur(?:y|ies|ed)\b|\bfit(?:ness)?\b|\bunfit\b|\bavailab(?:le|ility)\b"
+    r"|\bdoubt(?:ful)?\b|\bsuspen(?:ded|sion)\b|team news|injury news"
+    r"|whos out\b|who is out\b|\bruled out\b|out injured|\bsidelined\b|\bknock\b"
+)
+
+
+def _short(text: str | None, limit: int = 72) -> str:
+    """Trim a news blurb to one tidy line for a table cell."""
+    if not text:
+        return "—"
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _find_availability_for_player(rows: list, q: str):
+    """The stored player a fitness question names, if any -- longest whole-word match wins."""
+    best, best_len = None, 0
+    for row in rows:
+        for name in (row.full_name, row.player):
+            n = _norm(name or "")
+            if len(n) < 3 or len(n) <= best_len:
+                continue
+            # Whole-word (optional possessive 's'), so a short surname never matches mid-word.
+            if re.search(rf"\b{re.escape(n)}s?\b", q):
+                best, best_len = row, len(n)
+    return best
+
+
+def _flagged_names(live_db: Path | None, display: str) -> list[str]:
+    """Injured / suspended / doubtful players for a club, for the dossier's team-news line.
+
+    Empty when there's no live store, no availability loaded, or the club has none flagged.
+    """
+    if live_db is None or not Path(live_db).exists():
+        return []
+    from soccer.domain.availability import AvailabilityStore
+    from soccer.storage.live_db import LiveDB
+
+    with LiveDB(live_db) as db:
+        store = AvailabilityStore(db)
+        if store.count() == 0:
+            return []
+        return [r.player for r in store.flagged_for_team(normalize_name(display))]
+
+
+def _intent_availability(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """Injury / suspension / availability news: 'who's injured at Arsenal', 'is Saka fit',
+    'Premier League injury news'. Premier League only (FPL), and honest about that scope.
+
+    Reads the ephemeral availability the **Update injuries** action caches in the live store,
+    keyed by the same reconciled club name every other intent resolves to.
+    """
+    if not _AVAIL_KW.search(q):
+        return None
+
+    _no_data = Reply(
+        "I don't have injury data loaded. Go to **Home → Update injuries** to pull current "
+        "team news (Premier League only, via FPL — off by default; see the note there).",
+        suggestions=["Update injuries", "Who is in form?"],
+    )
+    if live_db is None or not Path(live_db).exists():
+        return _no_data
+
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        named = _resolve_teams(q, _team_index(adb, loaded)) if loaded else []
+
+    from soccer.domain.availability import AvailabilityStore
+    from soccer.storage.live_db import LiveDB
+
+    with LiveDB(live_db) as db:
+        store = AvailabilityStore(db)
+        if store.count() == 0:
+            return _no_data
+
+        if named:  # a club is named -> that club's team news
+            display = named[0][0]
+            roster = store.for_team(normalize_name(display))
+            if not roster:
+                return Reply(
+                    f"I only hold Premier League availability (from FPL), and I don't have team "
+                    f"news for **{display}**.",
+                    suggestions=["Premier League injury news", f"Tell me about {display}"],
+                )
+            flagged = [r for r in roster if r.is_flagged]
+            if not flagged:
+                return Reply(
+                    f"**{display}** have a clean bill of health — no injuries, suspensions or "
+                    f"doubts flagged.",
+                    suggestions=[f"{display} squad", f"Tell me about {display}"],
+                )
+            rows = [
+                {"Player": r.player, "Status": r.label, "News": _short(r.news)} for r in flagged
+            ]
+            worst = flagged[0]
+            return Reply(
+                f"**{display}** team news — **{len(flagged)}** flagged "
+                f"({worst.player} {worst.label.lower()}).",
+                table=rows,
+                suggestions=[f"{display} squad", "Premier League injury news"],
+            )
+
+        player = _find_availability_for_player(store.for_source("fpl"), q)
+        if player is not None:
+            if not player.is_flagged:
+                return Reply(
+                    f"**{player.player}** ({player.team}) is **available** — no injury flag.",
+                    suggestions=[f"{player.team} injuries", f"{player.team} squad"],
+                )
+            tail = f" — {_short(player.news)}" if player.news else ""
+            return Reply(
+                f"**{player.player}** ({player.team}) is **{player.label.lower()}**{tail}.",
+                suggestions=[f"{player.team} injuries", f"{player.team} squad"],
+            )
+
+        flagged = store.flagged(limit=40)
+
+    if not flagged:
+        return Reply(
+            "No injuries, suspensions or doubts are flagged across the Premier League right now.",
+            suggestions=["Who is in form?", "Show all upcoming fixtures"],
+        )
+    rows = [
+        {"Player": r.player, "Team": r.team, "Status": r.label, "News": _short(r.news, 56)}
+        for r in flagged[:12]
+    ]
+    more = f" Showing the first 12 of {len(flagged)}." if len(flagged) > 12 else ""
+    return Reply(
+        f"**Premier League team news** — **{len(flagged)}** players flagged (injuries, "
+        f"suspensions and doubts).{more}",
+        table=rows,
+        suggestions=["Arsenal injuries", "Who is in form?"],
+    )
+
+
 _SQUAD_KW = re.compile(
     r"\bsquad\b|\broster\b|\bline[- ]?up\b|who plays for|players (?:for|at|in|of)\b"
 )
@@ -853,6 +990,8 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         display, division, season = named[0]
         squad_size = len(adb.squad_for(normalize_name(display)))
 
+    injured = _flagged_names(live_db, display)
+
     from soccer.dashboard.data import team_dossier
 
     d = team_dossier(analytics_db, division, season, display)
@@ -881,6 +1020,10 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         lines.append(f"- **Unbeaten in {d.unbeaten}**")
     if squad_size:
         lines.append(f"- Squad: **{squad_size}** players — ask '{d.team} squad' for the roster")
+    if injured:
+        preview = ", ".join(injured[:3])
+        extra = f" (+{len(injured) - 3} more)" if len(injured) > 3 else ""
+        lines.append(f"- Team news: **{len(injured)}** out/doubtful — {preview}{extra}")
     rows = [
         {"Opponent": r["opponent"], "H/A": r["venue"], "Score": r["score"], "Res": r["result"]}
         for r in d.recent
@@ -888,6 +1031,8 @@ def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
     suggestions = [f"Is {d.team} overperforming their xG?", f"How is {d.team}'s form?"]
     if squad_size:
         suggestions.append(f"{d.team} squad")
+    if injured:
+        suggestions.append(f"{d.team} injuries")
     return Reply(
         "\n".join(lines),
         table=rows,

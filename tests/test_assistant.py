@@ -91,6 +91,33 @@ def _seed_shots(path):
         )
 
 
+def _seed_availability(live_path, rows):
+    """Seed FPL-style availability into a live store. `rows` are (team, player, status, chance,
+    news) tuples; team_norm is derived exactly as the real ingest does so club lookups match."""
+    from soccer.domain.availability import AvailabilityStore, PlayerAvailability, status_label
+    from soccer.domain.names import normalize_name
+    from soccer.storage.live_db import LiveDB
+
+    records = [
+        PlayerAvailability(
+            source="fpl",
+            team=team,
+            team_norm=normalize_name(team),
+            player=player,
+            full_name=None,
+            status=status,
+            availability=status_label(status),
+            chance=chance,
+            news=news or None,
+            news_added=None,
+            fetched_at="2026-08-04",
+        )
+        for team, player, status, chance, news in rows
+    ]
+    with LiveDB(live_path) as db:
+        AvailabilityStore(db).replace_source("fpl", records)
+
+
 class TestRouting:
     def test_help(self, tmp_path) -> None:
         reply = answer("what can you do?", _seed(tmp_path))
@@ -412,3 +439,60 @@ class TestRouting:
         reply = answer("compare Messi and Otamendi", _seed(tmp_path))
         assert "Messi" in reply.text and "Otamendi" in reply.text
         assert reply.table and reply.table[0]["Metric"] == "Matches"
+
+
+class TestAvailability:
+    def test_club_injuries_lists_only_the_flagged(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(
+            live,
+            [
+                ("Arsenal", "Saka", "i", 25, "Hamstring - back in 2 weeks"),
+                ("Arsenal", "Rice", "d", 75, "Knock, doubtful"),
+                ("Arsenal", "Raya", "a", None, ""),  # fit -> must not appear
+            ],
+        )
+        reply = answer("Arsenal injuries", path, live)
+        assert "team news" in reply.text.lower()
+        assert reply.table and {r["Player"] for r in reply.table} == {"Saka", "Rice"}
+
+    def test_is_player_fit(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(live, [("Arsenal", "Saka", "i", 25, "Hamstring injury")])
+        reply = answer("is Saka fit?", path, live)
+        assert "Saka" in reply.text
+        assert "injured" in reply.text.lower()
+
+    def test_league_wide_injury_news(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(
+            live,
+            [("Arsenal", "Saka", "i", 25, "Hamstring"), ("Chelsea", "James", "d", 50, "Knock")],
+        )
+        reply = answer("premier league injury news", path, live)
+        assert "flagged" in reply.text.lower()
+        assert reply.table and len(reply.table) == 2
+
+    def test_clean_bill_of_health_when_nobody_flagged(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(live, [("Arsenal", "Raya", "a", None, "")])
+        reply = answer("Arsenal injuries", path, live)
+        assert "clean bill of health" in reply.text.lower()
+
+    def test_honest_when_no_availability_loaded(self, tmp_path) -> None:
+        # Keyword present but nothing loaded -> point at the action, not the generic fallback.
+        reply = answer("injury news", _seed(tmp_path))
+        assert "not sure" not in reply.text.lower()
+        assert "update injuries" in reply.text.lower()
+
+    def test_dossier_notes_team_news(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(live, [("Arsenal", "Saka", "i", 25, "Hamstring")])
+        reply = answer("tell me about Arsenal", path, live)
+        assert "team news" in reply.text.lower()
+        assert "Arsenal injuries" in reply.suggestions
