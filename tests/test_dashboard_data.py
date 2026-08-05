@@ -632,6 +632,122 @@ class TestForecastData:
         assert forecast_explanation(path, "2526", "E0", "Arsenal", "Nobody") is None
 
 
+class TestAvailabilityAdjustedSlate:
+    """The PL-only forecast nudge: raw and adjusted side by side, moving the number toward the
+    side of the ball a club's absences belong to -- and a strict no-op (None) otherwise."""
+
+    def _seed_availability(self, live_path, team, players) -> None:
+        """players: (name, status, element_type, price, chance) tuples for one club."""
+        from soccer.domain.availability import (
+            AvailabilityStore,
+            PlayerAvailability,
+            status_label,
+        )
+        from soccer.domain.names import normalize_name
+
+        recs = [
+            PlayerAvailability(
+                source="fpl",
+                team=team,
+                team_norm=normalize_name(team),
+                player=name,
+                full_name=None,
+                status=status,
+                availability=status_label(status),
+                chance=chance,
+                news=None,
+                news_added=None,
+                fetched_at="2026-08-04T00:00:00+00:00",
+                element_type=etype,
+                price=price,
+            )
+            for (name, status, etype, price, chance) in players
+        ]
+        with LiveDB(live_path) as db:
+            AvailabilityStore(db).replace_source("fpl", recs)
+
+    # A small but plausible Brentford squad; the two forwards are the ones we injure.
+    _BRENTFORD_FIT = (
+        ("Flekken", "a", 1, 45, None),  # GK
+        ("Collins", "a", 2, 45, None),  # DEF
+        ("Pinnock", "a", 2, 45, None),  # DEF
+        ("Janelt", "a", 3, 50, None),  # MID
+        ("Norgaard", "a", 3, 50, None),  # MID
+        ("Mbeumo", "a", 4, 70, None),  # FWD
+        ("Wissa", "a", 4, 65, None),  # FWD
+    )
+
+    def test_injured_forwards_shift_the_forecast_toward_the_opponent(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)  # Arsenal strong, Brentford weak
+        # Brentford lose both strikers; Arsenal have no news at all.
+        squad = [
+            (n, "i" if n in ("Mbeumo", "Wissa") else s, e, p, c)
+            for (n, s, e, p, c) in self._BRENTFORD_FIT
+        ]
+        self._seed_availability(live, "Brentford", squad)
+
+        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+        assert adj is not None
+        assert adj.is_material
+        # Arsenal (home) carry no availability rows -> a strict neutral adjustment.
+        assert not adj.home_adj.is_material
+        # Brentford's loss is on the attack, so their expected goals fall...
+        assert adj.away_adj.attack_factor < 1.0
+        assert adj.away_adj.attack_factor >= 0.75  # bounded
+        assert "Mbeumo" in adj.away_adj.missing
+        assert adj.adjusted.away_expected < adj.raw.away_expected
+        # ...and Arsenal's win probability rises versus the base model.
+        raw = {m.name: m.probability for m in adj.raw.result}
+        moved = {m.name: m.probability for m in adj.adjusted.result}
+        assert moved["Arsenal"] > raw["Arsenal"]
+        assert moved["Brentford"] < raw["Brentford"]
+
+    def test_none_when_nobody_is_flagged(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+        self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)  # all available
+        # A fully fit pair is identical to the plain forecast, so there is nothing to compare.
+        assert availability_adjusted_slate(
+            analytics, live, "2526", "E0", "Arsenal", "Brentford"
+        ) is None
+
+    def test_none_outside_the_premier_league(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+        self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)
+        # The availability feed is PL-only, so a non-E0 division never gets the nudge.
+        assert availability_adjusted_slate(
+            analytics, live, "2526", "SP1", "Arsenal", "Brentford"
+        ) is None
+
+    def test_matches_the_plain_slate_on_the_base_numbers(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate, forecast_slate
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+        squad = [
+            (n, "i" if n == "Mbeumo" else s, e, p, c) for (n, s, e, p, c) in self._BRENTFORD_FIT
+        ]
+        self._seed_availability(live, "Brentford", squad)
+        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+        plain = forecast_slate(analytics, "2526", "E0", "Arsenal", "Brentford")
+        # The "raw" half must be exactly the plain forecast -- same seam, no drift.
+        assert adj is not None and plain is not None
+        assert adj.raw.home_expected == pytest.approx(plain.home_expected)
+        assert adj.raw.away_expected == pytest.approx(plain.away_expected)
+
+
 class TestUnderlyingTable:
     def _seed_with_shots(self, path):
         from datetime import date

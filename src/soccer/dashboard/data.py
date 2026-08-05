@@ -15,6 +15,7 @@ from pathlib import Path
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
+from soccer.domain.availability import AvailabilityAdjustment
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.elo import EloRating, power_ranking
@@ -524,7 +525,7 @@ def _decay(half_life_days: float) -> float:
     return math.log(2) / half_life_days if half_life_days > 0 else 0.0
 
 
-def forecast_slate(
+def _expected_for(
     analytics_db: Path,
     season: str,
     division: str,
@@ -533,17 +534,15 @@ def forecast_slate(
     *,
     mle: bool = True,
     weighted: bool = True,
-):
-    """Full market slate for a matchup, or None if a team is unknown.
+) -> tuple[str, str, str, str, float, float, float] | None:
+    """Fit the forecast model and return the raw expected goals for a matchup.
 
-    Default fit is the shots-on-target-blended Poisson (steadier than goals-only, ~half the
-    log-loss gap to the market). `mle` switches to Dixon-Coles instead. `weighted` fits over
-    the last few seasons up to `season` so recent form dominates -- the self-updating fit.
+    Returns (home_display, away_display, home_norm, away_norm, lam, mu, rho), or None when a
+    team is unknown or the league has no history. The single seam every forecast is built on:
+    the plain slate and the availability-adjusted slate both start here, so they agree on the
+    base numbers and differ only by the team-news nudge.
     """
-    from soccer.domain.names import normalize_name
     from soccer.models.dixon_coles import fit_dixon_coles
-    from soccer.models.markets import compute_markets
-    from soccer.models.poisson import fit_poisson_shots
 
     with AnalyticsDB(analytics_db) as adb:
         if weighted:
@@ -562,7 +561,115 @@ def forecast_slate(
     if hn not in model.strengths or an not in model.strengths:
         return None
     lam, mu = model.expected_goals(hn, an)
-    return compute_markets(names.get(hn, home), names.get(an, away), lam, mu, model.rho)
+    return names.get(hn, home), names.get(an, away), hn, an, lam, mu, model.rho
+
+
+def forecast_slate(
+    analytics_db: Path,
+    season: str,
+    division: str,
+    home: str,
+    away: str,
+    *,
+    mle: bool = True,
+    weighted: bool = True,
+):
+    """Full market slate for a matchup, or None if a team is unknown.
+
+    Default fit is the shots-on-target-blended Poisson (steadier than goals-only, ~half the
+    log-loss gap to the market). `mle` switches to Dixon-Coles instead. `weighted` fits over
+    the last few seasons up to `season` so recent form dominates -- the self-updating fit.
+    """
+    from soccer.models.markets import compute_markets
+
+    expected = _expected_for(analytics_db, season, division, home, away, mle=mle, weighted=weighted)
+    if expected is None:
+        return None
+    home_disp, away_disp, _hn, _an, lam, mu, rho = expected
+    return compute_markets(home_disp, away_disp, lam, mu, rho)
+
+
+# The player-availability feed (Fantasy Premier League) is Premier League only, so the forecast
+# adjustment applies to the English top flight and nothing else. Its division code is "E0".
+ADJUSTABLE_DIVISION = "E0"
+
+
+@dataclass(frozen=True)
+class AdjustedForecast:
+    """A PL matchup shown two ways: the base model, and the same model nudged for today's team
+    news. The per-club adjustments are carried so the UI can show exactly what moved -- and how
+    much -- rather than presenting one opaque adjusted number."""
+
+    raw: object  # MarketSlate from the base model
+    adjusted: object  # MarketSlate after the availability nudge
+    home_adj: AvailabilityAdjustment
+    away_adj: AvailabilityAdjustment
+
+    @property
+    def is_material(self) -> bool:
+        return self.home_adj.is_material or self.away_adj.is_material
+
+
+def availability_adjusted_slate(
+    analytics_db: Path,
+    live_db: Path,
+    season: str,
+    division: str,
+    home: str,
+    away: str,
+    *,
+    mle: bool = True,
+    weighted: bool = True,
+) -> AdjustedForecast | None:
+    """The base forecast plus one nudged for current PL team news, or None when it doesn't apply.
+
+    Returns None -- meaning "just use the plain slate" -- when the matchup is not Premier League,
+    or when neither club has anyone flagged (the nudge would be a strict no-op, so there is
+    nothing to compare). Deliberately single-match only: the season simulation does NOT get this,
+    because a player injured today is not injured all season.
+
+    The nudge routes each club's loss to the right side of the ball: a club scores less with its
+    own attackers out (attack_factor) and concedes more with the opponent's defenders out
+    (the opponent's leak_factor). Same rho, so only the goal expectations move.
+    """
+    if division != ADJUSTABLE_DIVISION:
+        return None
+    from soccer.domain.availability import AvailabilityStore, team_adjustment
+    from soccer.models.markets import compute_markets
+
+    # Read the (cheap) availability first and bail before fitting when nothing is flagged, so a
+    # PL forecast with an empty/disabled feed costs exactly one model fit in the caller, not two.
+    home_norm, away_norm = normalize_name(home), normalize_name(away)
+    with LiveDB(live_db) as db:
+        store = AvailabilityStore(db)
+        home_adj = team_adjustment(store.for_team(home_norm))
+        away_adj = team_adjustment(store.for_team(away_norm))
+    if not (home_adj.is_material or away_adj.is_material):
+        return None  # nobody flagged -> identical to the plain forecast; nothing to show
+
+    expected = _expected_for(analytics_db, season, division, home, away, mle=mle, weighted=weighted)
+    if expected is None:
+        return None
+    home_disp, away_disp, _hn, _an, lam, mu, rho = expected
+
+    raw = compute_markets(home_disp, away_disp, lam, mu, rho)
+    adj_lam = lam * home_adj.attack_factor * away_adj.leak_factor
+    adj_mu = mu * away_adj.attack_factor * home_adj.leak_factor
+    adjusted = compute_markets(home_disp, away_disp, adj_lam, adj_mu, rho)
+    return AdjustedForecast(raw=raw, adjusted=adjusted, home_adj=home_adj, away_adj=away_adj)
+
+
+def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:
+    """The players driving an adjustment, most important first: 'Saka, Rice (+2 more)'.
+
+    Empty string when nobody is flagged. Shared by the assistant and the dashboard so both
+    name the same absences in the same order.
+    """
+    if not adj.missing:
+        return ""
+    shown = ", ".join(adj.missing[:limit])
+    extra = len(adj.missing) - limit
+    return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
 @dataclass(frozen=True)

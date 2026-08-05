@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS player_availability (
     news          TEXT,               -- free-text blurb ("Ankle injury - 75% chance")
     news_added    TEXT,               -- ISO timestamp the provider stamped the news
     fetched_at    TEXT NOT NULL,
+    element_type  INTEGER,            -- FPL position: 1 GK, 2 DEF, 3 MID, 4 FWD (routes the loss)
+    price         INTEGER,            -- FPL now_cost (price x10): quality weight for the loss
     PRIMARY KEY (source, team_norm, player)
 );
 
@@ -137,9 +139,12 @@ CREATE INDEX IF NOT EXISTS idx_availability_team
 
 # Columns added to an existing table after its first release, as (table, column, "type ...").
 # Registered here so _migrate reconciles them onto already-created databases via ALTER TABLE
-# (a bare CREATE TABLE IF NOT EXISTS cannot). Empty today -- the mechanism is the safeguard;
-# bump SCHEMA_VERSION and add an entry here whenever you add a column to an existing table.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+# (a bare CREATE TABLE IF NOT EXISTS cannot). element_type/price were added to
+# player_availability in v6 to drive the forecast adjustment; a v5 cache upgrades in place.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("player_availability", "element_type", "INTEGER"),
+    ("player_availability", "price", "INTEGER"),
+)
 
 
 class LiveDB:

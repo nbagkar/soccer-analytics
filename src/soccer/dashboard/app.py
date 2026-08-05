@@ -25,11 +25,13 @@ from soccer.dashboard.data import (
     LiveSnapshot,
     analytics_available,
     analytics_snapshot,
+    availability_adjusted_slate,
     fixture_forecasts,
     forecast_explanation,
     forecast_report,
     forecast_slate,
     forecast_teams,
+    format_missing,
     has_player_events,
     health_snapshot,
     league_history,
@@ -1193,6 +1195,54 @@ def _ou_block(over_unders) -> str:
     return f"<div style='margin-bottom:12px'>{_mkt_title('Total goals lines')}{''.join(rows)}</div>"
 
 
+def _render_forecast_adjustment(adj) -> None:
+    """PL-only: the base forecast nudged for today's team news, shown against the raw model.
+
+    Deltas are rendered in neutral grey (delta_color="off") because a probability moving up is
+    not inherently "good" -- it just moved. The honest framing is the point: the reader sees the
+    base number, the nudged number, and exactly which absences moved it."""
+    raw = {m.name: m.probability for m in adj.raw.result}
+    new = {m.name: m.probability for m in adj.adjusted.result}
+    home, away = adj.raw.home, adj.raw.away
+    st.markdown("**Adjusted for team news**")
+    outs = []
+    if adj.home_adj.is_material:
+        outs.append(f"**{home}** without {format_missing(adj.home_adj)}")
+    if adj.away_adj.is_material:
+        outs.append(f"**{away}** without {format_missing(adj.away_adj)}")
+    st.caption(" · ".join(outs))
+    c = st.columns(3)
+    c[0].metric(
+        f"{home} win", f"{new[home]:.0%}", f"{(new[home] - raw[home]) * 100:+.0f} pts",
+        delta_color="off", border=True,
+    )
+    c[1].metric(
+        "Draw", f"{new['Draw']:.0%}", f"{(new['Draw'] - raw['Draw']) * 100:+.0f} pts",
+        delta_color="off", border=True,
+    )
+    c[2].metric(
+        f"{away} win", f"{new[away]:.0%}", f"{(new[away] - raw[away]) * 100:+.0f} pts",
+        delta_color="off", border=True,
+    )
+    g = st.columns(2)
+    g[0].metric(
+        f"{home} xG", f"{adj.adjusted.home_expected:.2f}",
+        f"{adj.adjusted.home_expected - adj.raw.home_expected:+.2f}",
+        delta_color="off", border=True,
+    )
+    g[1].metric(
+        f"{away} xG", f"{adj.adjusted.away_expected:.2f}",
+        f"{adj.adjusted.away_expected - adj.raw.away_expected:+.2f}",
+        delta_color="off", border=True,
+    )
+    st.caption(
+        "A heuristic prior from current Premier League injuries and suspensions (Fantasy Premier "
+        "League), weighted by each absent player's price and position. It cannot be backtested — "
+        "there is no history of who was fit before past matches — so read it as a transparent "
+        "nudge, not a measured edge. With nobody flagged it makes no change."
+    )
+
+
 def _render_forecast(slate) -> None:
     st.markdown(f"#### {slate.home}  ·  {slate.away}")
     st.markdown(_price_tiles(slate.result), unsafe_allow_html=True)
@@ -2056,6 +2106,19 @@ def main() -> None:
                         st.info("Could not forecast that matchup.")
                     else:
                         _render_forecast(slate)
+                        # PL only, and only when current injuries/suspensions actually move the
+                        # number: show the base model nudged for team news, side by side.
+                        adj = (
+                            availability_adjusted_slate(
+                                settings.analytics_db, settings.live_db,
+                                season, division, home, away, mle=mle,
+                            )
+                            if settings.live_db.exists()
+                            else None
+                        )
+                        if adj is not None:
+                            st.divider()
+                            _render_forecast_adjustment(adj)
                         st.divider()
                         exp = forecast_explanation(
                             settings.analytics_db, season, division, home, away

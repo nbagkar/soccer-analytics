@@ -118,6 +118,37 @@ def _seed_availability(live_path, rows):
         AvailabilityStore(db).replace_source("fpl", records)
 
 
+def _seed_priced_squad(live_path, team, players):
+    """Seed a priced squad for the forecast adjustment. `players` are
+    (name, status, element_type, price, chance) tuples -- element_type/price are what let the
+    nudge weight a loss by role and quality, so this helper carries them where the 5-tuple
+    availability seeder does not."""
+    from soccer.domain.availability import AvailabilityStore, PlayerAvailability, status_label
+    from soccer.domain.names import normalize_name
+    from soccer.storage.live_db import LiveDB
+
+    records = [
+        PlayerAvailability(
+            source="fpl",
+            team=team,
+            team_norm=normalize_name(team),
+            player=name,
+            full_name=None,
+            status=status,
+            availability=status_label(status),
+            chance=chance,
+            news=None,
+            news_added=None,
+            fetched_at="2026-08-04",
+            element_type=etype,
+            price=price,
+        )
+        for (name, status, etype, price, chance) in players
+    ]
+    with LiveDB(live_path) as db:
+        AvailabilityStore(db).replace_source("fpl", records)
+
+
 class TestRouting:
     def test_help(self, tmp_path) -> None:
         reply = answer("what can you do?", _seed(tmp_path))
@@ -496,3 +527,41 @@ class TestAvailability:
         reply = answer("tell me about Arsenal", path, live)
         assert "team news" in reply.text.lower()
         assert "Arsenal injuries" in reply.suggestions
+
+
+class TestForecastTeamNews:
+    """A PL forecast folds in current injuries as a transparent prior, shown against the raw
+    model -- but only when someone is actually flagged, and only when a live store is passed."""
+
+    _BRENTFORD = (
+        ("Flekken", "a", 1, 45, None),
+        ("Collins", "a", 2, 45, None),
+        ("Janelt", "a", 3, 50, None),
+        ("Mbeumo", "i", 4, 75, None),  # top striker out
+        ("Wissa", "i", 4, 65, None),  # second striker out
+    )
+
+    def test_forecast_shows_adjusted_vs_raw_when_flagged(self, tmp_path) -> None:
+        analytics = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_priced_squad(live, "Brentford", self._BRENTFORD)
+        reply = answer("Arsenal vs Brentford who wins?", analytics, live)
+        assert "Adjusted for team news" in reply.text
+        assert "Mbeumo" in reply.text  # names the absence driving it
+        assert "→" in reply.text  # raw -> adjusted, shown side by side
+        assert "not a backtested edge" in reply.text  # honest labelling
+
+    def test_no_adjustment_block_when_nobody_flagged(self, tmp_path) -> None:
+        analytics = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        fit = [(n, "a", e, p, c) for (n, _s, e, p, c) in self._BRENTFORD]  # everyone available
+        _seed_priced_squad(live, "Brentford", fit)
+        reply = answer("Arsenal vs Brentford who wins?", analytics, live)
+        assert "Adjusted for team news" not in reply.text  # strict no-op
+        assert reply.text.startswith("**Arsenal vs Brentford")  # base forecast intact
+
+    def test_no_adjustment_block_without_a_live_store(self, tmp_path) -> None:
+        # No live_db passed -> the base forecast still works, just no team-news nudge.
+        reply = answer("Arsenal vs Brentford who wins?", _seed(tmp_path))
+        assert "Adjusted for team news" not in reply.text
+        assert reply.chart and reply.chart["kind"] == "result_bar"

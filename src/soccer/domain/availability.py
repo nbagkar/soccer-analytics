@@ -55,6 +55,12 @@ class PlayerAvailability:
     news: str | None
     news_added: str | None
     fetched_at: str
+    # Role and price drive the forecast adjustment: FPL element_type (1 GK, 2 DEF, 3 MID,
+    # 4 FWD) routes a loss to attack vs defence; now_cost (price x10) is a quality proxy that,
+    # unlike minutes/points, is meaningful pre-season. Optional so a source without them still
+    # stores availability (it just can't weight the adjustment).
+    element_type: int | None = None
+    price: int | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,8 @@ class AvailabilityRow:
     chance: int | None
     news: str | None
     news_added: str | None
+    element_type: int | None = None
+    price: int | None = None
 
     @property
     def is_flagged(self) -> bool:
@@ -83,12 +91,101 @@ class AvailabilityRow:
         return self.availability
 
 
+# --- forecast adjustment -----------------------------------------------------
+#
+# Turning current team news into a nudge on expected goals. This is a transparent PRIOR, not a
+# fitted or backtested effect: there is no history of who was injured before past matches to
+# score it against (FPL is a snapshot, and its terms bar accumulating one), so the weights and
+# caps below are deliberately conservative. The base rating already absorbs a club's *typical*
+# injuries, so this only bends the forecast for the notable, current absences.
+
+# FPL element_type -> (attack_weight, defence_weight). A forward's absence hurts scoring most,
+# a keeper's/defender's hurts conceding most, a midfielder splits. These route each missing
+# player's price (its quality weight) to the correct side of the ball.
+_ROLE_WEIGHTS: dict[int, tuple[float, float]] = {
+    1: (0.0, 1.0),  # goalkeeper
+    2: (0.1, 1.0),  # defender
+    3: (0.6, 0.4),  # midfielder
+    4: (1.0, 0.1),  # forward
+}
+# How hard a fully-missing contingent bends expected goals, and the caps that stop any single
+# snapshot swinging a forecast implausibly (never more than a quarter either way).
+_ATTACK_SENSITIVITY = 0.6
+_DEFENCE_SENSITIVITY = 0.6
+_ATTACK_FLOOR = 0.75
+_LEAK_CEIL = 1.25
+
+
+def _unavailability(status: str, chance: int | None) -> float:
+    """How unavailable a player is: 1.0 when out (i/s/u), scaled by chance for a doubt (d)."""
+    if status in ("i", "s", "u"):
+        return 1.0
+    if status == "d":
+        return 1.0 - (chance / 100.0) if chance is not None else 0.5
+    return 0.0  # available (or not-in-squad, excluded upstream) -> no loss
+
+
+@dataclass(frozen=True)
+class AvailabilityAdjustment:
+    """A club's forecast nudge from current team news, split by side of the ball."""
+
+    attack_factor: float  # multiply this club's expected goals by this (<= 1.0)
+    leak_factor: float  # multiply the OPPONENT's expected goals by this (>= 1.0)
+    lost_attack: float  # price-weighted fraction of attacking strength missing (0-1)
+    lost_defence: float  # price-weighted fraction of defensive strength missing (0-1)
+    missing: tuple[str, ...]  # the flagged players driving it, most important first
+
+    @property
+    def is_material(self) -> bool:
+        """Whether it actually moves a number -- worth applying and showing."""
+        return abs(self.attack_factor - 1.0) > 1e-9 or abs(self.leak_factor - 1.0) > 1e-9
+
+
+NEUTRAL_ADJUSTMENT = AvailabilityAdjustment(1.0, 1.0, 0.0, 0.0, ())
+
+
+def team_adjustment(rows: list[AvailabilityRow]) -> AvailabilityAdjustment:
+    """Attack/leak factors for a club from its stored availability, price- and role-weighted.
+
+    The denominator is the club's whole priced squad (bar loaned-out 'n' players), so depth is
+    resilience -- losing one star from a deep squad costs proportionally less. Price stands in
+    for quality: the one importance signal that is meaningful before the season's own minutes
+    and points exist. Returns a neutral (no-op) adjustment when nothing is priced or nobody is
+    flagged, so a fully fit team leaves the forecast exactly as the base model produced it.
+    """
+    att_total = att_lost = def_total = def_lost = 0.0
+    missing: list[tuple[float, str]] = []
+    for r in rows:
+        if r.price is None or r.element_type not in _ROLE_WEIGHTS or r.status == "n":
+            continue  # unpriced, unknown role, or not in the squad -> not part of the XI
+        aw, dw = _ROLE_WEIGHTS[r.element_type]
+        att_w, def_w = aw * r.price, dw * r.price
+        att_total += att_w
+        def_total += def_w
+        u = _unavailability(r.status, r.chance)
+        if u > 0.0:
+            att_lost += att_w * u
+            def_lost += def_w * u
+            missing.append((att_w + def_w, r.player))
+    if att_total == 0.0 and def_total == 0.0:
+        return NEUTRAL_ADJUSTMENT
+    lost_attack = att_lost / att_total if att_total else 0.0
+    lost_defence = def_lost / def_total if def_total else 0.0
+    attack_factor = max(_ATTACK_FLOOR, 1.0 - _ATTACK_SENSITIVITY * lost_attack)
+    leak_factor = min(_LEAK_CEIL, 1.0 + _DEFENCE_SENSITIVITY * lost_defence)
+    ordered = tuple(name for _, name in sorted(missing, reverse=True))
+    return AvailabilityAdjustment(attack_factor, leak_factor, lost_attack, lost_defence, ordered)
+
+
 # Read order: worst status first, then club, then player -- a stable, human-sensible sort.
 _ORDER_BY = (
     "CASE status WHEN 'i' THEN 0 WHEN 's' THEN 1 WHEN 'u' THEN 2 "
     "WHEN 'd' THEN 3 WHEN 'n' THEN 4 ELSE 5 END, team, player"
 )
-_COLUMNS = "team, team_norm, player, full_name, status, availability, chance, news, news_added"
+_COLUMNS = (
+    "team, team_norm, player, full_name, status, availability, chance, news, news_added, "
+    "element_type, price"
+)
 
 
 class AvailabilityStore:
@@ -107,8 +204,8 @@ class AvailabilityStore:
             self._conn.executemany(
                 "INSERT INTO player_availability "
                 "(source, team, team_norm, player, full_name, status, availability, "
-                " chance, news, news_added, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " chance, news, news_added, fetched_at, element_type, price) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         r.source,
@@ -122,6 +219,8 @@ class AvailabilityStore:
                         r.news,
                         r.news_added,
                         r.fetched_at,
+                        r.element_type,
+                        r.price,
                     )
                     for r in records
                 ],
@@ -145,6 +244,8 @@ class AvailabilityStore:
                 chance=row["chance"],
                 news=row["news"],
                 news_added=row["news_added"],
+                element_type=row["element_type"],
+                price=row["price"],
             )
             for row in self._conn.execute(sql, params)
         ]

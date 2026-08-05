@@ -504,12 +504,27 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             )
         return None
 
-    from soccer.dashboard.data import forecast_explanation, forecast_slate
+    from soccer.dashboard.data import (
+        availability_adjusted_slate,
+        forecast_explanation,
+        forecast_slate,
+        format_missing,
+    )
 
     division, (home_e, away_e) = pair[0], pair[1][:2]
     home, away = home_e[0], away_e[0]
     season = home_e[1]
-    slate = forecast_slate(analytics_db, season, division, home, away)
+    # PL only: when current team news materially moves the number, fold it in as a prior and
+    # show it against the base model. Reuses the adjusted call's own raw slate, so the model is
+    # fit once, not twice. Non-PL or nobody-flagged -> None, and we fall back to the plain slate.
+    adjusted = (
+        availability_adjusted_slate(analytics_db, live_db, season, division, home, away)
+        if live_db is not None and Path(live_db).exists()
+        else None
+    )
+    slate = adjusted.raw if adjusted is not None else forecast_slate(
+        analytics_db, season, division, home, away
+    )
     if slate is None:
         return None
     res = {m.name: m.probability for m in slate.result}
@@ -535,6 +550,27 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         text += (
             f"\n\nModel leans **{lead if lead != 'Draw' else 'a draw'}**. Directional, not advice."
         )
+    if adjusted is not None:
+        adj_res = {m.name: m.probability for m in adjusted.adjusted.result}
+        news = [
+            "\n**Adjusted for team news** — a heuristic prior on today's injuries and "
+            "suspensions, not a backtested edge:"
+        ]
+        if adjusted.home_adj.is_material:
+            news.append(f"- {home} without {format_missing(adjusted.home_adj)}")
+        if adjusted.away_adj.is_material:
+            news.append(f"- {away} without {format_missing(adjusted.away_adj)}")
+        news.append(
+            f"- {home} win {res[home]:.0%} → **{adj_res[home]:.0%}** · "
+            f"draw {res['Draw']:.0%} → **{adj_res['Draw']:.0%}** · "
+            f"{away} win {res[away]:.0%} → **{adj_res[away]:.0%}**"
+        )
+        news.append(
+            f"- Expected goals: {home} {slate.home_expected:.1f} → "
+            f"**{adjusted.adjusted.home_expected:.1f}**, {away} {slate.away_expected:.1f} → "
+            f"**{adjusted.adjusted.away_expected:.1f}**"
+        )
+        text += "\n" + "\n".join(news)
     return Reply(
         text,
         suggestions=[

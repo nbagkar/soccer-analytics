@@ -188,6 +188,10 @@ def parse_availability(payload: dict[str, Any], *, fetched_at: str) -> list[Play
                 news=news,
                 news_added=element.get("news_added"),
                 fetched_at=fetched_at,
+                # element_type routes the loss (GK/DEF/MID/FWD); now_cost (price x10) weights
+                # it by quality. Both drive the forecast adjustment; kept as FPL sends them.
+                element_type=element.get("element_type"),
+                price=element.get("now_cost"),
             )
         )
     return out
