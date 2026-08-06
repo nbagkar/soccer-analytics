@@ -275,3 +275,37 @@ class TestTeamAdjustment:
 
     def test_empty_input_is_neutral(self) -> None:
         assert team_adjustment([]) == NEUTRAL_ADJUSTMENT
+
+
+class TestTeamAdjustmentSanity:
+    """Ablation guards on the prior's *routing and aggregation* -- the parts that have a right
+    answer. (The magnitude knobs -- sensitivity, caps -- deliberately aren't asserted here: with
+    no injury history to score against they're an honest prior, not a fitted quantity.) What must
+    always hold: more absences never soften the nudge, a dearer loss of the same role hurts at
+    least as much, and a deeper squad absorbs the same loss more."""
+
+    def test_more_absences_never_soften_the_nudge(self) -> None:
+        one = team_adjustment(_squad({"Havertz": ("i", None)}))
+        two = team_adjustment(_squad({"Havertz": ("i", None), "Jesus": ("i", None)}))
+        assert two.is_material
+        # Monotone: adding an absence can only cut attack further and leak no less.
+        assert two.attack_factor <= one.attack_factor
+        assert two.leak_factor >= one.leak_factor
+        assert two.lost_attack > one.lost_attack
+
+    def test_a_costlier_loss_of_the_same_role_hurts_at_least_as_much(self) -> None:
+        # Price is the only difference (both forwards): the dearer absence bends attack more.
+        dear = team_adjustment(_squad({"Havertz": ("i", None)}))  # priced 80
+        cheap = team_adjustment(_squad({"Jesus": ("i", None)}))  # priced 70
+        assert dear.attack_factor < cheap.attack_factor
+
+    def test_depth_is_resilience(self) -> None:
+        # The same forward's absence costs proportionally less once the squad is deeper, because
+        # the whole priced squad is the denominator -- losing one of many dilutes the fraction.
+        shallow = team_adjustment(_squad({"Havertz": ("i", None)}))
+        deeper = _squad({"Havertz": ("i", None)})
+        deeper.append(_arow("Nketiah", "a", 4, 55))  # extra priced cover -> bigger denominator
+        deeper.append(_arow("Trossard", "a", 3, 65))
+        deep = team_adjustment(deeper)
+        assert deep.is_material
+        assert deep.attack_factor > shallow.attack_factor

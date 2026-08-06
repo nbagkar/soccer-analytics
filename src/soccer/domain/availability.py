@@ -99,14 +99,19 @@ class AvailabilityRow:
 # caps below are deliberately conservative. The base rating already absorbs a club's *typical*
 # injuries, so this only bends the forecast for the notable, current absences.
 
-# FPL element_type -> (attack_weight, defence_weight). A forward's absence hurts scoring most,
-# a keeper's/defender's hurts conceding most, a midfielder splits. These route each missing
-# player's price (its quality weight) to the correct side of the ball.
+# FPL element_type -> (attack_weight, defence_weight). These route each missing player's price
+# (its quality weight) to the correct side of the ball. Grounded in the StatsBomb catalog, not
+# guessed: per-90 attacking output (xG + xA) and defensive-action volume were measured by
+# position bucket, then normalised within each facet to the dominant position. Attack came out
+# GK ~0 / DEF 0.17 / MID 0.52 / FWD 1.0 (forwards produce ~60% of attacking output); defence
+# DEF 1.0 / MID 0.63 / FWD 0.33 (midfielders and forwards defend more than a naive prior
+# assumes -- pressing, ball retention). The keeper is pinned to (0.0, 1.0) by hand because
+# shot-stopping saves are absent from the action set, so his measured split is an artefact.
 _ROLE_WEIGHTS: dict[int, tuple[float, float]] = {
-    1: (0.0, 1.0),  # goalkeeper
-    2: (0.1, 1.0),  # defender
-    3: (0.6, 0.4),  # midfielder
-    4: (1.0, 0.1),  # forward
+    1: (0.0, 1.0),  # goalkeeper (defence pinned; saves not in the measured action set)
+    2: (0.17, 1.0),  # defender
+    3: (0.5, 0.6),  # midfielder (incl. wingers, whom FPL classes as mids)
+    4: (1.0, 0.33),  # forward
 }
 # How hard a fully-missing contingent bends expected goals, and the caps that stop any single
 # snapshot swinging a forecast implausibly (never more than a quarter either way).
