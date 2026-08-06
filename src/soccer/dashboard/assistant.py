@@ -28,6 +28,18 @@ from soccer.sources.football_data_co_uk import (
 from soccer.storage.analytics_db import AnalyticsDB, _position_rank
 
 
+@dataclass(frozen=True)
+class ConversationContext:
+    """What the previous turn was about, so a bare follow-up resolves ("how's *their* form?",
+    "and the table?"). The chat page carries it across turns; every `answer()` returns the
+    updated one on its `Reply`. Deliberately small and serialisable -- just the entities a
+    pronoun or an in-league follow-up would need to inherit."""
+
+    teams: tuple[tuple[str, str, str], ...] = ()  # (display, division, season), question order
+    division: str | None = None
+    season: str | None = None
+
+
 @dataclass
 class Reply:
     text: str
@@ -38,6 +50,8 @@ class Reply:
     """Optional chart spec: {"kind": "xg_race"|"trajectory"|"percentiles"|"result_bar",
     "data": [...]}. Kept as plain data (no Streamlit/Altair here) so the chat page can
     render it and it survives session-state round-trips."""
+    context: ConversationContext | None = None
+    """The conversation state after this turn, for the page to feed into the next question."""
 
 
 # Plain-language league names/nicknames -> football-data.co.uk division codes (results
@@ -143,6 +157,13 @@ _LEAGUE_ALIASES = {
     "ucl": "UCL",
 }
 
+# Division -> its primary spoken name (the first alias that maps to it, which is the natural
+# one). Used to carry a league across turns: "top scorers in la liga" then "and the table?"
+# re-injects "la liga" so the follow-up stays in-league instead of snapping to the default.
+_DIVISION_PRIMARY_ALIAS: dict[str, str] = {}
+for _alias, _div in _LEAGUE_ALIASES.items():
+    _DIVISION_PRIMARY_ALIAS.setdefault(_div, _alias)
+
 # UEFA knockout competitions: stored as results so head-to-head and records use them, but
 # they have no domestic-style league title, so they're kept out of team resolution and the
 # title/honours projections (which would otherwise read a phase table as a trophy).
@@ -202,8 +223,19 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Reply:
-    """Route a question to an intent handler and answer it from the local store."""
+def answer(
+    question: str,
+    analytics_db: Path,
+    live_db: Path | None = None,
+    context: ConversationContext | None = None,
+) -> Reply:
+    """Route a question to an intent handler and answer it from the local store.
+
+    `context` is the previous turn's state (from the last `Reply.context`); when given, a bare
+    follow-up is expanded with the remembered team/league before routing, and the returned
+    `Reply` carries the updated context for the next turn. Passing no context (the default)
+    makes each call fully independent, as it was -- so every existing caller is unchanged.
+    """
     q = _norm(question)
     if not q:
         return _help()
@@ -212,7 +244,14 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
             "I don't have any data loaded yet. Head to the **Home** page to download "
             "some — no terminal needed."
         )
+    q = _augment_with_context(q, context)
+    reply = _route(q, analytics_db, live_db)
+    reply.context = _capture_context(q, analytics_db, context)
+    return reply
 
+
+def _route(q: str, analytics_db: Path, live_db: Path | None) -> Reply:
+    """Try each intent in priority order; the first that claims the question answers it."""
     for handler in (
         _intent_help,
         _intent_compare,
@@ -241,6 +280,68 @@ def answer(question: str, analytics_db: Path, live_db: Path | None = None) -> Re
         if reply is not None:
             return reply
     return _fallback(q, analytics_db)
+
+
+# --- conversation context ----------------------------------------------------
+
+_TEAM_PRONOUN = re.compile(r"\b(they|them|their|theyre|it|its|that team|this team|same team)\b")
+
+
+def _augment_with_context(q: str, context: ConversationContext | None) -> str:
+    """Expand a bare follow-up with the previous turn's entities before routing.
+
+    Two conservative carries: a team pronoun ("their", "them", "they") pulls the last team(s)
+    back in by name, and a question that names no league at all inherits the last one. Nothing
+    is added when the follow-up already names its own team or league, so an explicitly named
+    entity always wins over the remembered one.
+    """
+    if context is None:
+        return q
+    extra: list[str] = []
+    if context.teams and _TEAM_PRONOUN.search(q):
+        extra.extend(_norm(display) for display, _div, _season in context.teams)
+    if context.division and not _mentions_league(q):
+        alias = _DIVISION_PRIMARY_ALIAS.get(context.division)
+        if alias:
+            extra.append(alias)
+    return f"{q} {' '.join(extra)}" if extra else q
+
+
+def _mentions_league(q: str) -> bool:
+    """Whether the question names any league by alias, so context won't override an explicit one."""
+    return any(alias in q for alias in _LEAGUE_ALIASES)
+
+
+def _capture_context(
+    q: str, analytics_db: Path, prev: ConversationContext | None
+) -> ConversationContext:
+    """The conversation state after this turn: the team(s) and league it resolved, falling back
+    to the previous turn's whenever this one named none -- so a chain of pronoun follow-ups keeps
+    its subject. Never raises: context is a convenience, so a failure here just carries `prev`.
+    """
+    try:
+        with AnalyticsDB(analytics_db) as adb:
+            loaded = _loaded_divisions(adb)
+            if not loaded:
+                return prev or ConversationContext()
+            teams = tuple(_resolve_teams(q, _team_index(adb, loaded)))
+            named_div = _resolve_league(q, loaded)
+            if named_div is not None:
+                division: str | None = named_div
+                seasons = [s for s, d, _n in adb.seasons_loaded() if d == named_div]
+                season: str | None = _resolve_season(q, seasons) or loaded.get(named_div)
+            elif teams:
+                division, season = teams[0][1], teams[0][2]
+            else:
+                division = prev.division if prev else None
+                season = prev.season if prev else None
+    except Exception:
+        return prev or ConversationContext()
+    return ConversationContext(
+        teams=teams or (prev.teams if prev else ()),
+        division=division,
+        season=season,
+    )
 
 
 # --- entity resolution -------------------------------------------------------

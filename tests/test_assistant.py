@@ -565,3 +565,56 @@ class TestForecastTeamNews:
         reply = answer("Arsenal vs Brentford who wins?", _seed(tmp_path))
         assert "Adjusted for team news" not in reply.text
         assert reply.chart and reply.chart["kind"] == "result_bar"
+
+
+class TestConversationContext:
+    """Multi-turn follow-ups: a bare question inherits the previous turn's team or league, so
+    'tell me about Arsenal' then 'how's their form?' resolves without re-naming the club."""
+
+    def test_reply_carries_the_resolved_subject(self, tmp_path) -> None:
+        reply = answer("tell me about Arsenal", _seed(tmp_path))
+        assert reply.context is not None
+        assert any(display == "Arsenal" for display, _d, _s in reply.context.teams)
+        assert reply.context.division == "E0"
+
+    def test_pronoun_follow_up_resolves_the_last_team(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        first = answer("tell me about Arsenal", path)
+        reply = answer("how is their form?", path, context=first.context)
+        assert "Arsenal" in reply.text  # 'their' -> Arsenal, not a league-wide form list
+
+    def test_explicitly_named_team_overrides_the_context(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        first = answer("tell me about Arsenal", path)
+        reply = answer("how is Chelsea's form?", path, context=first.context)
+        assert "Chelsea" in reply.text
+        assert "Arsenal" not in reply.text  # a named club always wins over the remembered one
+
+    def test_league_carries_to_a_bare_follow_up(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="E0", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        seed_results(
+            path, division="SP1", teams=["Barcelona", "Real Madrid", "Sevilla", "Valencia"]
+        )
+        first = answer("who is top of la liga?", path)
+        assert first.context is not None and first.context.division == "SP1"
+        # 'who is in form?' names no league, so it should stay in La Liga, not snap to the default.
+        reply = answer("who is in form?", path, context=first.context)
+        assert "La Liga" in reply.text
+
+    def test_pronoun_follow_up_reaches_team_news(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_availability(live, [("Arsenal", "Saka", "i", None, "Ankle knock")])
+        first = answer("tell me about Arsenal", path, live)
+        reply = answer("are they injured?", path, live, context=first.context)
+        assert "Saka" in reply.text + str(reply.table)
+
+    def test_context_chain_keeps_subject_across_several_turns(self, tmp_path) -> None:
+        path = _seed(tmp_path)
+        r1 = answer("tell me about Arsenal", path)
+        r2 = answer("how is their form?", path, context=r1.context)
+        r3 = answer("what about their fixtures?", path, context=r2.context)
+        # Turn 3 has no team of its own and only a pronoun; the subject must survive turn 2.
+        assert r3.context is not None
+        assert any(display == "Arsenal" for display, _d, _s in r3.context.teams)

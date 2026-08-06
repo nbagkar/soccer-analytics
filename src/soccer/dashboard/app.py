@@ -275,12 +275,19 @@ def _render_assistant(settings) -> None:
     }
     if "chat" not in st.session_state:
         st.session_state.chat = [greeting]
+        st.session_state._chat_context = None
 
     prompt = st.chat_input("Ask a question…") or st.session_state.pop("_suggestion", None)
     if prompt:
         st.session_state.chat.append({"role": "user", "text": prompt})
         with st.spinner("Thinking…"):
-            reply = assistant_answer(prompt, settings.analytics_db, settings.live_db)
+            reply = assistant_answer(
+                prompt,
+                settings.analytics_db,
+                settings.live_db,
+                st.session_state.get("_chat_context"),
+            )
+        st.session_state._chat_context = reply.context
         st.session_state.chat.append(
             {
                 "role": "assistant",
