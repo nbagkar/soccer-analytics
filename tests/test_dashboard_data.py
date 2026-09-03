@@ -1090,6 +1090,168 @@ class TestUpcomingSeasonBriefing:
         assert "Newcomers FC" in promoted  # the club with no history got the promoted prior
         assert "Brentford" not in projected  # in results but not in the new fixtures -> dropped
 
+    def test_thin_sample_team_is_shrunk_not_left_to_an_unregularised_mle(self, tmp_path) -> None:
+        """Reproduces the real bug: once a new season's own results start loading (which
+        happens every season, as soon as a few matches are played), a team the fit DID see
+        -- but on only a couple of matches -- used to get an unregularised Dixon-Coles MLE
+        fit instead of the safe 'promoted' prior. One upset win replayed thousands of times
+        by the Monte Carlo turned a newly promoted side into a ~94% title favourite. This
+        also pins the season label: it must stay the season actually in progress, not
+        silently advance to the one after it just because that season now has results.
+        """
+        from soccer.dashboard.data import upcoming_season_briefing
+        from soccer.domain.names import normalize_name
+        from soccer.sources.football_data_co_uk import MatchResult
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        def row(season: str, home: str, away: str, hg: int, ag: int, d: date) -> MatchResult:
+            return MatchResult(
+                season=season,
+                division="E0",
+                match_date=d,
+                home=home,
+                away=away,
+                home_norm=normalize_name(home),
+                away_norm=normalize_name(away),
+                fthg=hg,
+                ftag=ag,
+                ftr="H" if hg > ag else "A" if ag > hg else "D",
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=None,
+                away_shots_target=None,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
+            )
+
+        # A prior season's full round robin among four established sides, with real (not
+        # uniform) variance, so the fit has genuine spread to work with.
+        scores = {
+            ("Arsenal", "Chelsea"): (2, 1),
+            ("Chelsea", "Arsenal"): (0, 2),
+            ("Arsenal", "Fulham"): (3, 0),
+            ("Fulham", "Arsenal"): (0, 1),
+            ("Arsenal", "Brentford"): (2, 0),
+            ("Brentford", "Arsenal"): (1, 2),
+            ("Chelsea", "Fulham"): (1, 1),
+            ("Fulham", "Chelsea"): (0, 1),
+            ("Chelsea", "Brentford"): (2, 1),
+            ("Brentford", "Chelsea"): (1, 2),
+            ("Fulham", "Brentford"): (1, 0),
+            ("Brentford", "Fulham"): (0, 0),
+        }
+        rows = [
+            row("2526", home, away, hg, ag, date(2025, 9, 1 + i))
+            for i, ((home, away), (hg, ag)) in enumerate(scores.items())
+        ]
+        # The new season, a few days old. One promoted side has played twice and won both --
+        # including a lopsided win over last season's strongest side. Another has been shut
+        # out in both its games -- the exact shape (0 goals, twice) that pins a small-sample
+        # Dixon-Coles fit's attack rating at the optimiser's own boundary rather than a real
+        # estimate, which a naive weighted blend does not fully protect against.
+        today = date.today()
+        rows += [
+            row("2627", "Newcomers FC", "Arsenal", 3, 0, today - timedelta(days=10)),
+            row("2627", "Chelsea", "Newcomers FC", 0, 1, today - timedelta(days=3)),
+            row("2627", "Arsenal", "Strugglers FC", 3, 0, today - timedelta(days=9)),
+            row("2627", "Strugglers FC", "Chelsea", 0, 1, today - timedelta(days=2)),
+        ]
+        analytics = tmp_path / "analytics.duckdb"
+        with AnalyticsDB(analytics) as adb:
+            adb.load_results(rows)
+
+        live = tmp_path / "live.sqlite"
+        db = LiveDB(live)
+        teams = ["Arsenal", "Chelsea", "Fulham", "Newcomers FC", "Strugglers FC"]
+        pairs = [(h, a) for h in teams for a in teams if h != a]
+        for i, (home, away) in enumerate(pairs):
+            add_match(
+                db,
+                match_id=str(i),
+                home=home,
+                away=away,
+                competition="Premier League",
+                status=MatchStatus.NOT_STARTED,
+            )
+        db.close()
+
+        result = upcoming_season_briefing(live, analytics, "E0", n_sims=2000, relegation=1)
+        assert result is not None
+        briefing, promoted = result
+
+        # Labelled the season actually in progress (2026/27), not a year ahead of it.
+        assert briefing.season == "2627"
+
+        newcomers_norm = normalize_name("Newcomers FC")
+        strugglers_norm = normalize_name("Strugglers FC")
+        assert newcomers_norm not in promoted  # it DID play -- this is the thin-sample path
+        assert strugglers_norm not in promoted
+        title_pct = {p.team: p.title_pct for p in briefing.projections}
+        assert title_pct[newcomers_norm] < 0.5  # two flattering games must not make it a lock
+
+        relegation_pct = {p.team: p.relegation_pct for p in briefing.projections}
+        # Shut out twice must not be treated as a near-certainty -- that symptom (relegation
+        # pinned close to 1.0) is what an unclipped small-sample fit produced. This end-to-end
+        # check is a smoke test; TestStabilizeThinSamples below pins the exact mechanism.
+        assert relegation_pct[strugglers_norm] < 0.8
+
+
+class TestStabilizeThinSamples:
+    """Direct tests of the blending `_stabilize_thin_samples` does, without the Monte Carlo
+    noise of a full season simulation on top -- that noise is too coarse, at a test-sized
+    team count, to reliably distinguish a clipped fix from the unclipped bug it replaced."""
+
+    def _model(self):
+        from soccer.models.dixon_coles import DixonColesModel
+
+        # Three established teams spanning a normal, realistic range.
+        return DixonColesModel(
+            attack={"a": 0.5, "b": -0.2, "c": 0.0},
+            defence={"a": 0.4, "b": -0.1, "c": 0.0},
+            home_advantage=0.2,
+            rho=-0.05,
+        )
+
+    def test_a_boundary_pinned_thin_sample_is_clipped_before_blending(self) -> None:
+        """A team the fit only saw twice, both shutouts, gets pinned at the optimiser's own
+        bound (+-3) -- a degenerate artifact of the fit, not a real estimate of its strength.
+        Blending that raw, unclipped value in (even down-weighted) can rate it worse than
+        every genuinely weak, well-supported team in the league; this is the exact defect
+        that turned a real newly promoted side into a ~100%-certain relegation candidate."""
+        from soccer.dashboard.data import SEASON_SIM_MIN_MATCHES, _stabilize_thin_samples
+
+        model = self._model()
+        model.add_team("thin", -3.0, -0.5)  # boundary-pinned attack, from 2 shutout losses
+        match_counts = {"a": 10, "b": 10, "c": 10, "thin": 2}
+        assert match_counts["thin"] < SEASON_SIM_MIN_MATCHES
+
+        promoted = _stabilize_thin_samples(model, ["a", "b", "c", "thin"], match_counts)
+
+        assert promoted == []  # the fit DID see it -- this is the thin-sample path, not it
+        established_min_attack = min(model.strengths[t] for t in ("a", "b", "c"))
+        # Never worse than the worst REAL, well-supported team -- the boundary artifact must
+        # not leak through the blend.
+        assert model.strengths["thin"] >= established_min_attack
+
+    def test_a_team_with_enough_matches_is_left_alone(self) -> None:
+        from soccer.dashboard.data import _stabilize_thin_samples
+
+        model = self._model()
+        original = dict(model.strengths)
+        match_counts = {"a": 10, "b": 10, "c": 10}
+
+        promoted = _stabilize_thin_samples(model, ["a", "b", "c"], match_counts)
+
+        assert promoted == []
+        assert model.strengths == original  # nothing to stabilise -- untouched
+
 
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.

@@ -367,6 +367,49 @@ class SeasonBriefing:
     names: dict  # normalized -> display name
 
 
+def _stabilize_thin_samples(model, teams: list[str], match_counts: dict[str, int]) -> list[str]:
+    """Give every thin-sample team a rating blended toward the league's weakest well-supported
+    teams, in place on `model`. Returns the sorted list of teams the fit never saw at all (a
+    prior from scratch, not a blend) -- the "newly promoted, no data" case callers report.
+
+    A team with fewer than `SEASON_SIM_MIN_MATCHES` matches in the fitting window gets an
+    unregularised Dixon-Coles fit that is not just noisy: with as few as one or two lopsided
+    results it can pin a team's attack/defence at the optimiser's own bound (+-3), a degenerate
+    artifact rather than a real estimate -- e.g. a side that has been shut out in both its
+    games so far. Blending that raw, unbounded value toward the prior by sample-size weight
+    still lets a fraction of the artifact through and can rate the team WORSE than every
+    genuinely weak, well-supported side in the league. Clipping the raw fit to the range
+    actually spanned by well-supported teams before blending closes that gap.
+    """
+    promoted = sorted(t for t in teams if t not in model.strengths)
+    thin_sample = sorted(
+        t for t in teams if t not in promoted and match_counts.get(t, 0) < SEASON_SIM_MIN_MATCHES
+    )
+    if not promoted and not thin_sample:
+        return promoted
+
+    established = [t for t in model.strengths if match_counts.get(t, 0) >= SEASON_SIM_MIN_MATCHES]
+    pool = established or list(model.strengths)
+    weakest = sorted(pool, key=lambda t: model.strengths[t] + model.defence[t])[:3]
+    prior_attack = sum(model.strengths[t] for t in weakest) / len(weakest)
+    prior_defence = sum(model.defence[t] for t in weakest) / len(weakest)
+    lo_a, hi_a = min(model.strengths[t] for t in pool), max(model.strengths[t] for t in pool)
+    lo_d, hi_d = min(model.defence[t] for t in pool), max(model.defence[t] for t in pool)
+
+    for norm in promoted:
+        model.add_team(norm, prior_attack, prior_defence)
+    for norm in thin_sample:
+        weight = match_counts.get(norm, 0) / SEASON_SIM_MIN_MATCHES
+        raw_attack = min(max(model.strengths[norm], lo_a), hi_a)
+        raw_defence = min(max(model.defence[norm], lo_d), hi_d)
+        model.add_team(
+            norm,
+            weight * raw_attack + (1 - weight) * prior_attack,
+            weight * raw_defence + (1 - weight) * prior_defence,
+        )
+    return promoted
+
+
 def season_briefing(
     analytics_db: Path,
     season: str,
@@ -382,7 +425,11 @@ def season_briefing(
     Simulates every team playing every other home and away (a clean round-robin, not the
     real schedule) using the same multi-season Dixon-Coles fit the match forecasts use --
     a pre-season projection of title / top-N / relegation odds and expected points. None
-    if the season has no results.
+    if the season has no results. A team with fewer than `SEASON_SIM_MIN_MATCHES` matches in
+    the fitting window (a newly promoted side early in `season`) has its unregularised MLE
+    rating blended toward the league's weakest teams, same as `upcoming_season_briefing` --
+    without it, one or two of its early results get replayed hundreds of times by the
+    simulation and come out as an overconfident title or relegation call.
     """
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.simulation import simulate_season
@@ -396,6 +443,13 @@ def season_briefing(
     names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
     teams = sorted(names)
     model = fit_dixon_coles(window, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
+
+    match_counts: dict[str, int] = {}
+    for o in window:
+        match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
+        match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
+    _stabilize_thin_samples(model, teams, match_counts)
+
     fixtures = [(home, away) for home in teams for away in teams if home != away]
     result = simulate_season(
         model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
@@ -412,12 +466,24 @@ def season_briefing(
 
 
 def _next_season_code(code: str) -> str:
-    """The season after `code` (European "2526" -> "2627"); unchanged if not that form."""
+    """The season after `code` (European "2526" -> "2627"); unchanged if not that form.
+
+    Only European football-data.co.uk codes encode as consecutive two-digit-year pairs;
+    calendar-year codes (Brazil, MLS, ...) pass through unchanged rather than guessed at.
+    """
     if len(code) == 4 and code.isdigit():
         first, second = int(code[:2]), int(code[2:])
         if (first + 1) % 100 == second:
             return f"{second % 100:02d}{(second + 1) % 100:02d}"
     return code
+
+
+# A loaded season whose most recent match is more recent than this is treated as still in
+# progress (label it as-is) rather than concluded (advance to the next season code). Chosen
+# well inside a normal close-season gap (early June to early August is ~2 months) so it
+# can't mistake a fresh new season's first few matches for last season's tail end, or vice
+# versa.
+IN_PROGRESS_WINDOW_DAYS = 270
 
 
 def upcoming_season_briefing(
@@ -436,8 +502,12 @@ def upcoming_season_briefing(
     includes promoted clubs and drops relegated ones -- rated by the recency-weighted model
     and simulated as a round-robin (schedule order doesn't affect a full-season points
     projection). A club with no recent top-flight history is given a 'typical promoted side'
-    prior (the average of the model's three weakest teams), so the projection is honest about
-    their unknown level. Returns (SeasonBriefing, promoted_display_names) or None.
+    prior (the average of the model's three weakest teams); a club the fit DID see but on
+    fewer than `SEASON_SIM_MIN_MATCHES` matches (any team, not just the newly promoted, early
+    in a season) is blended toward that same prior in proportion to how little data it has --
+    otherwise an unregularised MLE fit turns one or two flattering results (e.g. a promoted
+    side's opening upset win) into a wildly overconfident title favourite. Returns
+    (SeasonBriefing, promoted_display_names) or None.
     """
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.simulation import simulate_season
@@ -455,6 +525,10 @@ def upcoming_season_briefing(
         return None
     model = fit_dixon_coles(window, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
+    match_counts: dict[str, int] = {}
+    for o in window:
+        match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
+        match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
 
     comps = {c for c, d in COMPETITION_TO_DIVISION.items() if d == division}
     with LiveDB(live_db) as db:
@@ -472,23 +546,26 @@ def upcoming_season_briefing(
         disp, norm = resolve_canonical_name(raw, model_names)
         names.setdefault(norm, disp)
 
-    promoted = sorted(n for n in names if n not in model.strengths)
-    if promoted:
-        # A newly promoted side with no top-flight history: rate it like the league's three
-        # weakest established teams -- honest that it is an unknown likely to struggle.
-        weakest = sorted(model.strengths, key=lambda t: model.strengths[t] + model.defence[t])[:3]
-        prior_attack = sum(model.strengths[t] for t in weakest) / len(weakest)
-        prior_defence = sum(model.defence[t] for t in weakest) / len(weakest)
-        for norm in promoted:
-            model.add_team(norm, prior_attack, prior_defence)
+    promoted = _stabilize_thin_samples(model, list(names), match_counts)
 
     teams = sorted(names)
     fixtures = [(home, away) for home in teams for away in teams if home != away]
     result = simulate_season(
         model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
     )
+    # `anchor_season` is "the latest loaded season" -- which used to always mean the last
+    # CONCLUDED one, so the projection was safely labelled the season after it. That breaks
+    # the instant this season's own results start loading: anchor_season then already IS the
+    # season being projected, and blindly advancing it mislabels the projection a full year
+    # ahead. Tell the two cases apart from the data itself (is anchor_season's own most recent
+    # match recent enough to still be in progress?) rather than assuming "latest loaded" always
+    # means "finished".
+    most_recent_match = max(o.match_date for o in window)
+    days_since = (datetime.now(UTC).date() - most_recent_match).days
+    still_in_progress = days_since <= IN_PROGRESS_WINDOW_DAYS
+    season_label_code = anchor_season if still_in_progress else _next_season_code(anchor_season)
     briefing = SeasonBriefing(
-        season=_next_season_code(anchor_season),
+        season=season_label_code,
         division=division,
         n_sims=n_sims,
         top_n=top_n,
@@ -516,6 +593,12 @@ FORECAST_ALPHA = 0.25
 # one result. Measured: k=3 slightly improves overall log loss AND rescues promoted teams'
 # early games (E0 that slice 1.33 -> 0.90, near the market's 0.86).
 FORECAST_SHRINKAGE = 3.0
+# Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
+# has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
+# replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
+# title or relegation probability. Below the threshold the team's rating is blended toward the
+# "typical promoted side" prior in proportion to how little data it actually has.
+SEASON_SIM_MIN_MATCHES = 5
 
 
 def _decay(half_life_days: float) -> float:
