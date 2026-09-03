@@ -38,9 +38,16 @@ def add_match(
 ) -> None:
     # Relative to "now" so the fixture doesn't age out of the 7-day "recent" window this
     # module tests against -- a fixed past date silently fell outside it once enough real
-    # time had passed (was 2026-08-08, tests started failing by 2026-09-02).
+    # time had passed (was 2026-08-08, tests started failing by 2026-09-02). NOT_STARTED
+    # defaults to a future kickoff instead: `upcoming()` filters out anything already kicked
+    # off regardless of cached status, so a "yesterday" default would make every NOT_STARTED
+    # fixture invisible to it unless a caller overrides `observed_at` explicitly.
     if observed_at is None:
-        observed_at = datetime.now(UTC) - timedelta(days=1)
+        observed_at = (
+            datetime.now(UTC) + timedelta(days=1)
+            if status is MatchStatus.NOT_STARTED
+            else datetime.now(UTC) - timedelta(days=1)
+        )
     resolver = MatchResolver(db, EntityResolver(db))
     resolved = resolver.resolve(
         MatchObservation(
@@ -261,6 +268,50 @@ class TestLiveSnapshot:
         assert snap.kpis.total == 0
         assert snap.kpis.last_updated is None
         assert snap.kpis.freshness_label == "never"
+
+
+class TestLiveKpisAging:
+    """`is_aging` flags a refresh old enough that its "in play" matches are more likely
+    finished than actually live -- nothing re-polls them without `soccer serve` running.
+    Tested directly on the dataclass: it depends purely on wall-clock age vs `last_updated`,
+    which a DB round-trip can't control precisely (the store always stamps `updated_at` with
+    the real current time, not a test's simulated one)."""
+
+    def _kpis(self, *, in_play: int, last_updated):
+        from soccer.dashboard.data import LiveKpis
+
+        return LiveKpis(
+            total=in_play,
+            in_play=in_play,
+            finished=0,
+            competitions=1,
+            sources=1,
+            last_updated=last_updated,
+            any_stale=False,
+        )
+
+    def test_aging_when_old_and_something_in_play(self) -> None:
+        from soccer.dashboard.data import STALE_LIVE_AGE_MINUTES
+
+        old = datetime.now(UTC) - timedelta(minutes=STALE_LIVE_AGE_MINUTES + 1)
+        assert self._kpis(in_play=3, last_updated=old).is_aging
+
+    def test_not_aging_when_recent(self) -> None:
+        from soccer.dashboard.data import STALE_LIVE_AGE_MINUTES
+
+        recent = datetime.now(UTC) - timedelta(minutes=STALE_LIVE_AGE_MINUTES - 1)
+        assert not self._kpis(in_play=3, last_updated=recent).is_aging
+
+    def test_not_aging_when_nothing_in_play(self) -> None:
+        from soccer.dashboard.data import STALE_LIVE_AGE_MINUTES
+
+        # A purely historical listing doesn't go stale by going untouched -- only a claimed
+        # "in play" status can be undermined by time passing.
+        old = datetime.now(UTC) - timedelta(minutes=STALE_LIVE_AGE_MINUTES + 1)
+        assert not self._kpis(in_play=0, last_updated=old).is_aging
+
+    def test_not_aging_when_never_updated(self) -> None:
+        assert not self._kpis(in_play=0, last_updated=None).is_aging
 
 
 class TestHealthSnapshot:
@@ -889,6 +940,33 @@ class TestFixtureForecasts:
         ups = MatchStateStore(db).upcoming()
         assert [v.status for v in ups] == [MatchStatus.NOT_STARTED]
         assert ups[0].home == "C"
+
+    def test_upcoming_drops_a_stale_not_started_fixture_whose_kickoff_has_passed(
+        self, db: LiveDB
+    ) -> None:
+        """A fixture's cached status only updates when something re-polls it. Without a
+        continuously running scheduler, a match that has actually kicked off (or finished)
+        can sit at NOT_STARTED indefinitely -- it must not still show up as "upcoming"."""
+        add_match(
+            db,
+            match_id="1",
+            home="A",
+            away="B",
+            competition="EPL",
+            status=MatchStatus.NOT_STARTED,
+            observed_at=datetime.now(UTC) - timedelta(days=2),  # kickoff already passed
+        )
+        add_match(
+            db,
+            match_id="2",
+            home="C",
+            away="D",
+            competition="EPL",
+            status=MatchStatus.NOT_STARTED,
+            observed_at=datetime.now(UTC) + timedelta(days=1),
+        )
+        ups = MatchStateStore(db).upcoming()
+        assert [v.home for v in ups] == ["C"]
 
     def test_forecastable_fixture_gets_a_slate(self, tmp_path) -> None:
         from soccer.dashboard.data import fixture_forecasts

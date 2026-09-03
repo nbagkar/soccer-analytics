@@ -15,7 +15,10 @@ keeps the walk-forward backtest (a fit before every match) tolerable.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
+from typing import cast
 
 import numpy as np
 from scipy.optimize import minimize
@@ -28,7 +31,7 @@ _RHO_BOUND = 0.2  # keep the low-score correction from driving any cell non-posi
 
 @dataclass(frozen=True)
 class DatedOutcome(Outcome):  # structural: MatchResult / ResultRow satisfy it
-    match_date: object
+    match_date: date
 
 
 class DixonColesModel:
@@ -75,7 +78,7 @@ class DixonColesModel:
 
 
 def fit_dixon_coles(
-    outcomes: list[Outcome], *, time_decay: float = 0.0, max_iter: int = 300
+    outcomes: Sequence[Outcome], *, time_decay: float = 0.0, max_iter: int = 300
 ) -> DixonColesModel:
     """Fit attack/defence/home/rho by maximum likelihood.
 
@@ -97,7 +100,8 @@ def fit_dixon_coles(
     ag = np.array([o.ftag for o in outcomes], dtype=float)
 
     if time_decay > 0 and all(hasattr(o, "match_date") for o in outcomes):
-        days = np.array([o.match_date.toordinal() for o in outcomes], dtype=float)  # type: ignore[attr-defined]
+        dated = cast("Sequence[DatedOutcome]", outcomes)
+        days = np.array([o.match_date.toordinal() for o in dated], dtype=float)
         weights = np.exp(-time_decay * (days.max() - days))
     else:
         weights = np.ones(len(outcomes))

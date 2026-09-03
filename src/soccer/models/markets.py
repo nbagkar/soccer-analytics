@@ -10,6 +10,7 @@ the one already fitted.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from soccer.models.poisson import score_grid
@@ -59,7 +60,7 @@ def compute_markets(
 ) -> MarketSlate:
     grid = score_grid(lam, mu, rho)
 
-    def p(predicate) -> float:
+    def p(predicate: Callable[..., bool]) -> float:
         return sum(prob for (x, y), prob in grid.items() if predicate(x, y))
 
     home_win = p(lambda x, y: x > y)

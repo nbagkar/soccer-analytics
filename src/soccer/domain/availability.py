@@ -233,7 +233,7 @@ class AvailabilityStore:
         return len(records)
 
     def _rows(
-        self, where: str, params: tuple, *, limit: int | None = None
+        self, where: str, params: tuple[str, ...], *, limit: int | None = None
     ) -> list[AvailabilityRow]:
         sql = f"SELECT {_COLUMNS} FROM player_availability WHERE {where} ORDER BY {_ORDER_BY}"
         if limit is not None:
@@ -275,12 +275,14 @@ class AvailabilityStore:
 
     def count(self) -> int:
         """Total players held (any status)."""
-        return self._conn.execute("SELECT COUNT(*) FROM player_availability").fetchone()[0]
+        return int(self._conn.execute("SELECT COUNT(*) FROM player_availability").fetchone()[0])
 
     def flagged_count(self) -> int:
         """Players currently flagged as team news (injured / suspended / doubtful)."""
         marks = ",".join("?" * len(FLAGGED_STATUSES))
-        return self._conn.execute(
-            f"SELECT COUNT(*) FROM player_availability WHERE status IN ({marks})",
-            FLAGGED_STATUSES,
-        ).fetchone()[0]
+        return int(
+            self._conn.execute(
+                f"SELECT COUNT(*) FROM player_availability WHERE status IN ({marks})",
+                FLAGGED_STATUSES,
+            ).fetchone()[0]
+        )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -19,16 +20,12 @@ from soccer.config import get_settings
 from soccer.domain.aliases import AliasStore, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore
 from soccer.ingest.pipeline import IngestPipeline
+from soccer.sources.errors import SourceUnavailableError
 from soccer.sources.football_data_co_uk import FootballDataCoUk, division_name, season_label
 from soccer.sources.football_data_org import FootballDataOrg
 from soccer.sources.registry import SOURCES, Capability, SourceId, Trust, attributions, sources_for
-from soccer.sources.thesportsdb import (
-    ATTRIBUTION,
-    LiveResult,
-    SourceUnavailableError,
-    TheSportsDB,
-)
-from soccer.storage.analytics_db import AnalyticsDB
+from soccer.sources.thesportsdb import ATTRIBUTION, LiveResult, TheSportsDB
+from soccer.storage.analytics_db import AnalyticsDB, OddsRow, ResultRow
 from soccer.storage.live_db import LiveDB
 from soccer.storage.raw import RawStore
 
@@ -505,9 +502,20 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
     import os
 
     env = {**os.environ, "SOCCER_DATA_DIR": str(get_settings().data_dir)}
+    # files() returns a Traversable, which (unlike Path) doesn't guarantee `.parent` -- true
+    # in general for a zipped/namespace package, but this one is always a real file on disk.
+    app_path_on_disk = Path(str(app_path))
     subprocess.run(
-        [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)],
-        cwd=str(app_path.parent),
+        [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(app_path_on_disk),
+            "--server.port",
+            str(port),
+        ],
+        cwd=str(app_path_on_disk.parent),
         env=env,
         check=False,
     )
@@ -656,11 +664,13 @@ def forecast(
 ) -> None:
     """Forecast a match: outcome probabilities, expected goals, and likely scorelines."""
     from soccer.domain.names import normalize_name
+    from soccer.models.dixon_coles import DixonColesModel
     from soccer.models.elo import EloConfig, compute_ratings, expected_score
-    from soccer.models.poisson import fit_poisson
+    from soccer.models.poisson import PoissonModel, fit_poisson
 
     outcomes = _load_outcomes(season, division)
     names = _display_names(outcomes)
+    model: DixonColesModel | PoissonModel
     if mle:
         from soccer.models.dixon_coles import fit_dixon_coles
 
@@ -721,7 +731,7 @@ def backtest(
     from soccer.models.backtest import backtest_dixon_coles, backtest_poisson
 
     outcomes = _load_outcomes(season, division)
-    prior: list = []
+    prior: list[ResultRow] = []
     if history:
         with AnalyticsDB(get_settings().analytics_db) as adb:
             for s in history.split(","):
@@ -818,7 +828,7 @@ def value(
     with AnalyticsDB(settings.analytics_db) as adb:
         rows = adb.outcomes_with_odds(season, division)
         covered, total = adb.odds_coverage(season, division)
-        prior: list = []
+        prior: list[OddsRow] = []
         for s in history.split(","):
             if s.strip():
                 prior.extend(adb.outcomes_with_odds(s.strip(), division))
@@ -936,7 +946,7 @@ def simulate(
     console.print(tbl)
 
 
-def _standings_from(played: list) -> tuple[dict[str, int], dict[str, int]]:
+def _standings_from(played: list[ResultRow]) -> tuple[dict[str, int], dict[str, int]]:
     points: dict[str, int] = {}
     goal_diff: dict[str, int] = {}
     for o in played:
@@ -949,7 +959,7 @@ def _standings_from(played: list) -> tuple[dict[str, int], dict[str, int]]:
     return points, goal_diff
 
 
-def _load_outcomes(season: str, division: str) -> list:
+def _load_outcomes(season: str, division: str) -> list[ResultRow]:
     """Shared loader for the forecasting commands."""
     settings = get_settings()
     if not settings.analytics_db.exists():
@@ -968,7 +978,7 @@ def _load_outcomes(season: str, division: str) -> list:
     return outcomes
 
 
-def _display_names(outcomes: list) -> dict[str, str]:
+def _display_names(outcomes: list[ResultRow]) -> dict[str, str]:
     names: dict[str, str] = {}
     for o in outcomes:
         names[o.home_norm] = o.home
@@ -1159,14 +1169,15 @@ def serve(
         return asyncio.run(run_it())
 
     def fixtures_job() -> str:
-        if not settings.football_data_org_token:
+        token = settings.football_data_org_token
+        if not token:
             return "skipped (no football-data.org token)"
 
         async def run_it() -> str:
             today = datetime.now(UTC).date()
             with LiveDB(settings.live_db) as db:
                 async with FootballDataOrg(
-                    settings.football_data_org_token,
+                    token,
                     raw,
                     rate_limit_per_minute=settings.football_data_org_rpm,
                 ) as fd:

@@ -12,18 +12,39 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
+from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
-from soccer.models.poisson import fit_poisson_shots
+from soccer.models.evaluation import ForecastReport
+from soccer.models.markets import MarketSlate
+from soccer.models.poisson import PoissonModel, fit_poisson_shots
 from soccer.models.simulation import TeamProjection, simulate_season
+from soccer.models.value import ValueReport
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
-from soccer.storage.analytics_db import AnalyticsDB, TableRow, XgRow
+from soccer.storage.analytics_db import (
+    AnalyticsDB,
+    MatchRecord,
+    PlayerProfile,
+    PlayerRow,
+    TableRow,
+    TeamForm,
+    TeamStreak,
+    XgRow,
+)
 from soccer.storage.live_db import LiveDB
+
+# Past this age, a refresh's "in play" matches can no longer be trusted -- nothing re-polls
+# them automatically unless `soccer serve` is running as a background process, which the
+# button-driven, no-terminal-needed dashboard does not require. `any_stale` below only flags
+# a source that actively failed and fell back to cache; it says nothing about a fetch that
+# succeeded but is simply old, which is the common case for a casual, one-off "Refresh".
+STALE_LIVE_AGE_MINUTES = 120
 
 
 @dataclass(frozen=True)
@@ -47,6 +68,16 @@ class LiveKpis:
         if minutes < 60:
             return f"{minutes} min ago"
         return f"{minutes // 60}h ago"
+
+    @property
+    def is_aging(self) -> bool:
+        """Old enough that any "in play" status in this snapshot is more likely stale than
+        live. Only meaningful when something IS shown in play -- a purely historical listing
+        doesn't change by going untouched."""
+        if self.last_updated is None or self.in_play == 0:
+            return False
+        age_minutes = (datetime.now(UTC) - self.last_updated).total_seconds() / 60
+        return age_minutes > STALE_LIVE_AGE_MINUTES
 
 
 @dataclass(frozen=True)
@@ -92,9 +123,7 @@ def live_snapshot(
     if competition:
         shown = [v for v in shown if v.competition == competition]
 
-    return LiveSnapshot(
-        kpis=kpis, matches=shown, competition_counts=competition_counts, mode=mode
-    )
+    return LiveSnapshot(kpis=kpis, matches=shown, competition_counts=competition_counts, mode=mode)
 
 
 def _last_updated(db: LiveDB) -> datetime | None:
@@ -251,10 +280,10 @@ def analytics_snapshot(
 class ShotMapData:
     match_id: int
     label: str
-    shots: list[dict]
+    shots: list[dict[str, Any]]
     """Each: team, player, minute, x, y, xg, outcome, is_goal (StatsBomb 120x80 frame)."""
     team_xg: list[XgRow]
-    timeline: list[dict]
+    timeline: list[dict[str, Any]]
     """Cumulative-xG points per team: team, minute, cum_xg, is_goal, player (a step chart)."""
 
 
@@ -269,7 +298,7 @@ def shot_matches(analytics_db: Path) -> list[tuple[int, str, str, str]]:
         ]
 
 
-def _xg_timeline(shots: list[dict]) -> list[dict]:
+def _xg_timeline(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build per-team cumulative-xG points over match minutes, from a match's shots.
 
     Each team starts at (0, 0) and steps up by a shot's xG at its minute -- the "xG race"
@@ -324,8 +353,8 @@ def forecast_teams(analytics_db: Path, season: str, division: str) -> list[str]:
     return sorted(names)
 
 
-def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5):
-    """Per-team form (list[TeamForm]) for a season, hottest first. [] if no results."""
+def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5) -> list[TeamForm]:
+    """Per-team form for a season, hottest first. [] if no results."""
     if not Path(analytics_db).exists():
         return []
     with AnalyticsDB(analytics_db) as adb:
@@ -334,9 +363,9 @@ def team_form(analytics_db: Path, season: str, division: str, *, last_n: int = 5
 
 @dataclass(frozen=True)
 class SeasonRecords:
-    streaks: list  # TeamStreak, longest active unbeaten first
-    biggest_wins: list  # MatchRecord
-    highest_scoring: list  # MatchRecord
+    streaks: list[TeamStreak]  # longest active unbeaten first
+    biggest_wins: list[MatchRecord]
+    highest_scoring: list[MatchRecord]
 
 
 def season_records(
@@ -363,11 +392,13 @@ class SeasonBriefing:
     n_sims: int
     top_n: int
     relegation: int
-    projections: list  # TeamProjection, team = normalized name
-    names: dict  # normalized -> display name
+    projections: list[TeamProjection]  # team = normalized name
+    names: dict[str, str]  # normalized -> display name
 
 
-def _stabilize_thin_samples(model, teams: list[str], match_counts: dict[str, int]) -> list[str]:
+def _stabilize_thin_samples(
+    model: DixonColesModel, teams: list[str], match_counts: dict[str, int]
+) -> list[str]:
     """Give every thin-sample team a rating blended toward the league's weakest well-supported
     teams, in place on `model`. Returns the sorted list of teams the fit never saw at all (a
     prior from scratch, not a blend) -- the "newly promoted, no data" case callers report.
@@ -495,7 +526,7 @@ def upcoming_season_briefing(
     top_n: int = 4,
     relegation: int = 3,
     seed: int = 1,
-):
+) -> tuple[SeasonBriefing, list[str]] | None:
     """Monte Carlo the UPCOMING season for a division from its real loaded fixtures.
 
     The team set is the actual new-season line-up -- taken from the loaded fixtures, so it
@@ -523,6 +554,7 @@ def upcoming_season_briefing(
         )
     if not window:
         return None
+    assert anchor_season is not None  # window is only non-empty when anchor_season was truthy
     model = fit_dixon_coles(window, time_decay=_decay(FORECAST_HALF_LIFE_DAYS))
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
     match_counts: dict[str, int] = {}
@@ -640,6 +672,7 @@ def _expected_for(
     if not outcomes:
         return None
     names = {o.home_norm: o.home for o in outcomes} | {o.away_norm: o.away for o in outcomes}
+    model: DixonColesModel | PoissonModel
     if mle:
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
@@ -661,7 +694,7 @@ def forecast_slate(
     *,
     mle: bool = False,
     weighted: bool = True,
-):
+) -> MarketSlate | None:
     """Full market slate for a matchup, or None if a team is unknown.
 
     Default fit is the shots-on-target-blended Poisson (steadier than goals-only, ~half the
@@ -688,8 +721,8 @@ class AdjustedForecast:
     news. The per-club adjustments are carried so the UI can show exactly what moved -- and how
     much -- rather than presenting one opaque adjusted number."""
 
-    raw: object  # MarketSlate from the base model
-    adjusted: object  # MarketSlate after the availability nudge
+    raw: MarketSlate
+    adjusted: MarketSlate
     home_adj: AvailabilityAdjustment
     away_adj: AvailabilityAdjustment
 
@@ -898,14 +931,20 @@ def underlying_table(analytics_db: Path, season: str, division: str) -> list[Und
         r for r in rows if r.home_shots_target is not None and r.away_shots_target is not None
     ]
     tot_goals = sum(r.fthg + r.ftag for r in with_shots)
-    tot_sot = sum(r.home_shots_target + r.away_shots_target for r in with_shots)
+    # `with_shots` was already filtered to rows with both shots-on-target present, but the
+    # comprehension that filtered it doesn't narrow the *stored* elements' attribute types --
+    # cast (not int(), which rejects None outright) tells mypy what the filter guarantees.
+    tot_sot = sum(
+        cast(int, r.home_shots_target) + cast(int, r.away_shots_target) for r in with_shots
+    )
     if not tot_sot:
         return None
     conv = tot_goals / tot_sot
 
-    agg: dict[str, dict] = {}
+    agg: dict[str, dict[str, float]] = {}
     for r in with_shots:
-        hxg, axg = r.home_shots_target * conv, r.away_shots_target * conv
+        hxg = cast(int, r.home_shots_target) * conv
+        axg = cast(int, r.away_shots_target) * conv
         grid = score_grid(hxg, axg, DEFAULT_RHO)
         p_home = sum(p for (x, y), p in grid.items() if x > y)
         p_draw = sum(p for (x, y), p in grid.items() if x == y)
@@ -931,12 +970,12 @@ def underlying_table(analytics_db: Path, season: str, division: str) -> list[Und
     result = [
         UnderlyingRow(
             team=t,
-            played=d["pl"],
-            points=d["pts"],
+            played=int(d["pl"]),
+            points=int(d["pts"]),
             xpoints=d["xp"],
-            goals_for=d["gf"],
+            goals_for=int(d["gf"]),
             xgf=d["xgf"],
-            goals_against=d["ga"],
+            goals_against=int(d["ga"]),
             xga=d["xga"],
         )
         for t, d in agg.items()
@@ -970,8 +1009,8 @@ class TeamDossier:
     unbeaten: int
     winning: int
     scoring: int
-    recent: list[dict]  # last matches, most recent first
-    trajectory: list[dict]  # per-matchday cumulative points (+ expected points where shots exist)
+    recent: list[dict[str, Any]]  # last matches, most recent first
+    trajectory: list[dict[str, Any]]  # per-matchday cum. points (+ xpoints where shots exist)
 
 
 def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> TeamDossier | None:
@@ -1006,19 +1045,23 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
     with_shots = [
         o for o in outcomes if o.home_shots_target is not None and o.away_shots_target is not None
     ]
-    tot_sot = sum(o.home_shots_target + o.away_shots_target for o in with_shots)
+    tot_sot = sum(
+        cast(int, o.home_shots_target) + cast(int, o.away_shots_target) for o in with_shots
+    )
     conv = (sum(o.fthg + o.ftag for o in with_shots) / tot_sot) if tot_sot else None
 
     matches = sorted(
         (o for o in outcomes if norm in (o.home_norm, o.away_norm)), key=lambda o: o.match_date
     )
-    recent, trajectory, cum_pts, cum_xp = [], [], 0, 0.0
+    recent: list[dict[str, Any]] = []
+    trajectory: list[dict[str, Any]] = []
+    cum_pts, cum_xp = 0, 0.0
     for i, o in enumerate(matches, 1):
         at_home = o.home_norm == norm
         gf, ga = (o.fthg, o.ftag) if at_home else (o.ftag, o.fthg)
         result = "W" if gf > ga else "D" if gf == ga else "L"
         cum_pts += 3 if result == "W" else 1 if result == "D" else 0
-        point = {"matchday": i, "points": cum_pts}
+        point: dict[str, Any] = {"matchday": i, "points": cum_pts}
         if conv and o.home_shots_target is not None and o.away_shots_target is not None:
             team_sot = o.home_shots_target if at_home else o.away_shots_target
             opp_sot = o.away_shots_target if at_home else o.home_shots_target
@@ -1074,8 +1117,8 @@ class LeagueHistory:
     newest: str
     title_counts: list[tuple[str, int]]  # (team, times finishing top), most first
     record_points: tuple[str, str, int] | None  # (team, season_label, points) -- best campaign
-    biggest_wins: list[dict]
-    highest_scoring: list[dict]
+    biggest_wins: list[dict[str, str]]
+    highest_scoring: list[dict[str, str]]
 
 
 def league_history(analytics_db: Path, division: str) -> LeagueHistory | None:
@@ -1106,7 +1149,7 @@ def league_history(analytics_db: Path, division: str) -> LeagueHistory | None:
         biggest = adb.notable_matches(division, "ABS(fthg-ftag) DESC, (fthg+ftag) DESC", limit=6)
         scoring = adb.notable_matches(division, "(fthg+ftag) DESC, ABS(fthg-ftag) DESC", limit=6)
 
-    def fmt(rows: list[tuple]) -> list[dict]:
+    def fmt(rows: list[tuple[str, str, str, int, int]]) -> list[dict[str, str]]:
         return [
             {"Season": season_label(r[0]), "Result": f"{r[1]} {r[3]}-{r[4]} {r[2]}"} for r in rows
         ]
@@ -1166,7 +1209,9 @@ def league_profile(analytics_db: Path, season: str, division: str) -> LeagueProf
     )
 
 
-def market_edge(analytics_db: Path, season: str, division: str, *, model: str = "poisson"):
+def market_edge(
+    analytics_db: Path, season: str, division: str, *, model: str = "poisson"
+) -> ValueReport | None:
     """Closing-line-value backtest for a slice, or None if no odds are loaded.
 
     Uses the fast ratio-method (poisson) model by default so it can run interactively;
@@ -1185,7 +1230,9 @@ def market_edge(analytics_db: Path, season: str, division: str, *, model: str = 
         return None
 
 
-def forecast_report(analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "shots"):
+def forecast_report(
+    analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "shots"
+) -> ForecastReport | None:
     """Model-vs-market-vs-blend scorecard for a division's recent odds-bearing seasons.
 
     The honest measurement instrument: walk-forward scores the model, the vig-free closing
@@ -1210,8 +1257,10 @@ def forecast_report(analytics_db: Path, division: str, *, n_seasons: int = 6, mo
     )
 
 
-def player_board(analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"):
-    """Player leaderboard (list[PlayerRow]) from ingested shots. [] if none."""
+def player_board(
+    analytics_db: Path, *, top: int = 25, min_shots: int = 3, order: str = "xg"
+) -> list[PlayerRow]:
+    """Player leaderboard from ingested shots. [] if none."""
     if not Path(analytics_db).exists():
         return []
     with AnalyticsDB(analytics_db) as adb:
@@ -1228,8 +1277,8 @@ def player_profiles(
     order: str = "contributions",
     competition: str | None = None,
     season: str | None = None,
-):
-    """Full player profiles (list[PlayerProfile]) from ingested events. [] if none loaded."""
+) -> list[PlayerProfile]:
+    """Full player profiles from ingested events. [] if none loaded."""
     if not Path(analytics_db).exists():
         return []
     with AnalyticsDB(analytics_db) as adb:
@@ -1246,8 +1295,8 @@ def player_profiles(
 
 def player_profile(
     analytics_db: Path, player: str, *, competition: str | None = None, season: str | None = None
-):
-    """One player's full profile (PlayerProfile) or None."""
+) -> PlayerProfile | None:
+    """One player's full profile, or None."""
     if not Path(analytics_db).exists():
         return None
     with AnalyticsDB(analytics_db) as adb:
@@ -1336,9 +1385,9 @@ def player_percentiles(
     if target is None or not profiles:
         return []
 
-    def value_of(profile, attr: str, is_per90: bool) -> float:
+    def value_of(profile: PlayerProfile, attr: str, is_per90: bool) -> float:
         raw = getattr(profile, attr)
-        return profile.per90(raw) if is_per90 else raw
+        return float(profile.per90(raw)) if is_per90 else float(raw)
 
     out: list[MetricPercentile] = []
     for category, label, attr, is_per90 in _PERCENTILE_METRICS:
@@ -1455,7 +1504,7 @@ class FixtureForecast:
     competition: str
     home: str
     away: str
-    slate: object | None  # MarketSlate, or None when no model covers the matchup
+    slate: MarketSlate | None  # None when no model covers the matchup
 
 
 def fixture_forecasts(
@@ -1471,7 +1520,7 @@ def fixture_forecasts(
     from soccer.domain.names import normalize_name
     from soccer.models.markets import compute_markets
 
-    def resolve(name: str, model) -> str | None:
+    def resolve(name: str, model: PoissonModel) -> str | None:
         """Match a fixture team name to a model team: exact, curated alias, then fuzzy.
 
         Bridges verbose football-data.org names ("GD Estoril Praia") to the terser
@@ -1494,10 +1543,10 @@ def fixture_forecasts(
     with LiveDB(live_db) as db:
         ups = MatchStateStore(db).upcoming(limit=limit)
 
-    models: dict[str, object] = {}
+    models: dict[str, PoissonModel | None] = {}
     model_names: dict[str, dict[str, str]] = {}  # division -> {norm: canonical display}
 
-    def model_for(division: str):
+    def model_for(division: str) -> PoissonModel | None:
         if division not in models:
             model = None
             if Path(analytics_db).exists():

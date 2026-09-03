@@ -15,10 +15,16 @@ Two framings the CLI exposes:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
-from soccer.models.poisson import PoissonModel
+
+class ScorelineModel(Protocol):
+    """Structural type for anything `simulate_season` can run on -- PoissonModel and
+    DixonColesModel both satisfy it; only `expected_goals` is actually used here."""
+
+    def expected_goals(self, home: str, away: str) -> tuple[float, float]: ...
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,7 @@ class SimulationResult:
 
 
 def simulate_season(
-    model: PoissonModel,
+    model: ScorelineModel,
     remaining: list[tuple[str, str]],
     *,
     points_start: dict[str, int] | None = None,

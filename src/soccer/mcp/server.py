@@ -11,6 +11,8 @@ mutates; that stays with the CLI.
 
 from __future__ import annotations
 
+from typing import Any
+
 from mcp.server import MCPServer
 
 from soccer.config import get_settings
@@ -30,7 +32,7 @@ mcp = MCPServer(
 
 
 @mcp.tool()
-def get_live_matches(in_play_only: bool = True, limit: int = 50) -> dict:
+def get_live_matches(in_play_only: bool = True, limit: int = 50) -> dict[str, Any]:
     """Current live and recently-finished matches with score, status and minute.
 
     Set in_play_only=False to include finished/scheduled matches. Requires `soccer
@@ -40,19 +42,21 @@ def get_live_matches(in_play_only: bool = True, limit: int = 50) -> dict:
 
 
 @mcp.tool()
-def get_league_table(season: str = "2526", division: str = "E0") -> dict:
+def get_league_table(season: str = "2526", division: str = "E0") -> dict[str, Any]:
     """League table computed from historical results. season like '2526', division 'E0'."""
     return tools.league_table(get_settings(), season, division)
 
 
 @mcp.tool()
-def get_power_rankings(season: str = "2526", division: str = "E0", top: int = 0) -> dict:
+def get_power_rankings(season: str = "2526", division: str = "E0", top: int = 0) -> dict[str, Any]:
     """Elo power rankings from historical results. top=0 returns all teams."""
     return tools.power_rankings(get_settings(), season, division, top)
 
 
 @mcp.tool()
-def forecast_match(home: str, away: str, season: str = "2526", division: str = "E0") -> dict:
+def forecast_match(
+    home: str, away: str, season: str = "2526", division: str = "E0"
+) -> dict[str, Any]:
     """Forecast one match: outcome probabilities, expected goals and likely scorelines.
 
     Fits a Poisson model on the given season/division. If a team name is not found the
@@ -62,25 +66,25 @@ def forecast_match(home: str, away: str, season: str = "2526", division: str = "
 
 
 @mcp.tool()
-def simulate_league(season: str = "2526", division: str = "E0", sims: int = 5000) -> dict:
+def simulate_league(season: str = "2526", division: str = "E0", sims: int = 5000) -> dict[str, Any]:
     """Monte Carlo season simulation: title, top-4 and relegation probabilities per team."""
     return tools.simulate_league(get_settings(), season, division, sims)
 
 
 @mcp.tool()
-def search_teams(query: str, season: str = "2526", division: str = "E0") -> dict:
+def search_teams(query: str, season: str = "2526", division: str = "E0") -> dict[str, Any]:
     """Find team names matching a query within a season/division."""
     return tools.search_teams(get_settings(), query, season, division)
 
 
 @mcp.tool()
-def get_data_health() -> dict:
+def get_data_health() -> dict[str, Any]:
     """Source availability, live/delayed status, licensing and capability coverage."""
     return tools.data_health(get_settings())
 
 
 @mcp.tool()
-def list_available_data() -> dict:
+def list_available_data() -> dict[str, Any]:
     """What data is loaded: live match count and the historical (season, division) slices."""
     return tools.available_data(get_settings())
 

@@ -99,7 +99,7 @@ class AliasStore:
                 (entity_type, alias_norm, ck),
             ).fetchone()
             if row is not None:
-                return row["canonical_name"]
+                return str(row["canonical_name"])
         return None
 
     def all(self, entity_type: str | None = None) -> list[Alias]:

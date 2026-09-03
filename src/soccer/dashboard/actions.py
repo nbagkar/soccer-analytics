@@ -11,15 +11,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from soccer.config import Settings
+from soccer.domain.availability import PlayerAvailability
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
     FootballDataCoUk,
+    MatchResult,
     division_name,
 )
-from soccer.storage.analytics_db import AnalyticsDB
+from soccer.storage.analytics_db import AnalyticsDB, SquadMember
 from soccer.storage.live_db import LiveDB
 from soccer.storage.raw import RawStore
 
@@ -106,9 +109,9 @@ EVENT_PACKS = {
 }
 
 
-def data_status(settings: Settings) -> dict:
+def data_status(settings: Settings) -> dict[str, int]:
     """Counts for the Home page: leagues, history matches, player competitions, fixtures."""
-    status = {
+    status: dict[str, int] = {
         "leagues": 0,
         "history_matches": 0,
         "player_competitions": 0,
@@ -165,7 +168,8 @@ def update_fixtures(settings: Settings) -> str:
     the entire released fixture list loads -- every club's schedule for the season, not just
     the next few days. A competition the free tier can't serve yet is skipped.
     """
-    if not settings.football_data_org_token:
+    token = settings.football_data_org_token
+    if not token:
         return (
             "To load fixtures, add a free football-data.org token to your `.env` "
             "(SOCCER_FOOTBALL_DATA_ORG_TOKEN). Live scores work without one."
@@ -178,7 +182,7 @@ def update_fixtures(settings: Settings) -> str:
 
         with LiveDB(settings.live_db) as db:
             async with FootballDataOrg(
-                settings.football_data_org_token,
+                token,
                 raw,
                 rate_limit_per_minute=settings.football_data_org_rpm,
             ) as fd:
@@ -225,7 +229,10 @@ FULL_HISTORY_SEASONS = 34
 
 
 def load_full_history(
-    settings: Settings, *, seasons: int = FULL_HISTORY_SEASONS, on_progress: Callable | None = None
+    settings: Settings,
+    *,
+    seasons: int = FULL_HISTORY_SEASONS,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Backfill up to `seasons` of results for every starter league, idempotently.
 
@@ -260,14 +267,18 @@ def load_full_history(
 CHAMPIONS_LEAGUE_SEASONS = (2023, 2024, 2025)  # start years -> 2023/24, 2024/25, 2025/26
 
 
-def _fdorg_result(match: dict, division: str, season_code: str, registry: dict | None = None):
+def _fdorg_result(
+    match: dict[str, Any],
+    division: str,
+    season_code: str,
+    registry: dict[str, str] | None = None,
+) -> MatchResult | None:
     """Map a finished football-data.org match to a MatchResult, or None if not final.
 
     When a `registry` (norm -> canonical display) is given, team names are bridged to their
     loaded domestic spelling so cross-source head-to-head and records line up.
     """
     from soccer.domain.names import normalize_name
-    from soccer.sources.football_data_co_uk import MatchResult
 
     ft = match.get("score", {}).get("fullTime", {})
     hg, ag = ft.get("home"), ft.get("away")
@@ -332,7 +343,7 @@ def load_champions_league(
     settings: Settings,
     *,
     seasons: tuple[int, ...] = CHAMPIONS_LEAGUE_SEASONS,
-    on_progress: Callable | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Backfill Champions League results (football-data.org) into the analytics store.
 
@@ -340,7 +351,8 @@ def load_champions_league(
     skipped. Stored under division "UCL" so head-to-head and records pick them up without
     disturbing the domestic-league tables.
     """
-    if not settings.football_data_org_token:
+    token = settings.football_data_org_token
+    if not token:
         return (
             "The Champions League needs a free football-data.org token "
             "(SOCCER_FOOTBALL_DATA_ORG_TOKEN in your .env)."
@@ -350,14 +362,14 @@ def load_champions_league(
     with AnalyticsDB(settings.analytics_db) as adb:
         registry = _canonical_registry(adb)
 
-    async def run() -> list:
+    async def run() -> list[MatchResult]:
         import httpx
 
         from soccer.sources.football_data_org import FootballDataOrg
 
-        out: list = []
+        out: list[MatchResult] = []
         async with FootballDataOrg(
-            settings.football_data_org_token,
+            token,
             raw,
             rate_limit_per_minute=settings.football_data_org_rpm,
         ) as fd:
@@ -391,7 +403,9 @@ def load_champions_league(
 SQUAD_COMPETITIONS = ["PL", "ELC", "FL1", "BL1", "SA", "DED", "PPL", "PD", "BSA"]
 
 
-def update_squads(settings: Settings, *, on_progress: Callable | None = None) -> str:
+def update_squads(
+    settings: Settings, *, on_progress: Callable[[int, int], None] | None = None
+) -> str:
     """Pull every club's current squad for the domestic leagues (needs a free token).
 
     `/competitions/{code}/teams` returns a whole league's rosters in a single request, so the
@@ -400,7 +414,8 @@ def update_squads(settings: Settings, *, on_progress: Callable | None = None) ->
     assistant resolves it from the names it already knows. A competition the free tier can't
     serve is skipped rather than failing the whole run.
     """
-    if not settings.football_data_org_token:
+    token = settings.football_data_org_token
+    if not token:
         return (
             "To load squads, add a free football-data.org token to your `.env` "
             "(SOCCER_FOOTBALL_DATA_ORG_TOKEN)."
@@ -410,7 +425,7 @@ def update_squads(settings: Settings, *, on_progress: Callable | None = None) ->
     with AnalyticsDB(settings.analytics_db) as adb:
         registry = _canonical_registry(adb)
 
-    async def run() -> list:
+    async def run() -> list[SquadMember]:
         from dataclasses import replace
 
         import httpx
@@ -419,9 +434,9 @@ def update_squads(settings: Settings, *, on_progress: Callable | None = None) ->
         from soccer.ingest.mappers import map_football_data_squad
         from soccer.sources.football_data_org import FootballDataOrg
 
-        members: list = []
+        members: list[SquadMember] = []
         async with FootballDataOrg(
-            settings.football_data_org_token,
+            token,
             raw,
             rate_limit_per_minute=settings.football_data_org_rpm,
         ) as fd:
@@ -466,7 +481,7 @@ def update_availability(settings: Settings) -> str:
     with AnalyticsDB(settings.analytics_db) as adb:
         registry = _canonical_registry(adb)
 
-    async def run() -> tuple[list, bool]:
+    async def run() -> tuple[list[PlayerAvailability], bool]:
         from dataclasses import replace
 
         from soccer.dashboard.data import resolve_canonical_name
@@ -475,7 +490,7 @@ def update_availability(settings: Settings) -> str:
         async with FantasyPremierLeague(raw) as fpl:
             fetch = await fpl.bootstrap()
         records = parse_availability(fetch.payload, fetched_at=fetch.fetched_at.isoformat())
-        reconciled = []
+        reconciled: list[PlayerAvailability] = []
         for r in records:
             display, norm = resolve_canonical_name(r.team, registry)
             reconciled.append(replace(r, team=display, team_norm=norm))
@@ -492,8 +507,7 @@ def update_availability(settings: Settings) -> str:
     flagged = sum(1 for r in records if r.status in FLAGGED_STATUSES)
     stale = " (served from cache — the live fetch failed)" if is_stale else ""
     return (
-        f"Loaded availability for {len(records)} players — "
-        f"{flagged} flagged as team news{stale}."
+        f"Loaded availability for {len(records)} players — {flagged} flagged as team news{stale}."
     )
 
 
@@ -506,7 +520,9 @@ def remove_league(settings: Settings, division: str) -> str:
     return f"Removed {division_name(division)} ({removed} matches)."
 
 
-def starter_setup(settings: Settings, *, on_progress: Callable | None = None) -> str:
+def starter_setup(
+    settings: Settings, *, on_progress: Callable[[int, int], None] | None = None
+) -> str:
     """Download the first-launch starter set so a fresh install populates itself.
 
     Token-free league results for a handful of major leagues (plus fixtures if a
@@ -535,7 +551,11 @@ def starter_setup(settings: Settings, *, on_progress: Callable | None = None) ->
 
 
 def load_event_pack(
-    settings: Settings, competition_id: int, season_id: int, *, on_progress: Callable | None = None
+    settings: Settings,
+    competition_id: int,
+    season_id: int,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Ingest a StatsBomb competition's events (shots + full player stats) with progress."""
     settings.ensure_dirs()
@@ -575,7 +595,9 @@ def load_event_pack(
     )
 
 
-def load_all_events(settings: Settings, *, on_progress: Callable | None = None) -> str:
+def load_all_events(
+    settings: Settings, *, on_progress: Callable[[int, int], None] | None = None
+) -> str:
     """Load every curated player-data pack in one go, so nothing is picked by hand.
 
     Non-commercial/personal use of StatsBomb open data is within its terms, so a single

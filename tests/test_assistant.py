@@ -208,6 +208,14 @@ class TestRouting:
         reply = answer("top scorers", _seed(tmp_path))
         assert reply.table is not None
         assert "goals" in reply.text.lower()
+        assert "all-time" in reply.text.lower()  # scoped honestly, not implied "right now"
+
+    def test_top_scorers_this_season_gets_an_explicit_caveat(self, tmp_path) -> None:
+        # The free player-level archive has no current-season coverage -- "this season"
+        # cannot be honoured, so the answer must say so rather than silently ignoring it.
+        reply = answer("top scorers this season", _seed(tmp_path))
+        assert reply.table is not None
+        assert "doesn't cover the current season" in reply.text
 
     def test_best_player_by_involvement(self, tmp_path) -> None:
         # "best player" (no "scorer"/"goals") must still reach the leaderboard, ranked by
@@ -565,6 +573,42 @@ class TestForecastTeamNews:
         reply = answer("Arsenal vs Brentford who wins?", _seed(tmp_path))
         assert "Adjusted for team news" not in reply.text
         assert reply.chart and reply.chart["kind"] == "result_bar"
+
+    def test_adjustment_block_suppressed_when_it_does_not_visibly_move_anything(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A nudge can be technically nonzero (`is_material`, at its 1e-9 threshold) and still
+        round away to nothing at the block's own display precision. Printing "X is missing
+        players" followed by identical before/after numbers reads as a broken feature, not a
+        real (if modest) update -- so the block must not appear at all in that case."""
+        import soccer.dashboard.data as data_module
+        from soccer.domain.availability import NEUTRAL_ADJUSTMENT, AvailabilityAdjustment
+
+        analytics = _seed(tmp_path)
+        live = tmp_path / "live.sqlite"
+        _seed_priced_squad(live, "Brentford", self._BRENTFORD)
+
+        slate = data_module.forecast_slate(analytics, "2526", "E0", "Arsenal", "Brentford")
+        assert slate is not None
+        invisible_nudge = AvailabilityAdjustment(
+            attack_factor=1.0 - 1e-6,
+            leak_factor=1.0,
+            lost_attack=1e-6,
+            lost_defence=0.0,
+            missing=("Bench Player",),
+        )
+        assert invisible_nudge.is_material  # nonzero -- just not visibly so
+
+        def fake_adjusted(*args, **kwargs):
+            return data_module.AdjustedForecast(
+                raw=slate, adjusted=slate, home_adj=NEUTRAL_ADJUSTMENT, away_adj=invisible_nudge
+            )
+
+        monkeypatch.setattr(data_module, "availability_adjusted_slate", fake_adjusted)
+
+        reply = answer("Arsenal vs Brentford who wins?", analytics, live)
+        assert "Adjusted for team news" not in reply.text
+        assert reply.text.startswith("**Arsenal vs Brentford")  # base forecast intact
 
 
 class TestConversationContext:

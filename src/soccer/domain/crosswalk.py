@@ -117,10 +117,12 @@ class EntityResolver:
                 effective_name = aliased
 
         normalized = normalize_name(effective_name)
-        has_id = bool(source_id)
         # No-id sources key the crosswalk on the normalized name so repeat sightings
-        # of the same name are idempotent rather than duplicating.
-        crosswalk_key = source_id if has_id else f"name:{normalized}"
+        # of the same name are idempotent rather than duplicating. Narrowed on `source_id`
+        # itself (not a separately computed `has_id` bool) so the `str | None` type narrows
+        # to `str` in the truthy branch.
+        crosswalk_key = source_id if source_id else f"name:{normalized}"
+        has_id = bool(source_id)
 
         existing = self._lookup_crosswalk(entity_type, source, crosswalk_key)
         if existing is not None:
@@ -303,7 +305,7 @@ class EntityResolver:
 
     # --- inspection --------------------------------------------------------
 
-    def sources_for(self, entity_type: EntityType, internal_id: str) -> list[dict]:
+    def sources_for(self, entity_type: EntityType, internal_id: str) -> list[dict[str, object]]:
         """Every source identifier attached to one canonical entity."""
         rows = self._conn.execute(
             "SELECT source, source_entity_id, source_name, method, confidence "
@@ -314,7 +316,9 @@ class EntityResolver:
         return [dict(row) for row in rows]
 
     def entity_count(self, entity_type: EntityType) -> int:
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM canonical_entity WHERE entity_type=?",
-            (entity_type,),
-        ).fetchone()[0]
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM canonical_entity WHERE entity_type=?",
+                (entity_type,),
+            ).fetchone()[0]
+        )

@@ -24,6 +24,7 @@ from soccer.models.backtest import (
     expected_calibration_error,
 )
 from soccer.models.value import implied_probabilities
+from soccer.storage.analytics_db import OddsRow
 
 _EPS = 1e-15
 Probs = tuple[float, float, float]
@@ -130,7 +131,7 @@ def _score(preds: list[tuple[Probs, int]]) -> Score:
 
 
 def evaluate_forecasts(
-    rows: list,
+    rows: list[OddsRow],
     *,
     model: str = "poisson",
     alpha: float = 0.5,
@@ -149,7 +150,7 @@ def evaluate_forecasts(
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.poisson import fit_poisson, fit_poisson_shots
 
-    def fit(played: list):
+    def fit(played: list[OddsRow]) -> object:
         if model == "shots":
             return fit_poisson_shots(played, alpha=alpha, shrinkage=shrinkage)
         if model == "dixon_coles":
@@ -157,9 +158,9 @@ def evaluate_forecasts(
         return fit_poisson(played)
 
     chronological = sorted(rows, key=lambda o: o.match_date)
-    played: list = []
+    played: list[OddsRow] = []
     seen: set[str] = set()
-    records: list[tuple[Probs, Probs, int, object]] = []  # (model_p, market_p, actual, row)
+    records: list[tuple[Probs, Probs, int, OddsRow]] = []  # (model_p, market_p, actual, row)
     goals_preds: list[tuple[Probs, int]] = []  # goals-only Poisson, for comparison
     compare_goals = model != "poisson"
 
@@ -171,7 +172,11 @@ def evaluate_forecasts(
             and o.has_odds
         )
         if eligible:
-            fc = fit(played).forecast(o.home_norm, o.away_norm)
+            # `eligible` already required `o.has_odds` -- all three are genuinely not None.
+            assert o.close_home_odds is not None
+            assert o.close_draw_odds is not None
+            assert o.close_away_odds is not None
+            fc = fit(played).forecast(o.home_norm, o.away_norm)  # type: ignore[attr-defined]
             model_p = (fc.prob_home, fc.prob_draw, fc.prob_away)
             market_p = implied_probabilities(
                 o.close_home_odds, o.close_draw_odds, o.close_away_odds

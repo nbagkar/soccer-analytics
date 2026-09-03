@@ -14,6 +14,7 @@ one source, or between equally-live sources, does fresher fetch time decide.
 from __future__ import annotations
 
 import math
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -128,7 +129,7 @@ class MatchStateStore:
         )
         return True
 
-    def _supersedes(self, incoming: MatchState, existing) -> bool:
+    def _supersedes(self, incoming: MatchState, existing: sqlite3.Row) -> bool:
         if incoming.source == existing["source"]:
             return True  # latest word from the same source always applies
         incoming_latency = _source_latency(incoming.source)
@@ -136,7 +137,7 @@ class MatchStateStore:
         if incoming_latency != existing_latency:
             return incoming_latency < existing_latency  # more live-capable wins
         # Equally live: fresher fetch wins.
-        return incoming.observed_at.isoformat() >= existing["observed_at"]
+        return bool(incoming.observed_at.isoformat() >= existing["observed_at"])
 
     def get(self, match_id: str) -> MatchState | None:
         row = self._conn.execute(
@@ -193,14 +194,22 @@ class MatchStateStore:
         return views[:limit]
 
     def upcoming(self, *, limit: int = 100) -> list[MatchView]:
-        """Not-yet-started matches, soonest kickoff first -- the fixture list.
+        """Not-yet-started matches with a kickoff still ahead of us, soonest first -- the
+        fixture list.
 
-        A dedicated query rather than filtering `list_current`, whose kickoff-ordered
-        limit pushes future fixtures off the end behind past and live matches.
+        A dedicated query rather than filtering `list_current`, whose kickoff-ordered limit
+        pushes future fixtures off the end behind past and live matches. Also drops anything
+        whose kickoff has already passed despite a cached status of NOT_STARTED -- that status
+        only updates when something re-polls the match, so without a continuously running
+        scheduler a fixture nobody has looked at since kickoff would otherwise sit in the
+        "upcoming" list indefinitely.
         """
-        return [v for v in self.list_current(limit=10_000) if v.status is MatchStatus.NOT_STARTED][
-            :limit
-        ]
+        now = datetime.now(UTC)
+        return [
+            v
+            for v in self.list_current(limit=10_000)
+            if v.status is MatchStatus.NOT_STARTED and v.kickoff_utc >= now
+        ][:limit]
 
     def recent_finished(self, *, days: int = 7, limit: int = 300) -> list[MatchView]:
         """Concluded matches whose kickoff was within the last `days`, most recent first.

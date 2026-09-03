@@ -202,7 +202,7 @@ class FootballDataOrg:
     def _backoff(attempt: int) -> float:
         # Jittered exponential. Deterministic jitter from the attempt number so tests
         # stay reproducible without patching the clock.
-        return min(30.0, (2**attempt) + (attempt * 0.37))
+        return min(30.0, float(2**attempt) + (attempt * 0.37))
 
     def _sync_budget(self, response: httpx.Response) -> None:
         def header_int(name: str) -> int | None:

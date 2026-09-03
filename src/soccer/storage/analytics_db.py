@@ -12,6 +12,7 @@ normalized-name join, not a second identity system.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
@@ -20,6 +21,7 @@ import duckdb
 import polars as pl
 
 from soccer.sources.football_data_co_uk import MatchResult, season_sort_key
+from soccer.sources.statsbomb import PlayerMatchStats, Shot
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -147,8 +149,11 @@ _PROFILE_ORDER = {
 # a non-shooting defender still gets a row. Column order matches PlayerProfile's fields.
 # Optional competition/season filters restrict BOTH sides to matching matches, so
 # percentiles compare like with like (one league season, not a mix of eras).
-def _profile_select(competition: str | None, season: str | None = None) -> tuple[str, list]:
-    conditions, meta_params = [], []
+def _profile_select(
+    competition: str | None, season: str | None = None
+) -> tuple[str, list[str]]:
+    conditions: list[str] = []
+    meta_params: list[str] = []
     if competition:
         conditions.append("competition = ?")
         meta_params.append(competition)
@@ -503,7 +508,7 @@ class AnalyticsDB:
         self._con.execute(_SCHEMA)
         self._migrate()
 
-    def _connect(self, retries: int):
+    def _connect(self, retries: int) -> duckdb.DuckDBPyConnection:
         """Open the database, retrying briefly if another process holds the write lock.
 
         DuckDB is single-writer: while `soccer serve` writes its 6-hourly refresh, a
@@ -622,7 +627,7 @@ class AnalyticsDB:
         ).fetchall()
 
         # team -> chronological list of (points, gf, ga, result_char, over25, btts)
-        history: dict[str, list[tuple]] = defaultdict(list)
+        history: dict[str, list[tuple[int, int, int, str, bool, bool]]] = defaultdict(list)
         for _md, home, away, hg, ag in rows:
             over25, btts = (hg + ag) > 2, hg > 0 and ag > 0
             history[home].append((_pts(hg, ag), hg, ag, _res(hg, ag), over25, btts))
@@ -668,7 +673,7 @@ class AnalyticsDB:
             history[home].append((_res(hg, ag), hg > 0))
             history[away].append((_res(ag, hg), ag > 0))
 
-        def run_back(seq, predicate) -> int:
+        def run_back(seq: list[tuple[str, bool]], predicate: Callable[..., bool]) -> int:
             count = 0
             for item in reversed(seq):
                 if predicate(item):
@@ -677,7 +682,7 @@ class AnalyticsDB:
                     break
             return count
 
-        def longest_run(seq, predicate) -> int:
+        def longest_run(seq: list[tuple[str, bool]], predicate: Callable[..., bool]) -> int:
             best = current = 0
             for item in seq:
                 current = current + 1 if predicate(item) else 0
@@ -698,7 +703,9 @@ class AnalyticsDB:
         streaks.sort(key=lambda s: (-s.unbeaten, -s.winning, s.team))
         return streaks
 
-    def _match_records(self, season: str, division: str, order_by: str, limit: int) -> list:
+    def _match_records(
+        self, season: str, division: str, order_by: str, limit: int
+    ) -> list[MatchRecord]:
         rows = self._con.execute(
             "SELECT match_date, home, away, fthg, ftag FROM results "
             f"WHERE season=? AND division=? ORDER BY {order_by} LIMIT ?",  # order_by is internal
@@ -714,7 +721,9 @@ class AnalyticsDB:
         """Results with the most total goals."""
         return self._match_records(season, division, "(fthg+ftag) DESC, ABS(fthg-ftag) DESC", limit)
 
-    def notable_matches(self, division: str, order_by: str, *, limit: int = 5) -> list[tuple]:
+    def notable_matches(
+        self, division: str, order_by: str, *, limit: int = 5
+    ) -> list[tuple[str, str, str, int, int]]:
         """(season, home, away, fthg, ftag) for a division across ALL seasons, ranked.
 
         `order_by` is an internal expression (never user input) -- e.g. biggest margin or
@@ -727,7 +736,8 @@ class AnalyticsDB:
         ).fetchall()
 
     def result_count(self, season: str | None = None, division: str | None = None) -> int:
-        clauses, params = [], []
+        clauses: list[str] = []
+        params: list[str] = []
         if season is not None:
             clauses.append("season = ?")
             params.append(season)
@@ -735,7 +745,9 @@ class AnalyticsDB:
             clauses.append("division = ?")
             params.append(division)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        return self._con.execute(f"SELECT COUNT(*) FROM results{where}", params).fetchone()[0]
+        row = self._con.execute(f"SELECT COUNT(*) FROM results{where}", params).fetchone()
+        assert row is not None
+        return int(row[0])
 
     def delete_division(self, division: str) -> int:
         """Remove all results for a division. Returns the number of rows removed."""
@@ -775,7 +787,9 @@ class AnalyticsDB:
         ).fetchall()
         return [ResultRow(*r) for r in rows]
 
-    def head_to_head(self, a_norm: str, b_norm: str, *, limit: int = 200) -> list[tuple]:
+    def head_to_head(
+        self, a_norm: str, b_norm: str, *, limit: int = 200
+    ) -> list[tuple[str, str, date, str, str, int, int]]:
         """Every result between two teams (either orientation), across all loaded seasons.
 
         Returns (season, division, match_date, home, away, fthg, ftag), most recent first --
@@ -848,7 +862,7 @@ class AnalyticsDB:
 
     # --- StatsBomb shots / xG -------------------------------------------------
 
-    def load_shots(self, shots: list) -> int:
+    def load_shots(self, shots: list[Shot]) -> int:
         """Load shots, replacing each match's set so re-ingest is idempotent."""
         if not shots:
             return 0
@@ -886,7 +900,7 @@ class AnalyticsDB:
         ).fetchall()
         return [XgRow(name=r[0], team=r[1], xg=r[2], goals=r[3], shots=r[4]) for r in rows]
 
-    def shots_for(self, match_id: int) -> list[dict]:
+    def shots_for(self, match_id: int) -> list[dict[str, object]]:
         """All shots in a match with location, for shot-map rendering."""
         rows = self._con.execute(
             "SELECT team, player, minute, x, y, xg, outcome, is_goal FROM shots "
@@ -967,7 +981,7 @@ class AnalyticsDB:
             for r in rows
         ]
 
-    def player_shot_log(self, player: str) -> list[dict]:
+    def player_shot_log(self, player: str) -> list[dict[str, object]]:
         """One player's shots across all loaded matches, for a profile view."""
         rows = self._con.execute(
             "SELECT match_id, minute, xg, outcome, is_goal, is_penalty, body_part "
@@ -988,11 +1002,13 @@ class AnalyticsDB:
         ]
 
     def player_count(self) -> int:
-        return self._con.execute("SELECT COUNT(DISTINCT player) FROM shots").fetchone()[0]
+        row = self._con.execute("SELECT COUNT(DISTINCT player) FROM shots").fetchone()
+        assert row is not None
+        return int(row[0])
 
     # --- StatsBomb full-event player stats ------------------------------------
 
-    def load_player_stats(self, stats: list) -> int:
+    def load_player_stats(self, stats: list[PlayerMatchStats]) -> int:
         """Load per-match player stats, replacing each match's set so re-ingest is idempotent."""
         if not stats:
             return 0
@@ -1015,9 +1031,9 @@ class AnalyticsDB:
         return len(stats)
 
     def player_stats_count(self) -> int:
-        return self._con.execute(
-            "SELECT COUNT(DISTINCT player) FROM player_match_stats"
-        ).fetchone()[0]
+        row = self._con.execute("SELECT COUNT(DISTINCT player) FROM player_match_stats").fetchone()
+        assert row is not None
+        return int(row[0])
 
     def player_minutes(self) -> list[tuple[str, int]]:
         """(player, total minutes) for every player -- for name matching in the assistant."""
@@ -1155,10 +1171,12 @@ class AnalyticsDB:
 
     def squad_count(self) -> int:
         """Distinct players across all loaded squads -- for the doctor/home summary."""
-        return int(
-            self._con.execute("SELECT COUNT(DISTINCT player_norm) FROM squads").fetchone()[0]
-        )
+        row = self._con.execute("SELECT COUNT(DISTINCT player_norm) FROM squads").fetchone()
+        assert row is not None
+        return int(row[0])
 
     def teams_with_squads(self) -> int:
         """How many clubs have a roster loaded."""
-        return int(self._con.execute("SELECT COUNT(DISTINCT team_norm) FROM squads").fetchone()[0])
+        row = self._con.execute("SELECT COUNT(DISTINCT team_norm) FROM squads").fetchone()
+        assert row is not None
+        return int(row[0])

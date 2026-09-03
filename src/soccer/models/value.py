@@ -20,6 +20,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from soccer.storage.analytics_db import OddsRow
+
 _EPS = 1e-15
 
 
@@ -94,13 +96,13 @@ def _ll(prob: float) -> float:
 
 
 def value_backtest(
-    rows: list,
+    rows: list[OddsRow],
     *,
     model: str = "dixon_coles",
     min_history: int = 60,
     edge_threshold: float = 0.0,
     time_decay: float = 0.0,
-    prior: list | None = None,
+    prior: list[OddsRow] | None = None,
 ) -> ValueReport:
     """Walk a season in date order, betting the model's positive-EV picks at closing odds.
 
@@ -113,13 +115,13 @@ def value_backtest(
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.poisson import fit_poisson
 
-    def fit(played: list):
+    def fit(played: list[OddsRow]) -> object:
         if model == "poisson":
             return fit_poisson(played)
         return fit_dixon_coles(played, time_decay=time_decay)
 
     chronological = sorted(rows, key=lambda o: o.match_date)
-    played: list = list(prior or [])
+    played: list[OddsRow] = list(prior or [])
     seen: set[str] = {t for o in played for t in (o.home_norm, o.away_norm)}
 
     scored: list[tuple[tuple[float, float, float], tuple[float, float, float], int]] = []
@@ -134,7 +136,11 @@ def value_backtest(
             and o.has_odds
         )
         if eligible:
-            fc = fit(played).forecast(o.home_norm, o.away_norm)
+            # `eligible` already required `o.has_odds` -- all three are genuinely not None.
+            assert o.close_home_odds is not None
+            assert o.close_draw_odds is not None
+            assert o.close_away_odds is not None
+            fc = fit(played).forecast(o.home_norm, o.away_norm)  # type: ignore[attr-defined]
             model_p = (fc.prob_home, fc.prob_draw, fc.prob_away)
             odds = (o.close_home_odds, o.close_draw_odds, o.close_away_odds)
             market_p = implied_probabilities(*odds)

@@ -147,7 +147,7 @@ class FantasyPremierLeague:
     @staticmethod
     def _backoff(attempt: int) -> float:
         # Jittered exponential; deterministic jitter from the attempt keeps tests reproducible.
-        return min(30.0, (2**attempt) + (attempt * 0.37))
+        return min(30.0, float(2**attempt) + (attempt * 0.37))
 
     async def bootstrap(self) -> FplFetch:
         """The whole game state -- clubs and players with their availability -- in one request."""

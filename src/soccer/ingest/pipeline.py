@@ -14,10 +14,10 @@ from datetime import date
 
 from soccer.domain.aliases import AliasStore
 from soccer.domain.crosswalk import EntityResolver, EntityType
-from soccer.domain.match_state import MatchStateStore
-from soccer.domain.matches import MatchResolver
+from soccer.domain.match_state import MatchState, MatchStateStore
+from soccer.domain.matches import MatchObservation, MatchResolver
 from soccer.ingest.mappers import map_football_data_match, map_thesportsdb_live
-from soccer.sources.football_data_org import FootballDataOrg
+from soccer.sources.football_data_org import FetchResult, FootballDataOrg
 from soccer.sources.registry import SourceId
 from soccer.sources.thesportsdb import TheSportsDB, parse_live_match
 from soccer.storage.live_db import LiveDB
@@ -106,7 +106,7 @@ class IngestPipeline:
             self._apply_fd_result(result, summary)
         return summary
 
-    def _apply_fd_result(self, result, summary: IngestSummary) -> None:
+    def _apply_fd_result(self, result: FetchResult, summary: IngestSummary) -> None:
         """Apply every football-data.org match in one fetch, skipping unresolvable records."""
         if result.is_stale:
             summary.stale = True
@@ -188,7 +188,7 @@ class IngestPipeline:
         summary.matches = self._matches.match_count()
         return summary
 
-    def _apply(self, observation, state) -> tuple[bool, bool]:
+    def _apply(self, observation: MatchObservation, state: MatchState) -> tuple[bool, bool]:
         """Resolve one observation and upsert its state. Returns (created, state_changed)."""
         resolved = self._matches.resolve(observation)
         changed = self._state.upsert(resolved.internal_id, state)

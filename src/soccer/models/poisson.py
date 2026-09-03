@@ -16,6 +16,7 @@ results supports well.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,12 +25,23 @@ MAX_GOALS = 10  # scoreline grid ceiling; P(>10 goals) is negligible
 
 
 class Outcome(Protocol):
-    """Structural type the models consume -- MatchResult satisfies it."""
+    """Structural type the models consume -- MatchResult satisfies it.
 
-    home_norm: str
-    away_norm: str
-    fthg: int
-    ftag: int
+    Read-only properties, not plain attributes: every concrete Outcome (MatchResult,
+    ResultRow, OddsRow, ...) is a frozen dataclass, and a Protocol's plain attributes are
+    implicitly settable, which a frozen dataclass's fields structurally are not -- that
+    mismatch is invisible at runtime (nothing ever assigns through the protocol) but fails
+    strict-mode structural matching. Properties declare the read-only contract explicitly.
+    """
+
+    @property
+    def home_norm(self) -> str: ...
+    @property
+    def away_norm(self) -> str: ...
+    @property
+    def fthg(self) -> int: ...
+    @property
+    def ftag(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -142,7 +154,7 @@ def scoreline_forecast(
     )
 
 
-def fit_poisson(outcomes: list[Outcome], *, rho: float = DEFAULT_RHO) -> PoissonModel:
+def fit_poisson(outcomes: Sequence[Outcome], *, rho: float = DEFAULT_RHO) -> PoissonModel:
     """Fit team strengths by the ratio method over a set of results.
 
     attack/defence are each a single multiplicative strength per team (using all of a
@@ -185,7 +197,11 @@ def fit_poisson(outcomes: list[Outcome], *, rho: float = DEFAULT_RHO) -> Poisson
 
 
 def fit_poisson_shots(
-    outcomes: list[Outcome], *, alpha: float = 0.5, rho: float = DEFAULT_RHO, shrinkage: float = 0.0
+    outcomes: Sequence[Outcome],
+    *,
+    alpha: float = 0.5,
+    rho: float = DEFAULT_RHO,
+    shrinkage: float = 0.0,
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 

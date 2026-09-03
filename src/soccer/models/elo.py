@@ -9,17 +9,27 @@ deriving draws from Elo needs an ad-hoc extra model this deliberately avoids.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
 
 class EloOutcome(Protocol):
-    home_norm: str
-    away_norm: str
-    fthg: int
-    ftag: int
-    match_date: date
+    """Read-only properties, not plain attributes -- see `models.poisson.Outcome` for why:
+    every concrete implementer is a frozen dataclass, which plain (implicitly settable)
+    Protocol attributes fail to structurally match under strict mode."""
+
+    @property
+    def home_norm(self) -> str: ...
+    @property
+    def away_norm(self) -> str: ...
+    @property
+    def fthg(self) -> int: ...
+    @property
+    def ftag(self) -> int: ...
+    @property
+    def match_date(self) -> date: ...
 
 
 @dataclass(frozen=True)
@@ -58,11 +68,11 @@ def _margin_multiplier(goal_diff: int, *, enabled: bool) -> float:
 def expected_score(home_rating: float, away_rating: float, config: EloConfig) -> float:
     """Home team's expected result in [0,1] -- P(win) + 0.5*P(draw), home advantage in."""
     diff = home_rating + config.home_advantage - away_rating
-    return 1.0 / (1.0 + 10.0 ** (-diff / 400.0))
+    return 1.0 / (1.0 + float(10.0 ** (-diff / 400.0)))
 
 
 def compute_ratings(
-    outcomes: list[EloOutcome], config: EloConfig = _DEFAULT_CONFIG
+    outcomes: Sequence[EloOutcome], config: EloConfig = _DEFAULT_CONFIG
 ) -> dict[str, float]:
     """Final Elo per team. Processes matches in date order regardless of input order."""
     ratings: dict[str, float] = {}
@@ -81,7 +91,7 @@ def compute_ratings(
 
 
 def power_ranking(
-    outcomes: list[EloOutcome], config: EloConfig = _DEFAULT_CONFIG
+    outcomes: Sequence[EloOutcome], config: EloConfig = _DEFAULT_CONFIG
 ) -> list[EloRating]:
     """Teams ranked by final Elo, highest first."""
     ratings = compute_ratings(outcomes, config)

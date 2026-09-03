@@ -34,7 +34,9 @@ def _load(settings: Settings, season: str, division: str) -> dict[str, Any]:
     return {"outcomes": outcomes, "names": names}
 
 
-def live_matches(settings: Settings, *, in_play_only: bool = True, limit: int = 50) -> dict:
+def live_matches(
+    settings: Settings, *, in_play_only: bool = True, limit: int = 50
+) -> dict[str, Any]:
     if not settings.live_db.exists():
         return {"error": "No live data. Run `soccer ingest` first."}
     with LiveDB(settings.live_db) as db:
@@ -58,7 +60,7 @@ def live_matches(settings: Settings, *, in_play_only: bool = True, limit: int = 
     }
 
 
-def league_table(settings: Settings, season: str, division: str) -> dict:
+def league_table(settings: Settings, season: str, division: str) -> dict[str, Any]:
     if not settings.analytics_db.exists():
         return {"error": "No historical data. Run `soccer ingest-history` first."}
     with AnalyticsDB(settings.analytics_db) as adb:
@@ -86,7 +88,7 @@ def league_table(settings: Settings, season: str, division: str) -> dict:
     }
 
 
-def power_rankings(settings: Settings, season: str, division: str, top: int = 0) -> dict:
+def power_rankings(settings: Settings, season: str, division: str, top: int = 0) -> dict[str, Any]:
     loaded = _load(settings, season, division)
     if "error" in loaded:
         return loaded
@@ -104,7 +106,9 @@ def power_rankings(settings: Settings, season: str, division: str, top: int = 0)
     }
 
 
-def forecast_match(settings: Settings, season: str, division: str, home: str, away: str) -> dict:
+def forecast_match(
+    settings: Settings, season: str, division: str, home: str, away: str
+) -> dict[str, Any]:
     loaded = _load(settings, season, division)
     if "error" in loaded:
         return loaded
@@ -140,7 +144,9 @@ def forecast_match(settings: Settings, season: str, division: str, home: str, aw
     }
 
 
-def simulate_league(settings: Settings, season: str, division: str, sims: int = 5000) -> dict:
+def simulate_league(
+    settings: Settings, season: str, division: str, sims: int = 5000
+) -> dict[str, Any]:
     loaded = _load(settings, season, division)
     if "error" in loaded:
         return loaded
@@ -167,7 +173,7 @@ def simulate_league(settings: Settings, season: str, division: str, sims: int = 
     }
 
 
-def search_teams(settings: Settings, query: str, season: str, division: str) -> dict:
+def search_teams(settings: Settings, query: str, season: str, division: str) -> dict[str, Any]:
     loaded = _load(settings, season, division)
     if "error" in loaded:
         return loaded
@@ -176,7 +182,7 @@ def search_teams(settings: Settings, query: str, season: str, division: str) -> 
     return {"query": query, "matches": matches}
 
 
-def data_health(settings: Settings) -> dict:
+def data_health(settings: Settings) -> dict[str, Any]:
     sources = []
     for source in SOURCES.values():
         sources.append(
@@ -199,12 +205,12 @@ def data_health(settings: Settings) -> dict:
     return {"sources": sources, "capability_coverage": coverage}
 
 
-def available_data(settings: Settings) -> dict:
+def available_data(settings: Settings) -> dict[str, Any]:
     live_count = 0
     if settings.live_db.exists():
         with LiveDB(settings.live_db) as db:
             live_count = db.connection.execute("SELECT COUNT(*) FROM canonical_match").fetchone()[0]
-    history: list[dict] = []
+    history: list[dict[str, Any]] = []
     if settings.analytics_db.exists():
         with AnalyticsDB(settings.analytics_db) as adb:
             history = [

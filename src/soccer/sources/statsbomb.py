@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any, cast
 
 import httpx
 
@@ -97,7 +98,7 @@ _TACKLE_WON = {"Won", "Success", "Success In Play", "Success Out"}
 _RED_CARDS = {"Red Card", "Second Yellow"}
 
 
-def parse_shots(events: list[dict], match_id: int) -> list[Shot]:
+def parse_shots(events: list[dict[str, Any]], match_id: int) -> list[Shot]:
     """Extract shots from a StatsBomb events array. Tolerant of missing sub-fields."""
     shots: list[Shot] = []
     for event in events:
@@ -125,7 +126,7 @@ def parse_shots(events: list[dict], match_id: int) -> list[Shot]:
     return shots
 
 
-def parse_player_stats(events: list[dict], match_id: int) -> list[PlayerMatchStats]:
+def parse_player_stats(events: list[dict[str, Any]], match_id: int) -> list[PlayerMatchStats]:
     """Aggregate per-player match contributions from a StatsBomb events array.
 
     One pass over the events accumulates counters per player; a second short pass links
@@ -289,7 +290,7 @@ def parse_player_stats(events: list[dict], match_id: int) -> list[PlayerMatchSta
     return rows
 
 
-def parse_match_meta(match: dict) -> dict:
+def parse_match_meta(match: dict[str, Any]) -> dict[str, Any]:
     """Flatten a StatsBomb match listing into the fields the match_meta table stores.
 
     Tolerant of the nested shape (`home_team.home_team_name`, `competition.
@@ -328,19 +329,19 @@ class StatsBomb:
     def __exit__(self, *_: object) -> None:
         self._client.close()
 
-    def competitions(self) -> list[dict]:
+    def competitions(self) -> list[dict[str, Any]]:
         response = self._client.get(f"{BASE_URL}/competitions.json")
         response.raise_for_status()
-        return response.json()
+        return cast("list[dict[str, Any]]", response.json())
 
-    def matches(self, competition_id: int, season_id: int) -> list[dict]:
+    def matches(self, competition_id: int, season_id: int) -> list[dict[str, Any]]:
         response = self._client.get(f"{BASE_URL}/matches/{competition_id}/{season_id}.json")
         if response.status_code == 404:
             return []
         response.raise_for_status()
-        return response.json()
+        return cast("list[dict[str, Any]]", response.json())
 
-    def fetch_events(self, match_id: int) -> list[dict]:
+    def fetch_events(self, match_id: int) -> list[dict[str, Any]]:
         """Fetch a match's raw events and snapshot them. [] if not in the open data (404).
 
         The single network read behind both shots and player stats -- parse the returned
@@ -351,7 +352,7 @@ class StatsBomb:
             logger.info("No events for match %s (404)", match_id)
             return []
         response.raise_for_status()
-        events = response.json()
+        events: list[dict[str, Any]] = response.json()
 
         # Snapshot the raw events so anything derived can be re-parsed after a parser change.
         self._raw.write(

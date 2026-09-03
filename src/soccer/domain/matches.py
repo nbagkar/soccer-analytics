@@ -282,7 +282,7 @@ class MatchResolver:
             created=created,
         )
 
-    def sources_for(self, internal_id: str) -> list[dict]:
+    def sources_for(self, internal_id: str) -> list[dict[str, object]]:
         """Every source match id attached to one canonical match."""
         rows = self._conn.execute(
             "SELECT source, source_match_id, method, confidence FROM match_crosswalk "
@@ -292,4 +292,4 @@ class MatchResolver:
         return [dict(row) for row in rows]
 
     def match_count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM canonical_match").fetchone()[0]
+        return int(self._conn.execute("SELECT COUNT(*) FROM canonical_match").fetchone()[0])

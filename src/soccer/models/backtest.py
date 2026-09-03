@@ -18,7 +18,7 @@ Two things make the numbers meaningful:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -29,9 +29,12 @@ _EPS = 1e-15  # clamp probabilities out of log's singularity
 
 
 class DatedOutcome(Outcome, Protocol):
-    """An Outcome that also carries a date, so the walk can order matches in time."""
+    """An Outcome that also carries a date, so the walk can order matches in time.
 
-    match_date: date
+    Read-only property, not a plain attribute -- see `models.poisson.Outcome`."""
+
+    @property
+    def match_date(self) -> date: ...
 
 
 @dataclass(frozen=True)
@@ -112,23 +115,23 @@ def expected_calibration_error(bins: list[CalibrationBin]) -> float:
 
 
 def backtest_poisson(
-    outcomes: list[DatedOutcome],
+    outcomes: Sequence[DatedOutcome],
     *,
     min_history: int = 60,
     calibration_bins: int = 10,
-    prior: list[DatedOutcome] | None = None,
+    prior: Sequence[DatedOutcome] | None = None,
 ) -> BacktestResult:
     """Walk-forward backtest of the ratio-method Poisson forecast."""
     return _walk_forward(outcomes, fit_poisson, min_history, calibration_bins, prior or [])
 
 
 def backtest_dixon_coles(
-    outcomes: list[DatedOutcome],
+    outcomes: Sequence[DatedOutcome],
     *,
     min_history: int = 60,
     calibration_bins: int = 10,
     time_decay: float = 0.0,
-    prior: list[DatedOutcome] | None = None,
+    prior: Sequence[DatedOutcome] | None = None,
 ) -> BacktestResult:
     """Walk-forward backtest of the Dixon-Coles MLE forecast.
 
@@ -145,11 +148,11 @@ def backtest_dixon_coles(
 
 
 def _walk_forward(
-    outcomes: list[DatedOutcome],
+    outcomes: Sequence[DatedOutcome],
     fit: Callable[[list[Outcome]], object],
     min_history: int,
     calibration_bins: int,
-    prior: list[DatedOutcome],
+    prior: Sequence[DatedOutcome],
 ) -> BacktestResult:
     """Walk a season in date order, predicting each match from a model fit on earlier ones.
 

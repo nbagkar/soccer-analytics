@@ -17,7 +17,9 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from soccer.domain.availability import AvailabilityRow
 from soccer.domain.names import normalize_name
 from soccer.sources.football_data_co_uk import (
     CUP_DIVISIONS,
@@ -44,9 +46,9 @@ class ConversationContext:
 class Reply:
     text: str
     """Markdown answer."""
-    table: list[dict] | None = None
+    table: list[dict[str, Any]] | None = None
     suggestions: list[str] = field(default_factory=list)
-    chart: dict | None = None
+    chart: dict[str, Any] | None = None
     """Optional chart spec: {"kind": "xg_race"|"trajectory"|"percentiles"|"result_bar",
     "data": [...]}. Kept as plain data (no Streamlit/Altair here) so the chat page can
     render it and it survives session-state round-trips."""
@@ -470,8 +472,11 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
     # (a suffix the index omits, "Newcastle United" stored as "Newcastle"), or trailing a
     # club-name word even for an unloaded side. Otherwise it's the colloquial Manchester ref.
     for alias, canonical in _AMBIGUOUS_ALIASES.items():
-        display = index.get(canonical, (None,))[0]
-        if display is None or display in hits:
+        amb_entry = index.get(canonical)
+        if amb_entry is None:
+            continue
+        amb_display = amb_entry[0]
+        if amb_display in hits:
             continue
         for am in re.finditer(rf"\b{re.escape(alias)}\b", q):
             start = am.start()
@@ -480,7 +485,7 @@ def _resolve_teams(q: str, index: dict[str, tuple[str, str, str]]) -> list[tuple
             prev = q[:start].split()
             if prev and prev[-1] not in _ALIAS_STOPWORDS and len(prev[-1]) >= 5:
                 continue
-            hits[display] = (start, index[canonical])
+            hits[amb_display] = (start, index[canonical])
             break
     return [entry for _pos, entry in sorted(hits.values(), key=lambda pe: pe[0])]
 
@@ -590,7 +595,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             return None
         index = _team_index(adb, loaded)
     teams = _resolve_teams(q, index)
-    by_div: dict[str, list] = {}
+    by_div: dict[str, list[tuple[str, str]]] = {}
     for display, division, season in teams:
         by_div.setdefault(division, []).append((display, season))
     pair = next(((d, t) for d, t in by_div.items() if len(t) >= 2), None)
@@ -633,7 +638,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     others = ", ".join(f"{a}-{b} ({p:.0%})" for a, b, p in slate.correct_scores[1:3])
     over = next(o for o in slate.over_under if o.line == 2.5).over
     btts = next(m.probability for m in slate.btts if m.name == "Yes")
-    lead = max(res, key=res.get)
+    lead = max(res, key=lambda k: res[k])
     text = (
         f"**{home} vs {away}** ({division_name(division)})\n\n"
         f"- Expected goals: {home} **{slate.home_expected:.1f}**, "
@@ -653,25 +658,43 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         )
     if adjusted is not None:
         adj_res = {m.name: m.probability for m in adjusted.adjusted.result}
-        news = [
-            "\n**Adjusted for team news** — a heuristic prior on today's injuries and "
-            "suspensions, not a backtested edge:"
-        ]
-        if adjusted.home_adj.is_material:
-            news.append(f"- {home} without {format_missing(adjusted.home_adj)}")
-        if adjusted.away_adj.is_material:
-            news.append(f"- {away} without {format_missing(adjusted.away_adj)}")
-        news.append(
-            f"- {home} win {res[home]:.0%} → **{adj_res[home]:.0%}** · "
-            f"draw {res['Draw']:.0%} → **{adj_res['Draw']:.0%}** · "
-            f"{away} win {res[away]:.0%} → **{adj_res[away]:.0%}**"
+        # One more decimal than the headline numbers above: team-news nudges are individually
+        # small (a handful of percentage points at most, per the bounded attack/leak factors),
+        # and at the headline's whole-percent rounding the before/after often lands on the same
+        # displayed number even though the underlying probability genuinely moved -- which reads
+        # as "this feature does nothing" rather than as a real, if modest, adjustment.
+        result_line = (
+            f"- {home} win {res[home]:.1%} → **{adj_res[home]:.1%}** · "
+            f"draw {res['Draw']:.1%} → **{adj_res['Draw']:.1%}** · "
+            f"{away} win {res[away]:.1%} → **{adj_res[away]:.1%}**"
         )
-        news.append(
-            f"- Expected goals: {home} {slate.home_expected:.1f} → "
-            f"**{adjusted.adjusted.home_expected:.1f}**, {away} {slate.away_expected:.1f} → "
-            f"**{adjusted.adjusted.away_expected:.1f}**"
+        xg_line = (
+            f"- Expected goals: {home} {slate.home_expected:.2f} → "
+            f"**{adjusted.adjusted.home_expected:.2f}**, {away} {slate.away_expected:.2f} → "
+            f"**{adjusted.adjusted.away_expected:.2f}**"
         )
-        text += "\n" + "\n".join(news)
+        # Even at the extra decimal, a small enough nudge can still round away to nothing --
+        # showing a "such-and-such player is out" block that then displays no visible change
+        # at all is worse than not mentioning it, so skip the whole block rather than that.
+        visibly_moved = (
+            f"{res[home]:.1%}" != f"{adj_res[home]:.1%}"
+            or f"{res['Draw']:.1%}" != f"{adj_res['Draw']:.1%}"
+            or f"{res[away]:.1%}" != f"{adj_res[away]:.1%}"
+            or f"{slate.home_expected:.2f}" != f"{adjusted.adjusted.home_expected:.2f}"
+            or f"{slate.away_expected:.2f}" != f"{adjusted.adjusted.away_expected:.2f}"
+        )
+        if visibly_moved:
+            news = [
+                "\n**Adjusted for team news** — a heuristic prior on today's injuries and "
+                "suspensions, not a backtested edge:"
+            ]
+            if adjusted.home_adj.is_material:
+                news.append(f"- {home} without {format_missing(adjusted.home_adj)}")
+            if adjusted.away_adj.is_material:
+                news.append(f"- {away} without {format_missing(adjusted.away_adj)}")
+            news.append(result_line)
+            news.append(xg_line)
+            text += "\n" + "\n".join(news)
     return Reply(
         text,
         suggestions=[
@@ -704,9 +727,10 @@ def _short(text: str | None, limit: int = 72) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def _find_availability_for_player(rows: list, q: str):
+def _find_availability_for_player(rows: list[AvailabilityRow], q: str) -> AvailabilityRow | None:
     """The stored player a fitness question names, if any -- longest whole-word match wins."""
-    best, best_len = None, 0
+    best: AvailabilityRow | None = None
+    best_len = 0
     for row in rows:
         for name in (row.full_name, row.player):
             n = _norm(name or "")
@@ -935,8 +959,20 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
             f"**Top scorers{scope}** — {lead.player} leads with "
             f"**{lead.goals} goals** (xG {lead.xg:.1f})."
         )
+    # "Top scorers" reads as "right now" to most people, but the free player-level data
+    # (StatsBomb) is a fixed historical archive with no current-season coverage -- this is
+    # always pooled across every loaded season, all-time, never just the current one. Spell
+    # that out explicitly (not just a trailing caption) whenever the question asked for
+    # "this season" specifically, since that qualifier silently cannot be honoured.
+    if re.search(r"this season|current season|so far this (season|year)|right now", q):
+        caveat = (
+            " Note: free player-level data doesn't cover the current season, so this can't be "
+            "narrowed to it — shown across every loaded historical season instead."
+        )
+    else:
+        caveat = " All-time across every loaded season, not just the current one."
     return Reply(
-        headline + " Across all loaded seasons.",
+        headline + caveat,
         table=rows,
         suggestions=[f"Tell me about {lead.player}", "Who is the best playmaker?"],
     )
@@ -996,8 +1032,8 @@ def _intent_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         if adb.player_stats_count() == 0:
             return None
         names = _resolve_players(q, adb, _team_tokens(adb), limit=2)
-        profiles = [adb.player_profile(n) for n in names]
-    profiles = [p for p in profiles if p is not None]
+        maybe_profiles = [adb.player_profile(n) for n in names]
+    profiles = [p for p in maybe_profiles if p is not None]
     if len(profiles) < 2:
         return None
     a, b = profiles[0], profiles[1]
@@ -1205,6 +1241,7 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
             return None
         index = _team_index(adb, loaded)
         named = _resolve_teams(q, index)
+        division: str | None
         if named:  # a club is named -> use its own league
             _display, division, season = named[0]
         else:
@@ -1418,6 +1455,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             )
         rows = []
         for f in mine[:6]:
+            assert f.slate is not None  # `fixtures` was already filtered to slate is not None
             hx, ax, _ = f.slate.most_likely_score
             res = [m.probability for m in f.slate.result]
             home_is = tnorm in _norm(f.home)
@@ -1431,6 +1469,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
                 }
             )
         nxt = mine[0]
+        assert nxt.slate is not None
         home_is = tnorm in _norm(nxt.home)
         opp = nxt.away if home_is else nxt.home
         res = [m.probability for m in nxt.slate.result]
@@ -1446,6 +1485,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
 
     rows = []
     for f in fixtures[:8]:
+        assert f.slate is not None  # `fixtures` was already filtered to slate is not None
         x, y, _ = f.slate.most_likely_score
         res = [m.probability for m in f.slate.result]
         rows.append(
@@ -1573,7 +1613,9 @@ def _covered_tokens(name: str, q_words: set[str]) -> set[str]:
     return {w for w in _norm(name).split() if len(w) >= 4 and w not in _SB_STOP} & q_words
 
 
-def _find_shot_match(q: str, matches: list[tuple]) -> tuple[int, str, str] | None:
+def _find_shot_match(
+    q: str, matches: list[tuple[int, str, str, str]]
+) -> tuple[int, str, str] | None:
     """The loaded StatsBomb match whose two clubs are both named in the question.
 
     Scores every "Home v Away" label by how many distinctive name tokens the question covers
@@ -1744,7 +1786,7 @@ def _intent_league_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
     if len(named) < 2 and not (which and metric_kw):
         return None
 
-    from soccer.dashboard.data import league_profile
+    from soccer.dashboard.data import LeagueProfile, league_profile
 
     divs = named[:4] if len(named) >= 2 else [d for d in loaded if d not in _CUP_DIVISIONS]
     profiles = [p for p in (league_profile(analytics_db, loaded[d], d) for d in divs) if p]
@@ -1760,7 +1802,7 @@ def _intent_league_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
     else:
         metric, label = "goals", "goals per game"
 
-    def metric_value(p) -> float:
+    def metric_value(p: LeagueProfile) -> float:
         if metric == "draws":
             return p.draw_pct
         if metric == "home":
@@ -1830,14 +1872,14 @@ def _intent_season_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
         if len(matched) >= 2:
             s_old, s_new = matched[-2], matched[-1]
 
-    from soccer.dashboard.data import team_dossier
+    from soccer.dashboard.data import TeamDossier, team_dossier
 
     d_new = team_dossier(analytics_db, division, s_new, display)
     d_old = team_dossier(analytics_db, division, s_old, display)
     if d_new is None or d_old is None:
         return None
 
-    def row(d) -> dict:
+    def row(d: TeamDossier) -> dict[str, Any]:
         return {
             "Season": season_label(d.season),
             "Pos": d.position,

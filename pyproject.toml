@@ -27,7 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4"]
+# pandas is already pulled in transitively (altair/streamlit need it for `.to_pandas()`
+# frames); listed explicitly because dashboard/app.py now imports it directly for typing.
+dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4", "pandas>=2.0"]
 # socceraction caps numpy<2 and Python<3.13 (see docs/source-verification.md). Installing
 # this extra therefore constrains numpy for the whole environment and may need an older
 # scipy; resolve when StatsBomb/SPADL work actually begins.
@@ -39,6 +41,9 @@ dev = [
     "respx>=0.21",
     "ruff>=0.5",
     "mypy>=1.10",
+    # Type stubs so `strict = true` below is actually checkable, not silently skipped.
+    "scipy-stubs>=1.11",
+    "pandas-stubs>=2.0",
 ]
 
 [project.scripts]

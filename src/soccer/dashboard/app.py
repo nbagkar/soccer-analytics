@@ -13,16 +13,29 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 from __future__ import annotations
 
 import html
+from typing import Any, Literal, cast, overload
 
 import altair as alt
+import pandas as pd
 import polars as pl
 import streamlit as st
+from streamlit.delta_generator import DeltaGenerator
 
-from soccer.config import get_settings
+from soccer.config import Settings, get_settings
 from soccer.dashboard.data import (
+    AdjustedForecast,
     AnalyticsSnapshot,
+    FixtureForecast,
+    ForecastExplanation,
     HealthSnapshot,
+    LeagueHistory,
     LiveSnapshot,
+    MetricPercentile,
+    SeasonBriefing,
+    SeasonRecords,
+    ShotMapData,
+    TeamDossier,
+    UnderlyingRow,
     analytics_available,
     analytics_snapshot,
     availability_adjusted_slate,
@@ -53,9 +66,26 @@ from soccer.dashboard.data import (
     upcoming_season_briefing,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
+from soccer.models.evaluation import BlendPoint, ForecastReport, OutcomeCalibration
+from soccer.models.markets import Market, MarketSlate, OverUnder
+from soccer.models.simulation import TeamProjection
+from soccer.models.value import ValueReport
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
+from soccer.storage.analytics_db import MatchRecord, PlayerProfile, PlayerRow, TeamForm
 from soccer.storage.live_db import LiveDB
+
+# What st.altair_chart actually accepts -- a plain `alt.Chart` return type is too narrow for
+# the layered/concatenated charts these builders produce (e.g. `bars + labels`).
+AltChart = (
+    alt.Chart
+    | alt.ConcatChart
+    | alt.FacetChart
+    | alt.HConcatChart
+    | alt.LayerChart
+    | alt.RepeatChart
+    | alt.VConcatChart
+)
 
 # Reserved status palette: (text colour, short label). Every status renders with its
 # label, so meaning never rests on colour alone.
@@ -97,7 +127,7 @@ def _go(page: str) -> None:
     st.rerun()
 
 
-def _render_home(settings) -> None:
+def _render_home(settings: Settings) -> None:
     from soccer.dashboard import actions
 
     status = actions.data_status(settings)
@@ -109,10 +139,12 @@ def _render_home(settings) -> None:
         st.session_state._setup_tried = True
         st.info("Welcome! Setting up a starter set of leagues for you — a one-time download.")
         bar = st.progress(0.0, "Downloading…")
+
+        def on_progress(d: int, t: int) -> None:
+            bar.progress(d / t, f"{d}/{t} leagues")
+
         try:
-            message = actions.starter_setup(
-                settings, on_progress=lambda d, t: bar.progress(d / t, f"{d}/{t} leagues")
-            )
+            message = actions.starter_setup(settings, on_progress=on_progress)
             bar.empty()
             st.toast(message, icon="✅")
             st.rerun()
@@ -168,7 +200,7 @@ def _render_home(settings) -> None:
     )
 
 
-def _render_data_manager(settings) -> None:
+def _render_data_manager(settings: Settings) -> None:
     """Optional data top-ups, tucked away from the main flow -- most users never need it."""
     from soccer.dashboard import actions
 
@@ -186,9 +218,11 @@ def _render_data_manager(settings) -> None:
         )
         if st.button("Load full history (all leagues)", key="add_full_history"):
             bar = st.progress(0.0, "Starting…")
-            msg = actions.load_full_history(
-                settings, on_progress=lambda d, t: bar.progress(d / t, f"league {d}/{t}")
-            )
+
+            def on_progress(d: int, t: int) -> None:
+                bar.progress(d / t, f"league {d}/{t}")
+
+            msg = actions.load_full_history(settings, on_progress=on_progress)
             bar.empty()
             st.success(msg)
         st.caption(
@@ -206,26 +240,27 @@ def _render_data_manager(settings) -> None:
         )
         if st.button("Load all player data", key="add_all_events"):
             bar = st.progress(0.0, "Starting…")
-            msg = actions.load_all_events(
-                settings, on_progress=lambda d, t: bar.progress(d / t, f"dataset {d}/{t}")
-            )
+
+            def on_progress(d: int, t: int) -> None:
+                bar.progress(d / t, f"dataset {d}/{t}")
+
+            msg = actions.load_all_events(settings, on_progress=on_progress)
             bar.empty()
             st.success(msg)
         pack = st.selectbox("Or a single dataset", list(actions.EVENT_PACKS))
         if st.button("Load this one", key="add_events"):
             comp_id, season_id, _n = actions.EVENT_PACKS[pack]
             bar = st.progress(0.0, "Starting…")
-            msg = actions.load_event_pack(
-                settings,
-                comp_id,
-                season_id,
-                on_progress=lambda d, t: bar.progress(d / t, f"{d}/{t} matches"),
-            )
+
+            def on_progress(d: int, t: int) -> None:
+                bar.progress(d / t, f"{d}/{t} matches")
+
+            msg = actions.load_event_pack(settings, comp_id, season_id, on_progress=on_progress)
             bar.empty()
             st.success(msg)
 
 
-def _render_chat_chart(chart) -> None:
+def _render_chat_chart(chart: dict[str, Any] | None) -> None:
     """Render an assistant Reply.chart spec with the same builders the pages use."""
     if not chart or not chart.get("data"):
         return
@@ -240,7 +275,7 @@ def _render_chat_chart(chart) -> None:
         st.altair_chart(_outcome_bar_chart(chart["data"]), width="stretch")
 
 
-def _outcome_bar_chart(rows: list[dict]):
+def _outcome_bar_chart(rows: list[dict[str, Any]]) -> AltChart:
     """Win/draw/away probability bars from [{outcome, pct}, ...] (home, draw, away order)."""
     frame = pl.DataFrame(rows).to_pandas()
     order = [r["outcome"] for r in rows]
@@ -256,10 +291,10 @@ def _outcome_bar_chart(rows: list[dict]):
         )
     )
     labels = bars.mark_text(align="left", dx=3).encode(text=alt.Text("pct:Q", format=".0f"))
-    return (bars + labels).properties(height=110)
+    return cast(AltChart, (bars + labels).properties(height=110))
 
 
-def _render_assistant(settings) -> None:
+def _render_assistant(settings: Settings) -> None:
     from soccer.dashboard.assistant import answer as assistant_answer
 
     st.caption(
@@ -327,6 +362,13 @@ def _render_live(snap: LiveSnapshot) -> None:
     cols[3].metric("Sources", k.sources, border=True)
     cols[4].metric("Updated", k.freshness_label, border=True)
 
+    if k.is_aging:
+        st.warning(
+            f'⚠ Last refreshed **{k.freshness_label}** — matches shown "in play" may well '
+            "have finished since. Go to **Home** → **Refresh live scores** for the current "
+            "state.",
+            icon="⚠️",
+        )
     if k.any_stale:
         st.warning(
             "⚠ Some rows are **stale** — served from cache after a source failed. "
@@ -450,7 +492,7 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=False)
 
 
-def _html_table(rows: list[dict]) -> str:
+def _html_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     headers = rows[0].keys()
@@ -473,7 +515,7 @@ def _cached_analytics(db_path: str, season: str, division: str) -> AnalyticsSnap
 
 
 @st.cache_data(show_spinner="Testing the model against the closing line…")
-def _cached_market_edge(db_path: str, season: str, division: str):
+def _cached_market_edge(db_path: str, season: str, division: str) -> ValueReport | None:
     # The walk-forward value backtest is heavy; cache it per (path, season, division).
     from pathlib import Path
 
@@ -481,42 +523,44 @@ def _cached_market_edge(db_path: str, season: str, division: str):
 
 
 @st.cache_data(show_spinner="Scoring the model against the market over recent seasons…")
-def _cached_forecast_report(db_path: str, division: str, n_seasons: int):
+def _cached_forecast_report(db_path: str, division: str, n_seasons: int) -> ForecastReport | None:
     from pathlib import Path
 
     return forecast_report(Path(db_path), division, n_seasons=n_seasons)
 
 
 @st.cache_data(show_spinner="Building the team dossier…")
-def _cached_team_dossier(db_path: str, division: str, season: str, team: str):
+def _cached_team_dossier(db_path: str, division: str, season: str, team: str) -> TeamDossier | None:
     from pathlib import Path
 
     return team_dossier(Path(db_path), division, season, team)
 
 
 @st.cache_data(show_spinner="Gathering the all-time records…")
-def _cached_league_history(db_path: str, division: str):
+def _cached_league_history(db_path: str, division: str) -> LeagueHistory | None:
     from pathlib import Path
 
     return league_history(Path(db_path), division)
 
 
 @st.cache_data(show_spinner="Simulating the season…")
-def _cached_season_briefing(db_path: str, season: str, division: str):
+def _cached_season_briefing(db_path: str, season: str, division: str) -> SeasonBriefing | None:
     from pathlib import Path
 
     return season_briefing(Path(db_path), season, division)
 
 
 @st.cache_data(ttl=600, show_spinner="Projecting the upcoming season…")
-def _cached_upcoming_season_briefing(live_db: str, analytics_db: str, division: str):
+def _cached_upcoming_season_briefing(
+    live_db: str, analytics_db: str, division: str
+) -> tuple[SeasonBriefing, list[str]] | None:
     from pathlib import Path
 
     return upcoming_season_briefing(Path(live_db), Path(analytics_db), division)
 
 
 @st.cache_data(ttl=600, show_spinner="Forecasting the season's fixtures…")
-def _cached_fixture_forecasts(live_db: str, analytics_db: str, limit: int):
+def _cached_fixture_forecasts(live_db: str, analytics_db: str, limit: int) -> list[FixtureForecast]:
     """Cached full-season fixtures + forecasts. Forecasting a whole season's ~3k fixtures
     is a few seconds, so it's cached (TTL, and cleared when fixtures are refreshed) rather
     than recomputed on every rerun and filter change."""
@@ -525,7 +569,7 @@ def _cached_fixture_forecasts(live_db: str, analytics_db: str, limit: int):
     return fixture_forecasts(Path(live_db), Path(analytics_db), limit=limit)
 
 
-def _render_season(briefing) -> None:
+def _render_season(briefing: SeasonBriefing) -> None:
     st.subheader(
         f"{division_name(briefing.division)} {season_label(briefing.season)}", anchor=False
     )
@@ -589,13 +633,29 @@ def _render_season(briefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
+@overload
+def _league_season_pickers(
+    available: list[tuple[str, str, int]],
+    *,
+    extra: int,
+    key: str = "ls",
+    latest_only: bool = False,
+) -> tuple[str, str, list[DeltaGenerator]]: ...
+@overload
+def _league_season_pickers(
+    available: list[tuple[str, str, int]],
+    *,
+    extra: Literal[0] = 0,
+    key: str = "ls",
+    latest_only: bool = False,
+) -> tuple[str, str]: ...
 def _league_season_pickers(
     available: list[tuple[str, str, int]],
     *,
     extra: int = 0,
     key: str = "ls",
     latest_only: bool = False,
-) -> tuple:
+) -> tuple[str, str] | tuple[str, str, list[DeltaGenerator]]:
     """Dependent League + Season selectors laid out as a row on the page.
 
     Returns (season, division). Pass `extra` to reserve that many trailing columns for a
@@ -607,7 +667,7 @@ def _league_season_pickers(
     season -- for the Predictions tabs, where projecting a finished past season is not a
     forecast.
     """
-    by_league: dict[str, list] = {}
+    by_league: dict[str, list[Any]] = {}
     for season, division, _n in available:
         entry = by_league.setdefault(division_name(division), [division, []])
         entry[1].append(season)
@@ -629,7 +689,7 @@ def _league_season_pickers(
     return season, division
 
 
-def _render_records(records) -> None:
+def _render_records(records: SeasonRecords) -> None:
     st.caption(
         "Active runs counted back from each team's most recent match, plus the season's "
         "standout results. Streaks are the records to watch."
@@ -668,7 +728,7 @@ def _render_records(records) -> None:
         )
 
 
-def _title_bar_chart(counts):
+def _title_bar_chart(counts: list[tuple[str, int]]) -> AltChart:
     top = counts[:10]
     frame = pl.DataFrame({"team": [t for t, _n in top], "titles": [n for _t, n in top]}).to_pandas()
     base = alt.Chart(frame).encode(
@@ -677,10 +737,10 @@ def _title_bar_chart(counts):
     )
     bars = base.mark_bar(color="#16c784", cornerRadiusEnd=4, size=16)
     labels = base.mark_text(align="left", dx=4, color="#8b95a1").encode(text="titles:Q")
-    return (bars + labels).properties(height=max(120, 26 * len(top)))
+    return cast(AltChart, (bars + labels).properties(height=max(120, 26 * len(top))))
 
 
-def _render_league_history(hist) -> None:
+def _render_league_history(hist: LeagueHistory) -> None:
     st.caption(
         f"All-time across {hist.seasons} loaded seasons ({hist.oldest} to {hist.newest}). "
         "The latest season's leader is provisional — it may not be finished."
@@ -709,7 +769,7 @@ def _streak_span(n: int, *, good: bool) -> str:
     return f'<span style="color:{colour};font-weight:{weight}">{n}</span>'
 
 
-def _match_record_list(matches, *, tag: str) -> str:
+def _match_record_list(matches: list[MatchRecord], *, tag: str) -> str:
     items = ""
     for m in matches:
         extra = f"{m.margin}" if tag == "margin" else f"{m.total} goals"
@@ -738,7 +798,7 @@ def _trend_span(trend: float) -> str:
     return f'<span style="color:#8b8b8b">{trend:+.2f}</span>'
 
 
-def _render_trends(forms, *, last_n: int) -> None:
+def _render_trends(forms: list[TeamForm], *, last_n: int) -> None:
     st.caption(
         f"Last {last_n} matches vs the season baseline. ▲ rising, ▼ sliding. "
         "O2.5 = share of a team's games with over 2.5 goals; BTTS = both teams scored."
@@ -776,7 +836,9 @@ def _render_trends(forms, *, last_n: int) -> None:
     st.markdown(_html_table(rows), unsafe_allow_html=True)
 
 
-def _render_analytics(snap: AnalyticsSnapshot, forms=None, *, last_n: int = 5) -> None:
+def _render_analytics(
+    snap: AnalyticsSnapshot, forms: list[TeamForm] | None = None, *, last_n: int = 5
+) -> None:
     st.subheader(f"{division_name(snap.division)} {season_label(snap.season)}", anchor=False)
 
     form_by_team = {f.team: f.recent_form for f in (forms or [])}
@@ -818,7 +880,7 @@ def _render_analytics(snap: AnalyticsSnapshot, forms=None, *, last_n: int = 5) -
         st.markdown(_html_table(elo_rows), unsafe_allow_html=True)
 
 
-def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
+def _render_title_odds(contenders: list[TeamProjection], names: dict[str, str]) -> None:
     frame = pl.DataFrame(
         {
             "team": [names.get(p.team, p.team) for p in contenders],
@@ -834,7 +896,7 @@ def _render_title_odds(contenders: list, names: dict[str, str]) -> None:
     st.altair_chart((bars + labels).properties(height=max(120, 26 * len(contenders))))
 
 
-def _xpoints_scatter(rows):
+def _xpoints_scatter(rows: list[UnderlyingRow]) -> AltChart:
     frame = pl.DataFrame(
         {
             "team": [r.team for r in rows],
@@ -858,10 +920,10 @@ def _xpoints_scatter(rows):
             tooltip=["team", "pts", "xP"],
         )
     )
-    return (diag + pts).properties(height=320)
+    return cast(AltChart, (diag + pts).properties(height=320))
 
 
-def _render_underlying(rows) -> None:
+def _render_underlying(rows: list[UnderlyingRow]) -> None:
     st.caption(
         "Expected points (xP) from shots-on-target chance quality, vs the real table. Above xP "
         "= results are flattering the underlying play (running hot, prone to cool); below = "
@@ -894,7 +956,7 @@ def _render_underlying(rows) -> None:
     st.altair_chart(_xpoints_scatter(rows), width="stretch")
 
 
-def _team_strength_bars(d):
+def _team_strength_bars(d: TeamDossier) -> AltChart:
     frame = pl.DataFrame(
         {"metric": ["Attack", "Defence"], "value": [d.attack, d.solidity]}
     ).to_pandas()
@@ -912,17 +974,18 @@ def _team_strength_bars(d):
         .mark_rule(color="#8b95a1", strokeDash=[4, 4])
         .encode(x="x:Q")
     )
-    return (bars + rule).properties(height=110)
+    return cast(AltChart, (bars + rule).properties(height=110))
 
 
-def _team_trajectory_chart(trajectory):
+def _team_trajectory_chart(trajectory: list[dict[str, Any]]) -> AltChart:
     records = []
     for p in trajectory:
         records.append({"matchday": p["matchday"], "value": p["points"], "series": "Points"})
         if "xpoints" in p:
             records.append({"matchday": p["matchday"], "value": p["xpoints"], "series": "Expected"})
     frame = pl.DataFrame(records).to_pandas()
-    return (
+    return cast(
+        AltChart,
         alt.Chart(frame)
         .mark_line()
         .encode(
@@ -937,11 +1000,11 @@ def _team_trajectory_chart(trajectory):
                 "datum.series == 'Expected'", alt.value([4, 4]), alt.value([1, 0])
             ),
         )
-        .properties(height=260)
+        .properties(height=260),
     )
 
 
-def _render_team(d) -> None:
+def _render_team(d: TeamDossier) -> None:
     st.subheader(d.team, anchor=False)
     st.caption(f"{division_name(d.division)} {season_label(d.season)} · {d.played} played")
     c = st.columns(5)
@@ -1003,7 +1066,7 @@ def _render_team(d) -> None:
     st.altair_chart(_team_trajectory_chart(d.trajectory), width="stretch")
 
 
-def _render_shot_map(data) -> None:
+def _render_shot_map(data: ShotMapData) -> None:
     st.subheader(data.label, anchor=False)
     st.caption("StatsBomb event data. Circle size ∝ xG; filled = goal. Both teams attack →")
 
@@ -1056,7 +1119,7 @@ def _render_shot_map(data) -> None:
     st.caption(ATTRIBUTION_STATSBOMB)
 
 
-def _xg_race_chart(timeline: list[dict]):
+def _xg_race_chart(timeline: list[dict[str, Any]]) -> AltChart:
     frame = pl.DataFrame(timeline).to_pandas()
     line = (
         alt.Chart(frame)
@@ -1081,10 +1144,10 @@ def _xg_race_chart(timeline: list[dict]):
             tooltip=["player", "team", alt.Tooltip("minute", title="min")],
         )
     )
-    return (line + goals).properties(height=300).configure_view(strokeWidth=0)
+    return cast(AltChart, (line + goals).properties(height=300).configure_view(strokeWidth=0))
 
 
-def _shot_chart(frame):
+def _shot_chart(frame: pd.DataFrame) -> AltChart:
     # StatsBomb frame is 120x80; show the attacking half (x 60-120) where shots live.
     # Recessive pitch lines, then shots as circles sized by xG, coloured by team, with
     # goals drawn solid and everything else hollow so identity never rests on colour.
@@ -1114,7 +1177,9 @@ def _shot_chart(frame):
     )
     goals = base.transform_filter(alt.datum.goal).mark_circle(opacity=0.9)
     misses = base.transform_filter(~alt.datum.goal).mark_point(filled=False, strokeWidth=1.5)
-    return (pitch + misses + goals).properties(height=380).configure_view(strokeWidth=0)
+    return cast(
+        AltChart, (pitch + misses + goals).properties(height=380).configure_view(strokeWidth=0)
+    )
 
 
 # --- Kalshi-style market rendering: a probability is shown as a cent "price" (100c =
@@ -1135,7 +1200,7 @@ def _mkt_title(title: str) -> str:
     )
 
 
-def _market_table(title: str, markets, *, odds: bool = True) -> str:
+def _market_table(title: str, markets: list[Market], *, odds: bool = True) -> str:
     """A market as Kalshi-style price rows: name, fill bar, cent price (leader green)."""
     if not markets:
         return ""
@@ -1163,7 +1228,7 @@ def _market_table(title: str, markets, *, odds: bool = True) -> str:
     return f"<div style='margin-bottom:12px'>{_mkt_title(title)}{''.join(rows)}</div>"
 
 
-def _price_tiles(markets) -> str:
+def _price_tiles(markets: list[Market]) -> str:
     """Headline outcomes as big Kalshi price tiles (the 1X2 result)."""
     mx = max(m.probability for m in markets)
     tiles = []
@@ -1184,7 +1249,7 @@ def _price_tiles(markets) -> str:
     return f"<div style='display:flex;gap:10px;margin:4px 0 10px'>{''.join(tiles)}</div>"
 
 
-def _ou_block(over_unders) -> str:
+def _ou_block(over_unders: list[OverUnder]) -> str:
     """Over/Under lines as Over/Under (Yes/No) price rows."""
     rows = []
     for ou in over_unders:
@@ -1202,7 +1267,7 @@ def _ou_block(over_unders) -> str:
     return f"<div style='margin-bottom:12px'>{_mkt_title('Total goals lines')}{''.join(rows)}</div>"
 
 
-def _render_forecast_adjustment(adj) -> None:
+def _render_forecast_adjustment(adj: AdjustedForecast) -> None:
     """PL-only: the base forecast nudged for today's team news, shown against the raw model.
 
     Deltas are rendered in neutral grey (delta_color="off") because a probability moving up is
@@ -1220,27 +1285,40 @@ def _render_forecast_adjustment(adj) -> None:
     st.caption(" · ".join(outs))
     c = st.columns(3)
     c[0].metric(
-        f"{home} win", f"{new[home]:.0%}", f"{(new[home] - raw[home]) * 100:+.0f} pts",
-        delta_color="off", border=True,
+        f"{home} win",
+        f"{new[home]:.0%}",
+        f"{(new[home] - raw[home]) * 100:+.0f} pts",
+        delta_color="off",
+        border=True,
     )
     c[1].metric(
-        "Draw", f"{new['Draw']:.0%}", f"{(new['Draw'] - raw['Draw']) * 100:+.0f} pts",
-        delta_color="off", border=True,
+        "Draw",
+        f"{new['Draw']:.0%}",
+        f"{(new['Draw'] - raw['Draw']) * 100:+.0f} pts",
+        delta_color="off",
+        border=True,
     )
     c[2].metric(
-        f"{away} win", f"{new[away]:.0%}", f"{(new[away] - raw[away]) * 100:+.0f} pts",
-        delta_color="off", border=True,
+        f"{away} win",
+        f"{new[away]:.0%}",
+        f"{(new[away] - raw[away]) * 100:+.0f} pts",
+        delta_color="off",
+        border=True,
     )
     g = st.columns(2)
     g[0].metric(
-        f"{home} xG", f"{adj.adjusted.home_expected:.2f}",
+        f"{home} xG",
+        f"{adj.adjusted.home_expected:.2f}",
         f"{adj.adjusted.home_expected - adj.raw.home_expected:+.2f}",
-        delta_color="off", border=True,
+        delta_color="off",
+        border=True,
     )
     g[1].metric(
-        f"{away} xG", f"{adj.adjusted.away_expected:.2f}",
+        f"{away} xG",
+        f"{adj.adjusted.away_expected:.2f}",
         f"{adj.adjusted.away_expected - adj.raw.away_expected:+.2f}",
-        delta_color="off", border=True,
+        delta_color="off",
+        border=True,
     )
     st.caption(
         "A heuristic prior from current Premier League injuries and suspensions (Fantasy Premier "
@@ -1250,7 +1328,7 @@ def _render_forecast_adjustment(adj) -> None:
     )
 
 
-def _render_forecast(slate) -> None:
+def _render_forecast(slate: MarketSlate) -> None:
     st.markdown(f"#### {slate.home}  ·  {slate.away}")
     st.markdown(_price_tiles(slate.result), unsafe_allow_html=True)
     x, y, p = slate.most_likely_score
@@ -1288,7 +1366,7 @@ def _render_forecast(slate) -> None:
     )
 
 
-def _strength_bars(exp):
+def _strength_bars(exp: ForecastExplanation) -> AltChart:
     rows = [
         (f"{exp.home} attack", exp.home_factor.attack),
         (f"{exp.home} defence", exp.home_factor.solidity),
@@ -1314,10 +1392,10 @@ def _strength_bars(exp):
         .mark_rule(color="#8b95a1", strokeDash=[4, 4])
         .encode(x="x:Q")
     )
-    return (bars + rule).properties(height=150)
+    return cast(AltChart, (bars + rule).properties(height=150))
 
 
-def _render_forecast_explanation(exp) -> None:
+def _render_forecast_explanation(exp: ForecastExplanation) -> None:
     """The honest 'why': attribute the forecast to team ratings and flag how much data backs it."""
     st.markdown("**Why this forecast**")
     conf_colour = {"High": _YES, "Moderate": "#f0a020", "Low": "#ea3943"}[exp.confidence]
@@ -1350,7 +1428,7 @@ def _render_forecast_explanation(exp) -> None:
     st.caption("Attack and defence are each team's rate vs the league average (higher is better).")
 
 
-def _render_ev_calculator(slate) -> None:
+def _render_ev_calculator(slate: MarketSlate) -> None:
     """Model probabilities vs the odds a bookmaker is actually offering -> edge, EV, Kelly."""
     from soccer.models.value import expected_value, implied_probabilities, kelly_fraction, overround
 
@@ -1399,7 +1477,7 @@ def _render_ev_calculator(slate) -> None:
     )
 
 
-def _render_market_edge(report) -> None:
+def _render_market_edge(report: ValueReport) -> None:
     """Honest 'does the model beat the closing line' summary for the league."""
     beats = report.beats_market
     verdict = "beats" if beats else "does not beat"
@@ -1415,7 +1493,7 @@ def _render_market_edge(report) -> None:
     )
 
 
-def _blend_curve_chart(curve):
+def _blend_curve_chart(curve: list[BlendPoint]) -> AltChart:
     frame = pl.DataFrame(
         {"weight": [p.weight for p in curve], "log_loss": [p.log_loss for p in curve]}
     ).to_pandas()
@@ -1437,10 +1515,10 @@ def _blend_curve_chart(curve):
         .mark_point(color="#16c784", size=90, filled=True)
         .encode(x="weight:Q", y="log_loss:Q")
     )
-    return (line + mark).properties(height=240)
+    return cast(AltChart, (line + mark).properties(height=240))
 
 
-def _calibration_chart(outcomes):
+def _calibration_chart(outcomes: list[OutcomeCalibration]) -> AltChart:
     """Reliability diagram: one panel per outcome (home/draw/away), concatenated left to right.
 
     Points hugging the dotted diagonal are well calibrated; dot size is the number of matches
@@ -1487,7 +1565,7 @@ def _calibration_chart(outcomes):
     return alt.hconcat(*panels)
 
 
-def _render_report_card(report, division: str) -> None:
+def _render_report_card(report: ForecastReport, division: str) -> None:
     """Honest model-vs-market scorecard: proper scores, the blend curve, and calibration."""
     st.caption(
         f"{division_name(division)} — each match forecast from a model fit only on earlier "
@@ -1569,7 +1647,7 @@ def _render_report_card(report, division: str) -> None:
     )
 
 
-def _render_players(rows) -> None:
+def _render_players(rows: list[PlayerRow]) -> None:
     st.caption(
         "StatsBomb shots across all ingested matches. G-xG > 0 = clinical finishing. "
         "Points above the diagonal outscored their chances."
@@ -1657,7 +1735,9 @@ _RANK_OPTIONS = {
 }
 
 
-def _render_player_leaderboard(profiles, *, per90: bool, pool_label: str = "") -> None:
+def _render_player_leaderboard(
+    profiles: list[PlayerProfile], *, per90: bool, pool_label: str = ""
+) -> None:
     mode = "per 90 minutes" if per90 else "totals"
     scope = f"{pool_label} · " if pool_label and pool_label != "All competitions" else ""
     st.caption(
@@ -1713,7 +1793,7 @@ _CATEGORY_COLOURS = {
 }
 
 
-def _percentile_bars_chart(rows: list[dict]):
+def _percentile_bars_chart(rows: list[dict[str, Any]]) -> AltChart:
     """FBref-style percentile fingerprint from [{metric, category, percentile, value}, ...]."""
     frame = pl.DataFrame(rows).to_pandas()
     order = [r["metric"] for r in rows]
@@ -1744,10 +1824,12 @@ def _percentile_bars_chart(rows: list[dict]):
         .mark_rule(color="#9aa0a6", strokeDash=[3, 3])
         .encode(x="v:Q")
     )
-    return (bars + labels + midline).properties(height=22 * len(rows) + 10)
+    return cast(AltChart, (bars + labels + midline).properties(height=22 * len(rows) + 10))
 
 
-def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> None:
+def _render_player_profile(
+    profile: PlayerProfile, percentiles: list[MetricPercentile], *, pool_label: str = ""
+) -> None:
     pos = f" · {profile.position}" if profile.position else ""
     st.subheader(f"{profile.player}", anchor=False)
     st.caption(f"{profile.team}{pos} · {profile.matches} matches · {profile.minutes} minutes")
@@ -1783,7 +1865,7 @@ def _render_player_profile(profile, percentiles, *, pool_label: str = "") -> Non
     )
 
 
-def _render_fixtures(fixtures) -> None:
+def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     comps = sorted({f.competition for f in fixtures})
     if len(comps) > 1:
         choice = st.selectbox(
@@ -1807,11 +1889,20 @@ def _render_fixtures(fixtures) -> None:
         return
 
     hdr = [
-        "Date (UTC)", "Competition", "Match", "Exp gls",
-        "1", "X", "2", "O2.5", "BTTS", "Favourite",
+        "Date (UTC)",
+        "Competition",
+        "Match",
+        "Exp gls",
+        "1",
+        "X",
+        "2",
+        "O2.5",
+        "BTTS",
+        "Favourite",
     ]
     body = ""
     for f in forecastable:
+        assert f.slate is not None  # `forecastable` was already filtered to slate is not None
         s = f.slate
         home_p, draw_p, away_p = (m.probability for m in s.result)
         over25 = next(o for o in s.over_under if o.line == 2.5).over
@@ -1846,7 +1937,7 @@ def _render_fixtures(fixtures) -> None:
     _render_uncovered_fixtures(uncovered)
 
 
-def _render_uncovered_fixtures(uncovered) -> None:
+def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
     if not uncovered:
         return
     with st.expander(f"{len(uncovered)} upcoming fixtures without a forecast"):
@@ -1901,7 +1992,7 @@ def _page_header(page: str) -> None:
         st.caption(blurb)
 
 
-def _render_match_analysis(settings) -> None:
+def _render_match_analysis(settings: Settings) -> None:
     """Analysis > Match tab: xG timeline and shot map for a chosen StatsBomb match."""
     from collections import Counter
 
@@ -1939,7 +2030,7 @@ def _render_match_analysis(settings) -> None:
         _render_shot_map(data)
 
 
-def _render_players_page(settings) -> None:
+def _render_players_page(settings: Settings) -> None:
     """Analysis > Players tab: full-event leaderboard and per-player scouting profiles."""
     if not has_player_events(settings.analytics_db):
         # No full-event stats -- fall back to the shots-only board, or prompt.
@@ -2101,9 +2192,7 @@ def main() -> None:
 
         with upcoming_tab:
             _render_fixtures(
-                _cached_fixture_forecasts(
-                    str(settings.live_db), str(settings.analytics_db), 5000
-                )
+                _cached_fixture_forecasts(str(settings.live_db), str(settings.analytics_db), 5000)
             )
 
         with match_tab:
@@ -2136,8 +2225,13 @@ def main() -> None:
                         # number: show the base model nudged for team news, side by side.
                         adj = (
                             availability_adjusted_slate(
-                                settings.analytics_db, settings.live_db,
-                                season, division, home, away, mle=mle,
+                                settings.analytics_db,
+                                settings.live_db,
+                                season,
+                                division,
+                                home,
+                                away,
+                                mle=mle,
                             )
                             if settings.live_db.exists()
                             else None
@@ -2169,9 +2263,7 @@ def main() -> None:
                 by_league = {division_name(d): d for _s, d, _n in available}
                 league_names = sorted(by_league)
                 default_idx = (
-                    league_names.index("Premier League")
-                    if "Premier League" in league_names
-                    else 0
+                    league_names.index("Premier League") if "Premier League" in league_names else 0
                 )
                 league = st.selectbox(
                     "League", league_names, index=default_idx, key="pred_season_league"
@@ -2198,10 +2290,10 @@ def main() -> None:
                     # No upcoming fixtures for this league -> project the latest loaded season.
                     seasons = [s for s, d, _n in available if d == division]
                     season = max(seasons, key=season_sort_key)
-                    briefing = _cached_season_briefing(
+                    latest_briefing = _cached_season_briefing(
                         str(settings.analytics_db), season, division
                     )
-                    if briefing is None:
+                    if latest_briefing is None:
                         st.info("No results or fixtures for that selection.")
                     else:
                         st.caption(
@@ -2209,7 +2301,7 @@ def main() -> None:
                             f"latest loaded season ({season_label(season)}). Load fixtures via "
                             "**Home → Update fixtures** for an upcoming-season projection."
                         )
-                        _render_season(briefing)
+                        _render_season(latest_briefing)
 
         with card_tab:
             if not available:
@@ -2224,11 +2316,13 @@ def main() -> None:
                 )
                 by_league = {division_name(d): d for _s, d, _n in available}
                 league = st.selectbox("League", sorted(by_league), key="card_league")
-                report = _cached_forecast_report(str(settings.analytics_db), by_league[league], 6)
-                if report is None:
+                fc_report = _cached_forecast_report(
+                    str(settings.analytics_db), by_league[league], 6
+                )
+                if fc_report is None:
                     st.info("No closing odds loaded for that league yet.")
                 else:
-                    _render_report_card(report, by_league[league])
+                    _render_report_card(fc_report, by_league[league])
         return
 
     if page == "Analytics":
@@ -2316,22 +2410,20 @@ def main() -> None:
 
     with LiveDB(settings.live_db) as db:
         if page == "Live Centre":
-            snap = live_snapshot(db)  # live now, or last week's results if nothing's on
-            comps = sorted({c for c, _ in snap.competition_counts})
-            if snap.mode == "live":
+            live_snap = live_snapshot(db)  # live now, or last week's results if nothing's on
+            comps = sorted({c for c, _ in live_snap.competition_counts})
+            if live_snap.mode == "live":
                 st.caption(
-                    f"**{snap.kpis.in_play} live** across {snap.kpis.competitions} competitions. "
-                    "Refresh on **Home** for the latest."
+                    f"**{live_snap.kpis.in_play} live** across {live_snap.kpis.competitions} "
+                    "competitions. Refresh on **Home** for the latest."
                 )
-            elif snap.matches:
+            elif live_snap.matches:
                 st.caption(
                     "Nothing is live right now — showing **full-time results from the last "
                     "7 days**. Refresh on **Home**, or check back on a matchday."
                 )
             chosen = st.selectbox("Competition", ["All", *comps])
-            _render_live(
-                live_snapshot(db, competition=None if chosen == "All" else chosen)
-            )
+            _render_live(live_snapshot(db, competition=None if chosen == "All" else chosen))
         else:
             _render_health(health_snapshot(settings, db))
             st.divider()
