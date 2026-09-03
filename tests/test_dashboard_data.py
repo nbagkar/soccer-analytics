@@ -7,7 +7,7 @@ These run without importing Streamlit.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -34,8 +34,13 @@ def add_match(
     competition: str,
     status: MatchStatus,
     source: str = SourceId.THESPORTSDB,
-    observed_at: datetime = datetime(2026, 8, 8, 18, 0, tzinfo=UTC),
+    observed_at: datetime | None = None,
 ) -> None:
+    # Relative to "now" so the fixture doesn't age out of the 7-day "recent" window this
+    # module tests against -- a fixed past date silently fell outside it once enough real
+    # time had passed (was 2026-08-08, tests started failing by 2026-09-02).
+    if observed_at is None:
+        observed_at = datetime.now(UTC) - timedelta(days=1)
     resolver = MatchResolver(db, EntityResolver(db))
     resolved = resolver.resolve(
         MatchObservation(
@@ -44,7 +49,7 @@ def add_match(
             competition=SourceRef(id=f"c-{competition}", name=competition),
             home=SourceRef(id=f"h-{home}", name=home),
             away=SourceRef(id=f"a-{away}", name=away),
-            kickoff=datetime(2026, 8, 8, 18, 0, tzinfo=UTC),
+            kickoff=observed_at,
         )
     )
     MatchStateStore(db).upsert(
