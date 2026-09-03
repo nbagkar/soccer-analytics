@@ -60,6 +60,13 @@ _IN_PLAY = frozenset(
     }
 )
 
+MAX_PLAUSIBLE_MATCH_AGE = timedelta(hours=4)
+"""Regulation + HT + extra time + penalties, with a generous buffer for a delayed kickoff.
+TheSportsDB's livescore feed only lists matches currently in play -- once a match finishes
+it simply disappears from that feed, so nothing ever tells the store the match is over. A
+row can then sit frozen at e.g. SECOND_HALF indefinitely. `is_in_play` alone can't tell a
+genuinely live match from one of these zombies; kickoff age is the only signal available."""
+
 
 @dataclass(frozen=True)
 class MatchState:
@@ -190,7 +197,12 @@ class MatchStateStore:
             for row in rows
         ]
         if in_play_only:
-            views = [v for v in views if v.status.is_in_play]
+            now = datetime.now(UTC)
+            views = [
+                v
+                for v in views
+                if v.status.is_in_play and now - v.kickoff_utc <= MAX_PLAUSIBLE_MATCH_AGE
+            ]
         return views[:limit]
 
     def upcoming(self, *, limit: int = 100) -> list[MatchView]:

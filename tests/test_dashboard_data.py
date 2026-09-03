@@ -41,13 +41,17 @@ def add_match(
     # time had passed (was 2026-08-08, tests started failing by 2026-09-02). NOT_STARTED
     # defaults to a future kickoff instead: `upcoming()` filters out anything already kicked
     # off regardless of cached status, so a "yesterday" default would make every NOT_STARTED
-    # fixture invisible to it unless a caller overrides `observed_at` explicitly.
+    # fixture invisible to it unless a caller overrides `observed_at` explicitly. In-play
+    # statuses default to a recent kickoff too: `list_current(in_play_only=True)` now drops
+    # anything older than MAX_PLAUSIBLE_MATCH_AGE, so a "yesterday" default would make every
+    # in-play fixture invisible to it as well.
     if observed_at is None:
-        observed_at = (
-            datetime.now(UTC) + timedelta(days=1)
-            if status is MatchStatus.NOT_STARTED
-            else datetime.now(UTC) - timedelta(days=1)
-        )
+        if status is MatchStatus.NOT_STARTED:
+            observed_at = datetime.now(UTC) + timedelta(days=1)
+        elif status.is_in_play:
+            observed_at = datetime.now(UTC) - timedelta(minutes=45)
+        else:
+            observed_at = datetime.now(UTC) - timedelta(days=1)
     resolver = MatchResolver(db, EntityResolver(db))
     resolved = resolver.resolve(
         MatchObservation(
@@ -1133,6 +1137,40 @@ class TestLiveCentreModes:
         )
         snap = live_snapshot(db)
         assert snap.mode == "recent"
+
+    def test_a_match_stuck_in_play_for_weeks_is_treated_as_a_zombie_not_live(
+        self, tmp_path
+    ) -> None:
+        """Reproduces the real bug: TheSportsDB's livescore feed only lists matches
+        currently in play, so once a match finishes it simply disappears from that feed --
+        nothing ever tells the store the match is over. A row can then sit frozen at e.g.
+        SECOND_HALF indefinitely. Confirmed live: 275 such rows in the real store, one from
+        33 days earlier. Without an age cutoff, the Live Centre shows these as "live" forever
+        and never falls back to real recent results."""
+        from soccer.dashboard.data import live_snapshot
+
+        db = LiveDB(tmp_path / "live.sqlite")
+        add_match(
+            db,
+            match_id="1",
+            home="Fafe",
+            away="Maria da Fonte",
+            competition="Portugal Amateur",
+            status=MatchStatus.SECOND_HALF,
+            observed_at=datetime.now(UTC) - timedelta(days=33),
+        )
+        add_match(
+            db,
+            match_id="2",
+            home="Barca",
+            away="Madrid",
+            competition="La Liga",
+            status=MatchStatus.FINISHED,
+        )
+        snap = live_snapshot(db)
+        assert snap.mode == "recent"
+        assert snap.kpis.in_play == 0
+        assert all(v.home != "Fafe" for v in snap.matches)
         assert len(snap.matches) == 1 and snap.matches[0].status.is_concluded
         db.close()
 
