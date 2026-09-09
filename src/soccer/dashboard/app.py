@@ -66,7 +66,12 @@ from soccer.dashboard.data import (
     upcoming_season_briefing,
 )
 from soccer.domain.match_state import MatchStatus, MatchView
-from soccer.models.evaluation import BlendPoint, ForecastReport, OutcomeCalibration
+from soccer.models.evaluation import (
+    BlendPoint,
+    ForecastReport,
+    OutcomeCalibration,
+    PredictionRecord,
+)
 from soccer.models.markets import Market, MarketSlate, OverUnder
 from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
@@ -172,6 +177,10 @@ def _render_home(settings: Settings) -> None:
         if st.button("Ask the assistant", icon=":material/chat:", width="stretch", type="primary"):
             _go("Assistant")
         if st.button("See predictions & fixtures", icon=":material/insights:", width="stretch"):
+            _go("Predictor")
+        if st.button(
+            "How accurate are our predictions?", icon=":material/fact_check:", width="stretch"
+        ):
             _go("Predictor")
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
@@ -1646,6 +1655,39 @@ def _render_report_card(report: ForecastReport, division: str) -> None:
         "Poisson fit on a shots-on-target expected-goals blend (the app's live forecast model)."
     )
 
+    st.divider()
+    _render_track_record(report.recent, report.hit_rate, report.n)
+
+
+def _render_track_record(recent: list[PredictionRecord], hit_rate: float, n: int) -> None:
+    """Match-by-match: what the model said before kickoff, next to what actually happened."""
+    st.markdown("**Track record** — recent predictions vs what actually happened")
+    st.caption(
+        f"Picked the right outcome (win/draw/win) in **{hit_rate:.0%}** of all {n} scored "
+        f"matches; the {len(recent)} most recent are listed below. A 3-way guess with no skill "
+        "clears ~33-45% depending on how often draws happen in this league, so this isn't a "
+        "bar of 100% — it's whether the model beats a coin flip on the thing people care about."
+    )
+    rows = []
+    for r in recent:
+        pick = r.home if r.predicted == 0 else r.away if r.predicted == 2 else "Draw"
+        winner = r.home if r.actual == 0 else r.away if r.actual == 2 else "Draw"
+        verdict = (
+            f'<span style="color:#16a34a">✓ {_esc(pick)}</span>'
+            if r.correct
+            else f'<span style="color:#dc2626">✗ picked {_esc(pick)}</span>'
+        )
+        rows.append(
+            {
+                "Date": r.match_date.strftime("%b %d"),
+                "Match": f"{_esc(r.home)} v {_esc(r.away)}",
+                "Predicted H/D/A": f"{r.model[0]:.0%} / {r.model[1]:.0%} / {r.model[2]:.0%}",
+                "Result": f"{r.home_goals}-{r.away_goals} ({_esc(winner)})",
+                "Model called it": verdict,
+            }
+        )
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+
 
 def _render_players(rows: list[PlayerRow]) -> None:
     st.caption(
@@ -2315,7 +2357,11 @@ def main() -> None:
                     "against the bookmaker's closing line — the honest benchmark."
                 )
                 by_league = {division_name(d): d for _s, d, _n in available}
-                league = st.selectbox("League", sorted(by_league), key="card_league")
+                league_names = sorted(by_league)
+                default_idx = (
+                    league_names.index("Premier League") if "Premier League" in league_names else 0
+                )
+                league = st.selectbox("League", league_names, index=default_idx, key="card_league")
                 fc_report = _cached_forecast_report(
                     str(settings.analytics_db), by_league[league], 6
                 )

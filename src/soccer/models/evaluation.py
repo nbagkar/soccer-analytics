@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 
 from soccer.models.backtest import (
     CalibrationBin,
@@ -102,6 +103,32 @@ class OutcomeCalibration:
 
 
 @dataclass(frozen=True)
+class PredictionRecord:
+    """One walk-forward prediction against what actually happened -- the track-record view.
+
+    Same no-leakage forecast the aggregate scores are built from, kept per-match instead of
+    collapsed into a metric, so a match-by-match "we said / it happened" list is possible.
+    """
+
+    match_date: date
+    home: str
+    away: str
+    model: Probs
+    actual: int  # 0 home / 1 draw / 2 away
+    home_goals: int
+    away_goals: int
+
+    @property
+    def predicted(self) -> int:
+        """The model's pick: the outcome it gave the highest probability."""
+        return max(range(3), key=lambda i: self.model[i])
+
+    @property
+    def correct(self) -> bool:
+        return self.predicted == self.actual
+
+
+@dataclass(frozen=True)
 class ForecastReport:
     n: int
     model: Score
@@ -115,6 +142,10 @@ class ForecastReport:
     blend_calibration: list[CalibrationBin]
     calibration_by_outcome: list[OutcomeCalibration]  # home/draw/away reliability of the model
     divergences: list[Divergence]
+    hit_rate: float
+    """Fraction of matches where the model's highest-probability outcome was the actual one."""
+    recent: list[PredictionRecord]
+    """Most recent matches first -- the track record, capped for display."""
 
     @property
     def blend_beats_market(self) -> bool:
@@ -139,6 +170,7 @@ def evaluate_forecasts(
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
+    recent_limit: int = 30,
 ) -> ForecastReport | None:
     """Walk a slice, scoring model vs market vs blend vs baseline. None if too little data.
 
@@ -239,6 +271,24 @@ def evaluate_forecasts(
             )
         )
 
+    hits = sum(1 for m, a in model_preds if max(range(3), key=lambda i: m[i]) == a)
+    recent = sorted(
+        (
+            PredictionRecord(
+                match_date=o.match_date,
+                home=o.home,
+                away=o.away,
+                model=m,
+                actual=a,
+                home_goals=o.fthg,
+                away_goals=o.ftag,
+            )
+            for m, _k, a, o in records
+        ),
+        key=lambda r: r.match_date,
+        reverse=True,
+    )[:recent_limit]
+
     return ForecastReport(
         n=n,
         model=_score(model_preds),
@@ -252,4 +302,6 @@ def evaluate_forecasts(
         blend_calibration=_calibration(best_blend),
         calibration_by_outcome=calibration_by_outcome,
         divergences=divergences,
+        hit_rate=hits / n,
+        recent=recent,
     )

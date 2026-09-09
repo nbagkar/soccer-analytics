@@ -99,3 +99,25 @@ class TestEvaluateForecasts:
             for b in oc.bins:
                 assert 0.0 <= b.mean_predicted <= 1.0
                 assert 0.0 <= b.observed_rate <= 1.0
+
+    def test_track_record_is_most_recent_first_and_matches_the_hit_rate(self) -> None:
+        """The synthetic rows have a real skill signal (odds track true strength), so the
+        model should call the right outcome noticeably more than a random 3-way guess."""
+        report = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=10)
+        assert report is not None
+        assert len(report.recent) == 10
+        dates = [r.match_date for r in report.recent]
+        assert dates == sorted(dates, reverse=True)  # newest first
+        assert 0.0 <= report.hit_rate <= 1.0
+        assert report.hit_rate > 0.4  # clears a random 3-way guess by a wide margin
+        for r in report.recent:
+            assert r.correct == (r.predicted == r.actual)
+            assert r.actual in (0, 1, 2)
+
+    def test_recent_limit_caps_the_track_record_without_changing_hit_rate(self) -> None:
+        full = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=1000)
+        capped = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=5)
+        assert full is not None and capped is not None
+        assert len(full.recent) == full.n
+        assert len(capped.recent) == 5
+        assert full.hit_rate == capped.hit_rate  # the cap only trims display, not scoring
