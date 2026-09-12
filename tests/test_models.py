@@ -140,6 +140,58 @@ class TestPoissonShots:
         assert fc0.prob_home + fc0.prob_draw + fc0.prob_away == pytest.approx(1.0, abs=1e-6)
 
 
+def _lopsided_home_team_rows() -> list[Row]:
+    """'h' dominates every home game (3-0) but is only average away (1-1) -- a genuine
+    team-specific home effect, not just 'h' being a strong attacking side overall.
+
+    Many distinct one-off opponents, each also playing a large neutral (1-1) round-robin
+    among themselves, so no single opponent's own rating is meaningfully perturbed by the
+    one game it plays against 'h' -- mirroring how, in a real ~20-team league, one team's
+    home form barely moves any single opponent's rating. Without this dilution a small
+    hand-built league lets the SAME couple of matches inflate both 'h's attack rating and
+    its opponents' defence ratings together, so the flat model ends up "explaining" the
+    lopsided scoreline without needing any home-specific boost at all -- exactly the
+    circularity this synthetic setup is designed to avoid.
+    """
+    rows: list[Row] = []
+    opponents = [f"opp{i}" for i in range(12)]
+    for i, opp in enumerate(opponents):
+        rows.append(Row("h", opp, 3, 0, date(2026, 1, 1 + 2 * i)))  # h dominant at home
+        rows.append(Row(opp, "h", 1, 1, date(2026, 1, 2 + 2 * i)))  # h merely average away
+    for i, a in enumerate(opponents):
+        for b in opponents[i + 1 :]:
+            rows.append(Row(a, b, 1, 1, date(2026, 2, 1)))
+            rows.append(Row(b, a, 1, 1, date(2026, 2, 2)))
+    return rows
+
+
+class TestPoissonShotsHomeBoost:
+    def test_off_by_default(self) -> None:
+        model = fit_poisson_shots(_lopsided_home_team_rows())
+        assert model.home_boost == {}
+
+    def test_captures_a_genuine_team_specific_home_effect(self) -> None:
+        # Small home_shrinkage -> close to the raw (unregularised) estimate.
+        model = fit_poisson_shots(_lopsided_home_team_rows(), home_shrinkage=0.01)
+        assert model.home_boost["h"] > 1.15  # h scores well above what its blended attack
+        # rating alone would predict against these specific home opponents' defences.
+        # An ordinary opponent, symmetric by construction, shows no real effect.
+        assert model.home_boost["opp0"] == pytest.approx(1.0, abs=0.1)
+
+    def test_larger_home_shrinkage_pulls_toward_one(self) -> None:
+        rows = _lopsided_home_team_rows()
+        raw = fit_poisson_shots(rows, home_shrinkage=0.01).home_boost["h"]
+        shrunk = fit_poisson_shots(rows, home_shrinkage=20.0).home_boost["h"]
+        assert raw > shrunk > 1.0
+        assert abs(shrunk - 1.0) < abs(raw - 1.0)
+
+    def test_boost_raises_the_home_favourite_over_the_flat_model(self) -> None:
+        rows = _lopsided_home_team_rows()
+        flat = fit_poisson_shots(rows).expected_goals("h", "opp0")[0]
+        boosted = fit_poisson_shots(rows, home_shrinkage=5.0).expected_goals("h", "opp0")[0]
+        assert boosted > flat
+
+
 class TestElo:
     def test_ratings_are_zero_sum_around_initial(self) -> None:
         # Elo only redistributes points, so the mean stays at the initial rating.

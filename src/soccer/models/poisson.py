@@ -87,11 +87,18 @@ class PoissonModel:
         home_avg: float,
         away_avg: float,
         rho: float = DEFAULT_RHO,
+        home_boost: dict[str, float] | None = None,
     ) -> None:
         self.strengths = strengths
         self.home_avg = home_avg
         self.away_avg = away_avg
         self.rho = rho
+        self.home_boost = home_boost or {}
+        """Per-team multiplier on `home_avg` when that team is playing at home -- how much
+        MORE (or less) than the league-typical home advantage this specific team gets.
+        League average is 1.0; empty/absent means every team uses the flat league-wide home
+        advantage, which is the historical (and still default) behaviour. See
+        `fit_poisson_shots`'s `home_shrinkage` for how this is estimated."""
 
     @property
     def teams(self) -> list[str]:
@@ -107,7 +114,7 @@ class PoissonModel:
         if h is None or a is None:
             raise KeyError(f"Unknown team(s): {home if h is None else away}")
         return (
-            self.home_avg * h.attack * a.defence,
+            self.home_avg * self.home_boost.get(home, 1.0) * h.attack * a.defence,
             self.away_avg * a.attack * h.defence,
         )
 
@@ -207,6 +214,7 @@ def fit_poisson_shots(
     alpha: float = 0.5,
     rho: float = DEFAULT_RHO,
     shrinkage: float = 0.0,
+    home_shrinkage: float = 0.0,
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 
@@ -224,6 +232,13 @@ def fit_poisson_shots(
     one lucky result. It fades as real games accumulate.
 
     The home/away league averages stay on actual goals, so forecasts remain goal-scaled.
+
+    ``home_shrinkage`` (also a pseudo-match count, 0 = off) fits a per-team home-advantage
+    multiplier on top of the flat league one: for each team, compare what it actually
+    scored at home to what the flat-home-advantage model would have expected against its
+    ACTUAL home opponents (so a tough home slate isn't mistaken for a weak home boost),
+    then shrink that ratio toward 1.0 (no team effect) by this many pseudo home-games --
+    same mechanic as `shrinkage`, applied to home advantage instead of attack/defence.
     """
     if not outcomes:
         raise ValueError("cannot fit a model with no results")
@@ -270,9 +285,38 @@ def fit_poisson_shots(
         )
         for team in games
     }
+    home_avg = home_goals / matches
+    away_avg = away_goals / matches
+
+    home_boost: dict[str, float] | None = None
+    if home_shrinkage:
+        observed_home: dict[str, float] = {}
+        expected_home: dict[str, float] = {}
+        n_home: dict[str, int] = {}
+        for o in outcomes:
+            hst = getattr(o, "home_shots_target", None)
+            ast = getattr(o, "away_shots_target", None)
+            h_val = (
+                alpha * o.fthg + (1 - alpha) * hst * conv
+                if conv and hst is not None and ast is not None
+                else float(o.fthg)
+            )
+            team = o.home_norm
+            observed_home[team] = observed_home.get(team, 0.0) + h_val
+            expected_home[team] = expected_home.get(team, 0.0) + (
+                home_avg * strengths[team].attack * strengths[o.away_norm].defence
+            )
+            n_home[team] = n_home.get(team, 0) + 1
+
+        home_boost = {}
+        for team, n in n_home.items():
+            raw = observed_home[team] / expected_home[team] if expected_home[team] else 1.0
+            home_boost[team] = (n * raw + home_shrinkage) / (n + home_shrinkage)
+
     return PoissonModel(
         strengths=strengths,
-        home_avg=home_goals / matches,
-        away_avg=away_goals / matches,
+        home_avg=home_avg,
+        away_avg=away_avg,
         rho=rho,
+        home_boost=home_boost,
     )
