@@ -37,6 +37,7 @@ from soccer.dashboard.data import (
     ShotMapData,
     TeamDossier,
     UnderlyingRow,
+    accumulator_backtest,
     analytics_available,
     analytics_snapshot,
     availability_adjusted_slate,
@@ -74,6 +75,7 @@ from soccer.models.evaluation import (
     PredictionRecord,
 )
 from soccer.models.markets import Market, MarketSlate, OverUnder
+from soccer.models.parlay import ParlayBacktestResult
 from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
@@ -537,6 +539,15 @@ def _cached_forecast_report(db_path: str, division: str, n_seasons: int) -> Fore
     from pathlib import Path
 
     return forecast_report(Path(db_path), division, n_seasons=n_seasons)
+
+
+@st.cache_data(show_spinner="Backtesting the accumulator strategy over recent seasons…")
+def _cached_accumulator_backtest(
+    db_path: str, division: str, legs_per_bet: int
+) -> ParlayBacktestResult | None:
+    from pathlib import Path
+
+    return accumulator_backtest(Path(db_path), division, legs_per_bet=legs_per_bet, n_seasons=6)
 
 
 @st.cache_data(show_spinner="Building the team dossier…")
@@ -1767,6 +1778,48 @@ def _render_track_record(
     st.markdown(_html_table(rows), unsafe_allow_html=True)
 
 
+def _render_parlay_backtest(report: ParlayBacktestResult) -> None:
+    """Would 'parlay the model's most confident picks every week' have actually paid off?
+
+    Walk-forward, no leakage -- the same discipline as the scorecard above, applied to a
+    strategy instead of a single bet. The point isn't the parlay result alone, it's the
+    straight-bet result right next to it: the honest comparison this strategy needs to beat.
+    """
+    st.markdown(f"**Parlay backtest** — {report.legs_per_bet}-leg accumulator, every week")
+    st.caption(
+        f"Each week, the model's {report.legs_per_bet} most confident Premier-League picks "
+        "(by predicted probability) were combined into one accumulator, priced at the "
+        "product of each leg's own closing odds -- exactly how the Accumulator calculator "
+        "above prices one. Walk-forward: no match ever informs its own prediction."
+    )
+    c = st.columns(2)
+    with c[0]:
+        st.markdown(f"**Parlayed** ({report.n_bets} accumulators)")
+        st.metric("Hit rate (every leg correct)", f"{report.hit_rate:.0%}", border=True)
+        colour = "#16a34a" if report.yield_pct > 0 else "#dc2626"
+        st.markdown(
+            f"Yield: <span style='color:{colour};font-size:1.4rem;font-weight:600'>"
+            f"{report.yield_pct:+.1f}%</span>",
+            unsafe_allow_html=True,
+        )
+    with c[1]:
+        st.markdown(f"**Same picks, bet straight** ({report.straight_staked:.0f} bets)")
+        colour2 = "#16a34a" if report.straight_yield_pct > 0 else "#dc2626"
+        st.markdown(
+            f"Yield: <span style='color:{colour2};font-size:1.4rem;font-weight:600'>"
+            f"{report.straight_yield_pct:+.1f}%</span>",
+            unsafe_allow_html=True,
+        )
+    verdict = (
+        "parlaying did better than betting the same picks straight over this history"
+        if report.yield_pct > report.straight_yield_pct
+        else "betting the same picks straight did better than parlaying them over this "
+        "history -- the usual outcome, since each added leg compounds the bookmaker's "
+        "margin into the combined price"
+    )
+    st.info(f"Over {report.n_bets} weeks, {verdict}.", icon=":material/insights:")
+
+
 def _render_players(rows: list[PlayerRow]) -> None:
     st.caption(
         "StatsBomb shots across all ingested matches. G-xG > 0 = clinical finishing. "
@@ -2552,6 +2605,20 @@ def main() -> None:
                     st.info("No closing odds loaded for that league yet.")
                 else:
                     _render_report_card(fc_report, by_league[league])
+
+                if by_league[league] == "E0":
+                    st.divider()
+                    legs = st.slider("Legs per accumulator", 2, 4, 2, key="parlay_legs")
+                    parlay_report = _cached_accumulator_backtest(
+                        str(settings.analytics_db), by_league[league], legs
+                    )
+                    if parlay_report is None:
+                        st.info(
+                            "Not enough odds-bearing Premier League history to backtest a "
+                            f"{legs}-leg accumulator yet."
+                        )
+                    else:
+                        _render_parlay_backtest(parlay_report)
         return
 
     if page == "Analytics":

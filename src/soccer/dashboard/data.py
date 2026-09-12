@@ -23,6 +23,7 @@ from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
+from soccer.models.parlay import ParlayBacktestResult
 from soccer.models.poisson import PoissonModel, fit_poisson_shots
 from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.models.value import ValueReport
@@ -1278,6 +1279,36 @@ def forecast_report(
         return None
     return evaluate_forecasts(
         rows, model=model, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE, min_history=60
+    )
+
+
+def accumulator_backtest(
+    analytics_db: Path, division: str, *, legs_per_bet: int = 2, n_seasons: int = 6
+) -> ParlayBacktestResult | None:
+    """Would a weekly 'parlay the model's most confident picks' strategy have paid off?
+
+    Walk-forward over a division's recent odds-bearing seasons, same no-leakage fit as
+    `forecast_report`. Returns None if no odds are loaded or too little data to place a
+    single accumulator of this size.
+    """
+    from soccer.models.parlay import backtest_accumulator
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        seasons = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division},
+            key=season_sort_key,
+            reverse=True,
+        )[:n_seasons]
+        rows = [r for s in seasons for r in adb.outcomes_with_odds(s, division)]
+    if not rows:
+        return None
+    return backtest_accumulator(
+        rows,
+        legs_per_bet=legs_per_bet,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        min_history=60,
     )
 
 
