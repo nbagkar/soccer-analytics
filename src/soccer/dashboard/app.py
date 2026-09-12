@@ -13,6 +13,7 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 from __future__ import annotations
 
 import html
+import math
 from typing import Any, Literal, cast, overload
 
 import altair as alt
@@ -2061,6 +2062,91 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     _render_uncovered_fixtures(uncovered)
 
 
+def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
+    """Cross-match accumulator: combine legs from different Premier League fixtures.
+
+    Unlike the same-game combo above, different matches are close enough to independent
+    that the combined true probability is just the product of each leg's own probability --
+    which is also how a bookmaker prices a straight accumulator (multiplying each leg's own
+    decimal odds). So there's no correlation correction to make here; what's worth
+    surfacing is how fast the combined price drifts from fair as legs are added, since
+    every leg's own margin compounds into the whole.
+    """
+    from soccer.models.markets import combo_probability, same_match_legs
+    from soccer.models.value import expected_value, kelly_fraction
+
+    st.markdown("**Accumulator** — combine legs across different Premier League matches")
+    pl = [f for f in fixtures if f.competition == "Premier League" and f.slate is not None]
+    if len(pl) < 2:
+        st.info(
+            "Need at least two upcoming, forecastable Premier League fixtures to build an "
+            "accumulator — go to **Home → Update fixtures** if this looks thin."
+        )
+        return
+
+    options = {f"{f.kickoff_utc:%m-%d} {f.home} v {f.away}": f for f in pl}
+    picked = st.multiselect("Matches", list(options.keys()), key="acc_matches")
+    if len(picked) < 2:
+        st.info("Pick two or more matches to build the accumulator.")
+        return
+
+    rows, true_probs, odds_in = [], [], []
+    for label in picked:
+        f = options[label]
+        assert f.slate is not None
+        legs = same_match_legs(f.home, f.away)
+        sel = st.selectbox(f"Selection — {label}", list(legs.keys()), key=f"acc_sel_{label}")
+        p = combo_probability(f.slate.grid, [legs[sel]])
+        true_probs.append(p)
+        default_odds = round(1.0 / p, 2) if p > 0 else 100.0
+        odds = st.number_input(
+            f"Your odds — {label}: {sel}",
+            min_value=1.01,
+            value=default_odds,
+            step=0.05,
+            key=f"acc_odds_{label}",
+        )
+        odds_in.append(odds)
+        rows.append(
+            {"Match": label, "Selection": sel, "Model prob": f"{p:.0%}", "Your odds": f"{odds:.2f}"}
+        )
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+
+    combined_p = math.prod(true_probs)
+    implied_odds = math.prod(odds_in)
+
+    c = st.columns(3)
+    c[0].metric("Combined true probability", f"{combined_p:.1%}", border=True)
+    c[1].metric(
+        "Combined fair odds", f"{1.0 / combined_p:.2f}" if combined_p > 0 else "—", border=True
+    )
+    c[2].metric("Implied parlay price (your odds multiplied)", f"{implied_odds:.2f}", border=True)
+
+    actual_price = st.number_input(
+        "The combined price your bookmaker actually quotes (defaults to the product above — "
+        "some books shade parlay prices below it, which is extra margin on top)",
+        min_value=1.01,
+        value=round(implied_odds, 2),
+        step=0.05,
+    )
+    ev = expected_value(combined_p, actual_price)
+    kelly = kelly_fraction(combined_p, actual_price)
+    colour = "#16a34a" if ev > 0 else "#8b8b8b"
+    stake = f"{kelly * 100:.1f}% of bankroll" if kelly > 0 else "—"
+    st.markdown(
+        f"Combined edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
+        f"Kelly stake: <span style='color:{colour}'>{stake}</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"{len(picked)} legs. Each leg's own bookmaker margin compounds into the whole -- "
+        "e.g. a 5% margin on every leg alone stacks to roughly "
+        f"{100 * (1 - 0.95 ** len(picked)):.0f}% on a {len(picked)}-leg combo, which is why "
+        "parlays are systematically worse value than the same picks bet straight, even when "
+        "every individual leg looks fine."
+    )
+
+
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
     if not uncovered:
         return
@@ -2325,9 +2411,12 @@ def main() -> None:
         )
 
         with upcoming_tab:
-            _render_fixtures(
-                _cached_fixture_forecasts(str(settings.live_db), str(settings.analytics_db), 5000)
+            upcoming_fixtures = _cached_fixture_forecasts(
+                str(settings.live_db), str(settings.analytics_db), 5000
             )
+            _render_fixtures(upcoming_fixtures)
+            st.divider()
+            _render_accumulator_calculator(upcoming_fixtures)
 
         with match_tab:
             if not available:
