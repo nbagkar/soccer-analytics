@@ -17,6 +17,7 @@ from typing import Any, cast
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
+from soccer.domain.bets import Bet, BetLedger, BetStatus, LedgerSummary
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -130,6 +131,24 @@ def live_snapshot(
 def _last_updated(db: LiveDB) -> datetime | None:
     row = db.connection.execute("SELECT MAX(updated_at) AS t FROM match_state").fetchone()
     return datetime.fromisoformat(row["t"]) if row and row["t"] else None
+
+
+def list_bets(live_db: Path, *, status: BetStatus | None = None) -> list[Bet]:
+    """The personal bet ledger, most recent match first. [] if nothing logged yet."""
+    if not Path(live_db).exists():
+        return []
+    with LiveDB(live_db) as db:
+        return BetLedger(db).list(status=status)
+
+
+def bet_ledger_summary(live_db: Path) -> LedgerSummary:
+    """Real, forward-looking yield over the ledger's settled bets. All-zero if empty."""
+    if not Path(live_db).exists():
+        return LedgerSummary(
+            n_settled=0, n_pending=0, wins=0, losses=0, voids=0, staked=0.0, returned=0.0
+        )
+    with LiveDB(live_db) as db:
+        return BetLedger(db).summary()
 
 
 @dataclass(frozen=True)

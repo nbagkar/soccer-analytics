@@ -15,6 +15,7 @@ from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
+from soccer.domain.bets import BetLedger, BetStatus
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
@@ -610,3 +611,45 @@ def load_all_events(
         if on_progress:
             on_progress(i, len(packs))
     return f"Loaded {len(packs)} player datasets — the marquee names are ready."
+
+
+def add_bet(
+    settings: Settings,
+    *,
+    competition: str,
+    home: str,
+    away: str,
+    match_date: str,
+    selection: str,
+    odds: float,
+    stake: float,
+    model_probability: float | None = None,
+    notes: str | None = None,
+) -> int:
+    """Log a bet to the personal ledger, pending until settled."""
+    settings.ensure_dirs()
+    with LiveDB(settings.live_db) as db:
+        return BetLedger(db).add(
+            competition=competition,
+            home=home,
+            away=away,
+            match_date=match_date,
+            selection=selection,
+            odds=odds,
+            stake=stake,
+            model_probability=model_probability,
+            notes=notes,
+        )
+
+
+def settle_bet(
+    settings: Settings, bet_id: int, status: BetStatus, *, payout: float | None = None
+) -> None:
+    """Record a logged bet's outcome. See `BetLedger.settle` for the default payout rules."""
+    with LiveDB(settings.live_db) as db:
+        BetLedger(db).settle(bet_id, status, payout=payout)
+
+
+def delete_bet(settings: Settings, bet_id: int) -> None:
+    with LiveDB(settings.live_db) as db:
+        BetLedger(db).delete(bet_id)

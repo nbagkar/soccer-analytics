@@ -41,6 +41,7 @@ from soccer.dashboard.data import (
     analytics_available,
     analytics_snapshot,
     availability_adjusted_slate,
+    bet_ledger_summary,
     fixture_forecasts,
     forecast_explanation,
     forecast_report,
@@ -50,6 +51,7 @@ from soccer.dashboard.data import (
     has_player_events,
     health_snapshot,
     league_history,
+    list_bets,
     live_snapshot,
     market_edge,
     player_board,
@@ -67,6 +69,7 @@ from soccer.dashboard.data import (
     underlying_table,
     upcoming_season_briefing,
 )
+from soccer.domain.bets import BetStatus
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.models.evaluation import (
     BlendPoint,
@@ -2245,6 +2248,7 @@ _NAV = [
     ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
+    ("Bet Ledger", "Bet tracker", ":material/receipt_long:", "Log real bets, track real yield"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
@@ -2386,6 +2390,139 @@ def _render_players_page(settings: Settings) -> None:
             st.info("No players clear that minutes threshold. Lower it above.")
         else:
             _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
+
+
+def _render_bet_ledger(settings: Settings) -> None:
+    """Personal bet ledger: log real bets, settle them, and see a real (not backtested)
+    yield. See domain/bets.py -- everything else in this app is judged by a walk-forward
+    backtest, which can't score a decision that hasn't happened yet; this can."""
+    from soccer.dashboard import actions
+
+    summary = bet_ledger_summary(settings.live_db)
+    c = st.columns(5)
+    c[0].metric("Settled", summary.n_settled, border=True)
+    c[1].metric("Pending", summary.n_pending, border=True)
+    c[2].metric("Win rate", f"{summary.win_rate:.0%}" if summary.n_settled else "—", border=True)
+    profit_colour = "#16a34a" if summary.profit > 0 else "#dc2626" if summary.profit < 0 else _MUTE
+    with c[3]:
+        st.markdown("Profit")
+        st.markdown(
+            f"<span style='font-size:1.5rem;font-weight:600;color:{profit_colour}'>"
+            f"{summary.profit:+.2f}</span>",
+            unsafe_allow_html=True,
+        )
+    with c[4]:
+        st.markdown("Yield")
+        yield_label = f"{summary.yield_pct:+.1f}%" if summary.n_settled else "—"
+        st.markdown(
+            f"<span style='font-size:1.5rem;font-weight:600;color:{profit_colour}'>"
+            f"{yield_label}</span>",
+            unsafe_allow_html=True,
+        )
+    st.caption(
+        "A real, forward-looking result — not a backtest. Log a bet when you place (or "
+        "seriously consider) one, settle it once the match finishes, and this tracks your "
+        "actual yield over time. Needs weeks of entries before the numbers mean anything; "
+        "a handful of bets is noise, same as any small sample elsewhere in this app."
+    )
+
+    pending = list_bets(settings.live_db, status=BetStatus.PENDING)
+    settled = [b for b in list_bets(settings.live_db) if b.status is not BetStatus.PENDING]
+
+    with st.expander(
+        "Log a new bet", icon=":material/add_circle:", expanded=not pending and not settled
+    ), st.form("add_bet_form", clear_on_submit=True):
+        cols = st.columns(3)
+        competition = cols[0].text_input("Competition", value="Premier League")
+        home = cols[1].text_input("Home team")
+        away = cols[2].text_input("Away team")
+        cols2 = st.columns(3)
+        match_date = cols2[0].date_input("Kickoff date")
+        odds = cols2[1].number_input("Odds (decimal)", min_value=1.01, value=2.0, step=0.05)
+        stake = cols2[2].number_input("Stake", min_value=0.01, value=10.0, step=1.0)
+        selection = st.text_input(
+            "Selection", placeholder="e.g. Arsenal win, or Home win + Over 2.5"
+        )
+        cols3 = st.columns(2)
+        model_pct = cols3[0].number_input(
+            "Model probability % (optional)", min_value=0.0, max_value=100.0, value=0.0
+        )
+        notes = cols3[1].text_input("Notes (optional)")
+        if st.form_submit_button("Log bet", type="primary"):
+            if not home or not away or not selection:
+                st.error("Home, away and selection are required.")
+            else:
+                actions.add_bet(
+                    settings,
+                    competition=competition or "Premier League",
+                    home=home,
+                    away=away,
+                    match_date=match_date.isoformat(),
+                    selection=selection,
+                    odds=odds,
+                    stake=stake,
+                    model_probability=model_pct / 100 if model_pct else None,
+                    notes=notes or None,
+                )
+                st.toast("Bet logged.", icon=":material/check_circle:")
+                st.rerun()
+
+    if pending:
+        st.markdown(f"**Pending** ({len(pending)}) — settle once the match finishes")
+        for bet in pending:
+            with st.container(border=True):
+                info, won, lost, void, delete = st.columns([5, 1, 1, 1, 1])
+                info.markdown(
+                    f"**{_esc(bet.home)} v {_esc(bet.away)}** — {_esc(bet.selection)}  \n"
+                    f"<span style='color:{_MUTE}'>{bet.match_date} · odds {bet.odds:.2f} · "
+                    f"stake {bet.stake:.2f}</span>",
+                    unsafe_allow_html=True,
+                )
+                if won.button("Won", key=f"won_{bet.id}"):
+                    actions.settle_bet(settings, bet.id, BetStatus.WON)
+                    st.rerun()
+                if lost.button("Lost", key=f"lost_{bet.id}"):
+                    actions.settle_bet(settings, bet.id, BetStatus.LOST)
+                    st.rerun()
+                if void.button("Void", key=f"void_{bet.id}"):
+                    actions.settle_bet(settings, bet.id, BetStatus.VOID)
+                    st.rerun()
+                if delete.button(":material/delete:", key=f"del_{bet.id}", help="Delete"):
+                    actions.delete_bet(settings, bet.id)
+                    st.rerun()
+
+    if settled:
+        st.markdown(f"**Settled** ({len(settled)})")
+        rows = []
+        for b in settled:
+            profit = b.profit or 0.0
+            colour = "#16a34a" if profit > 0 else "#dc2626" if profit < 0 else _MUTE
+            rows.append(
+                {
+                    "Date": b.match_date,
+                    "Match": f"{_esc(b.home)} v {_esc(b.away)}",
+                    "Selection": _esc(b.selection),
+                    "Odds": f"{b.odds:.2f}",
+                    "Stake": f"{b.stake:.2f}",
+                    "Status": b.status.value.capitalize(),
+                    "Profit": f"<span style='color:{colour}'>{profit:+.2f}</span>",
+                }
+            )
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
+        with st.expander("Fix a mistake", icon=":material/edit:"):
+            options = {
+                f"{b.match_date} — {b.home} v {b.away} — {b.selection} ({b.status.value})": b.id
+                for b in settled
+            }
+            choice = st.selectbox("Bet to delete", list(options), key="del_settled_choice")
+            if st.button("Delete this entry", key="del_settled_btn"):
+                actions.delete_bet(settings, options[choice])
+                st.rerun()
+    elif not pending:
+        st.info(
+            "No bets logged yet. Use **Log a new bet** above to start tracking.",
+            icon=":material/receipt_long:",
+        )
 
 
 def _require_password() -> None:
@@ -2619,6 +2756,10 @@ def main() -> None:
                         )
                     else:
                         _render_parlay_backtest(parlay_report)
+        return
+
+    if page == "Bet Ledger":
+        _render_bet_ledger(settings)
         return
 
     if page == "Analytics":

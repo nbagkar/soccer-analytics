@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -134,6 +134,31 @@ CREATE TABLE IF NOT EXISTS player_availability (
 
 CREATE INDEX IF NOT EXISTS idx_availability_team
     ON player_availability (team_norm);
+
+-- Personal bet ledger (domain/bets.py): a manually-entered record of real decisions and
+-- their real outcomes, kept because everything else here is judged by a walk-forward
+-- backtest and a backtest cannot score a bet that has not happened yet. Accumulates
+-- indefinitely -- unlike player_availability above, this is genuinely the user's own data,
+-- not a licensed provider's snapshot, so there is no "replace wholesale" concern.
+CREATE TABLE IF NOT EXISTS bet (
+    id                INTEGER PRIMARY KEY,
+    placed_at         TEXT NOT NULL,
+    competition       TEXT NOT NULL,
+    home              TEXT NOT NULL,
+    away              TEXT NOT NULL,
+    match_date        TEXT NOT NULL,
+    selection         TEXT NOT NULL,
+    model_probability REAL,
+    odds              REAL NOT NULL,
+    stake             REAL NOT NULL,
+    status            TEXT NOT NULL,
+    payout            REAL,
+    notes             TEXT,
+    settled_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bet_status ON bet (status);
+CREATE INDEX IF NOT EXISTS idx_bet_match_date ON bet (match_date);
 """
 
 
