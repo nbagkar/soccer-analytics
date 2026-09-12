@@ -70,3 +70,42 @@ class TestOddsAndScores:
         win = {m.name: m.probability for m in SLATE.result}["Home"]
         wtn = {m.name: m.probability for m in SLATE.win_to_nil}["Home"]
         assert 0 < wtn < win  # winning to nil is a subset of winning
+
+
+class TestSameMatchCombos:
+    def test_grid_sums_to_one(self) -> None:
+        assert sum(SLATE.grid.values()) == pytest.approx(1.0, abs=1e-6)
+
+    def test_single_leg_matches_the_named_market(self) -> None:
+        from soccer.models.markets import combo_probability, same_match_legs
+
+        legs = same_match_legs("Home", "Away")
+        home_p = {m.name: m.probability for m in SLATE.result}["Home"]
+        assert combo_probability(SLATE.grid, [legs["Home"]]) == pytest.approx(home_p)
+
+        over25 = next(ou for ou in SLATE.over_under if ou.line == 2.5).over
+        assert combo_probability(SLATE.grid, [legs["Over 2.5"]]) == pytest.approx(over25)
+
+    def test_contradictory_legs_are_impossible(self) -> None:
+        from soccer.models.markets import combo_probability, same_match_legs
+
+        legs = same_match_legs("Home", "Away")
+        assert combo_probability(SLATE.grid, [legs["Home"], legs["Draw"]]) == 0.0
+
+    def test_combo_is_the_exact_joint_probability_not_a_naive_product(self) -> None:
+        """The whole point of a same-match combo calculator: these legs are correlated, so
+        the true joint probability (an exact sum over the grid) must differ from the naive
+        -- and wrong -- shortcut of multiplying the two markets' standalone probabilities."""
+        from soccer.models.markets import combo_probability, same_match_legs
+
+        legs = same_match_legs("Home", "Away")
+        home_and_over = combo_probability(SLATE.grid, [legs["Home"], legs["Over 2.5"]])
+
+        # Ground truth: brute-force the same joint sum directly off the grid, independent of
+        # combo_probability's own implementation.
+        expected = sum(p for (x, y), p in SLATE.grid.items() if x > y and x + y > 2.5)
+        assert home_and_over == pytest.approx(expected)
+
+        home_p = {m.name: m.probability for m in SLATE.result}["Home"]
+        over25 = next(ou for ou in SLATE.over_under if ou.line == 2.5).over
+        assert home_and_over != pytest.approx(home_p * over25)

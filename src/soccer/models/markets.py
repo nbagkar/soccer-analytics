@@ -49,6 +49,12 @@ class MarketSlate:
     win_to_nil: list[Market]  # home / away
     total_goals: list[Market]  # 0,1,2,3,4,5+
     correct_scores: list[tuple[int, int, float]]
+    grid: dict[tuple[int, int], float]
+    """The full scoreline distribution this slate was built from -- every market above is a
+    sum over it. Kept on the slate so a same-match combo (two-plus legs at once, e.g. "home
+    win AND over 2.5") can be scored as the TRUE joint probability instead of the wrong
+    shortcut of multiplying the two markets' standalone probabilities, which ignores the
+    correlation between them (see `combo_probability`)."""
 
     @property
     def most_likely_score(self) -> tuple[int, int, float]:
@@ -105,4 +111,56 @@ def compute_markets(
         ],
         total_goals=total_goals,
         correct_scores=[(x, y, prob) for (x, y), prob in correct],
+        grid=grid,
     )
+
+
+LegPredicate = Callable[[int, int], bool]
+
+
+def same_match_legs(home: str, away: str) -> dict[str, LegPredicate]:
+    """Named same-match selections, each a predicate on a (home_goals, away_goals) scoreline.
+
+    Mirrors the markets `compute_markets` already builds, so a single-leg "combo" reproduces
+    exactly the same probability shown elsewhere on the slate. The point of naming these as
+    predicates rather than precomputed probabilities is `combo_probability` below: two or
+    more of these picked together must be scored jointly, not multiplied.
+    """
+    legs: dict[str, LegPredicate] = {
+        home: lambda x, y: x > y,
+        "Draw": lambda x, y: x == y,
+        away: lambda x, y: x < y,
+        f"{home} or Draw (1X)": lambda x, y: x >= y,
+        f"{home} or {away} (12)": lambda x, y: x != y,
+        f"Draw or {away} (X2)": lambda x, y: x <= y,
+        "BTTS: Yes": lambda x, y: x >= 1 and y >= 1,
+        "BTTS: No": lambda x, y: x == 0 or y == 0,
+        f"{home} clean sheet": lambda x, y: y == 0,
+        f"{away} clean sheet": lambda x, y: x == 0,
+        f"{home} win to nil": lambda x, y: x > y and y == 0,
+        f"{away} win to nil": lambda x, y: y > x and x == 0,
+    }
+    for line in OVER_UNDER_LINES:
+        legs[f"Over {line}"] = _over(line)
+        legs[f"Under {line}"] = _under(line)
+    return legs
+
+
+def _over(line: float) -> LegPredicate:
+    return lambda x, y: x + y > line
+
+
+def _under(line: float) -> LegPredicate:
+    return lambda x, y: x + y < line
+
+
+def combo_probability(grid: dict[tuple[int, int], float], legs: list[LegPredicate]) -> float:
+    """True joint probability of every leg holding at once, from the scoreline grid.
+
+    Not a product of the legs' standalone probabilities -- same-match outcomes are
+    correlated (e.g. a home win makes "over 2.5" more likely than it is unconditionally,
+    since a 2-0 or 3-1 is a more common route to a home win than a 1-0), so multiplying
+    would misstate the true combined odds. This sums the grid over cells where every
+    predicate holds, which is exact given the model's own joint distribution.
+    """
+    return sum(prob for (x, y), prob in grid.items() if all(leg(x, y) for leg in legs))

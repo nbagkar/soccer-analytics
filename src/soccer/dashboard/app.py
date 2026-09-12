@@ -1486,6 +1486,78 @@ def _render_ev_calculator(slate: MarketSlate) -> None:
     )
 
 
+def _render_combo_calculator(slate: MarketSlate) -> None:
+    """Same-game combo: the TRUE joint probability of two-plus same-match selections.
+
+    Not the naive shortcut of multiplying the legs' standalone probabilities -- same-match
+    outcomes are correlated (a home win is more often a 2-0 or 3-1 than a bare 1-0, so it
+    moves together with "over 2.5"), so that shortcut misprices the combo. This sums the
+    model's own scoreline grid instead, which is exact given the model.
+    """
+    from soccer.models.markets import combo_probability, same_match_legs
+    from soccer.models.value import expected_value, kelly_fraction
+
+    st.markdown("**Same-game combo** — priced from the true joint probability")
+    st.caption(
+        "Pick two or more selections from this match. Correlated outcomes (e.g. a home win "
+        "and over 2.5 goals) are NOT independent, so this doesn't multiply their standalone "
+        "probabilities -- it sums the model's actual scoreline distribution over every score "
+        "where all picks hold, which is the honest combined probability."
+    )
+    legs = same_match_legs(slate.home, slate.away)
+    default_picks = [slate.home, "Over 2.5"] if "Over 2.5" in legs else []
+    picked = st.multiselect("Selections", list(legs.keys()), default=default_picks)
+    if len(picked) < 2:
+        st.info("Pick two or more selections to price the combo.")
+        return
+
+    predicates = [legs[name] for name in picked]
+    combo_p = combo_probability(slate.grid, predicates)
+    naive_p = 1.0
+    for name in picked:
+        naive_p *= combo_probability(slate.grid, [legs[name]])
+
+    c = st.columns(3)
+    c[0].metric("True joint probability", f"{combo_p:.1%}", border=True)
+    c[1].metric("True fair odds", f"{1.0 / combo_p:.2f}" if combo_p > 0 else "—", border=True)
+    c[2].metric(
+        "Naive multiply (wrong)",
+        f"{1.0 / naive_p:.2f}" if naive_p > 0 else "—",
+        help="What you'd get by multiplying each leg's standalone decimal odds -- the "
+        "common but incorrect way to price a same-game combo, since it assumes the legs "
+        "are independent. Compare to the true fair odds alongside it.",
+        border=True,
+    )
+
+    if combo_p <= 0:
+        st.warning(
+            "These selections can never happen together (probability 0) — check for a "
+            "contradiction, like a result plus its own opposite."
+        )
+        return
+
+    odds = st.number_input(
+        "Your bookmaker's combo odds (decimal)",
+        min_value=1.01,
+        value=round(1.0 / combo_p, 2),
+        step=0.05,
+    )
+    ev = expected_value(combo_p, odds)
+    kelly = kelly_fraction(combo_p, odds)
+    colour = "#16a34a" if ev > 0 else "#8b8b8b"
+    stake = f"{kelly * 100:.1f}% of bankroll" if kelly > 0 else "—"
+    st.markdown(
+        f"Edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
+        f"Kelly stake: <span style='color:{colour}'>{stake}</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Every added leg multiplies the bookmaker's margin into the combo too, so a parlay "
+        "is systematically worse value than betting the same legs straight — this prices "
+        "the combo honestly, it doesn't undo that."
+    )
+
+
 def _render_market_edge(report: ValueReport) -> None:
     """Honest 'does the model beat the closing line' summary for the league."""
     beats = report.beats_market
@@ -2309,6 +2381,8 @@ def main() -> None:
                             _render_forecast_explanation(exp)
                             st.divider()
                         _render_ev_calculator(slate)
+                        st.divider()
+                        _render_combo_calculator(slate)
                         report = _cached_market_edge(str(settings.analytics_db), season, division)
                         if report is not None:
                             st.divider()
