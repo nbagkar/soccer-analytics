@@ -97,6 +97,11 @@ class PoissonModel:
     def teams(self) -> list[str]:
         return sorted(self.strengths)
 
+    def add_team(self, name: str, attack: float, defence: float) -> None:
+        """Register an extra team the fit never saw (e.g. a newly promoted side) with an
+        explicit attack/defence prior, so it can be included in a simulation."""
+        self.strengths[name] = TeamStrength(attack=attack, defence=defence)
+
     def expected_goals(self, home: str, away: str) -> tuple[float, float]:
         h, a = self.strengths.get(home), self.strengths.get(away)
         if h is None or a is None:

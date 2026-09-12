@@ -1369,6 +1369,85 @@ class TestStabilizeThinSamples:
         assert model.strengths == original  # nothing to stabilise -- untouched
 
 
+class TestStabilizeThinSamplesPoisson:
+    """`_stabilize_thin_samples` also runs on `PoissonModel` (the shots-on-target blend
+    season_briefing/upcoming_season_briefing now fit). PoissonModel's defence is the
+    OPPOSITE sign convention from DixonColesModel's: higher = concedes MORE (leakier),
+    not fewer -- so naively reusing `attack + defence` to rank "weakest" would rank a
+    leaky-but-potent attacking side as weak and a tight, low-scoring side as strong. These
+    pin the corrected `attack - defence` goodness score against that exact failure mode."""
+
+    def _model(self):
+        from soccer.models.poisson import PoissonModel, TeamStrength
+
+        return PoissonModel(
+            strengths={
+                # Genuinely weak: poor attack, leaky defence.
+                "weak1": TeamStrength(attack=0.5, defence=1.4),
+                "weak2": TeamStrength(attack=0.4, defence=1.3),
+                # High-scoring but also leaky -- naive attack+defence ranks this "strong"
+                # (3.4, the highest of any team here); correct attack-defence (0.2) ranks
+                # it middling, well above the two genuinely weak sides.
+                "leaky_scorer": TeamStrength(attack=1.8, defence=1.6),
+                # The actual strongest side: strong attack AND tight defence. Naive
+                # attack+defence (2.3) sits BELOW leaky_scorer's 3.4, so a naive ranking
+                # would wrongly call this one weaker than the leaky scorer.
+                "strong": TeamStrength(attack=1.8, defence=0.5),
+            },
+            home_avg=1.5,
+            away_avg=1.1,
+            rho=-0.05,
+        )
+
+    def test_weakest_three_uses_attack_minus_defence_not_the_sum(self) -> None:
+        from soccer.dashboard.data import _stabilize_thin_samples
+
+        model = self._model()
+        match_counts = {"weak1": 10, "weak2": 10, "leaky_scorer": 10, "strong": 10}
+
+        _stabilize_thin_samples(
+            model, ["weak1", "weak2", "leaky_scorer", "strong", "new"], match_counts
+        )
+
+        # The promoted team's prior is the mean of the correctly-identified weakest three
+        # (weak1, weak2, leaky_scorer) -- NOT "strong", which a naive attack+defence sum
+        # would have mistakenly included instead of leaky_scorer.
+        expected_attack = (0.5 + 0.4 + 1.8) / 3
+        expected_defence = (1.4 + 1.3 + 1.6) / 3
+        new = model.strengths["new"]
+        assert new.attack == pytest.approx(expected_attack)
+        assert new.defence == pytest.approx(expected_defence)
+
+    def test_thin_sample_boundary_artifact_is_clipped(self) -> None:
+        """A team the fit only saw twice with a wild scoreline can land far outside any
+        established team's range; clip to that range before blending, as for DixonColesModel."""
+        from soccer.dashboard.data import SEASON_SIM_MIN_MATCHES, _stabilize_thin_samples
+        from soccer.models.poisson import TeamStrength
+
+        model = self._model()
+        model.strengths["thin"] = TeamStrength(attack=5.0, defence=0.05)  # degenerate outlier
+        match_counts = {
+            "weak1": 10,
+            "weak2": 10,
+            "leaky_scorer": 10,
+            "strong": 10,
+            "thin": 2,
+        }
+        assert match_counts["thin"] < SEASON_SIM_MIN_MATCHES
+
+        promoted = _stabilize_thin_samples(
+            model, ["weak1", "weak2", "leaky_scorer", "strong", "thin"], match_counts
+        )
+
+        assert promoted == []  # the fit DID see it -- thin-sample path, not the no-data one
+        established_max_attack = max(
+            model.strengths[t].attack for t in ("weak1", "weak2", "leaky_scorer", "strong")
+        )
+        # The outlier's raw 5.0 must be clipped to the established range before blending in,
+        # not let through to swamp the weight-average.
+        assert model.strengths["thin"].attack <= established_max_attack
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 

@@ -1656,16 +1656,21 @@ def _render_report_card(report: ForecastReport, division: str) -> None:
     )
 
     st.divider()
-    _render_track_record(report.recent, report.hit_rate, report.n)
+    _render_track_record(report.recent, report.hit_rate, report.goals_within_one_rate, report.n)
 
 
-def _render_track_record(recent: list[PredictionRecord], hit_rate: float, n: int) -> None:
+def _render_track_record(
+    recent: list[PredictionRecord], hit_rate: float, goals_within_one_rate: float, n: int
+) -> None:
     """Match-by-match: what the model said before kickoff, next to what actually happened."""
-    st.markdown("**Track record** — recent predictions vs what actually happened")
+    st.markdown("**Track record** — this season's predictions vs what actually happened")
+    c = st.columns(2)
+    c[0].metric("Outcome (W/D/L) picked correctly", f"{hit_rate:.0%}", border=True)
+    c[1].metric("Total goals within ±1", f"{goals_within_one_rate:.0%}", border=True)
     st.caption(
-        f"Picked the right outcome (win/draw/win) in **{hit_rate:.0%}** of all {n} scored "
-        f"matches; the {len(recent)} most recent are listed below. A 3-way guess with no skill "
-        "clears ~33-45% depending on how often draws happen in this league, so this isn't a "
+        f"Both rates are over all {n} scored matches (every loaded season), not just the "
+        f"{len(recent)} shown below. A 3-way guess with no skill clears ~33-45% on the outcome "
+        "pick depending on how often draws happen in this league, so the first number isn't a "
         "bar of 100% — it's whether the model beats a coin flip on the thing people care about."
     )
     rows = []
@@ -1941,6 +1946,7 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         "O2.5",
         "BTTS",
         "Favourite",
+        "Confidence",
     ]
     body = ""
     for f in forecastable:
@@ -1949,7 +1955,8 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         home_p, draw_p, away_p = (m.probability for m in s.result)
         over25 = next(o for o in s.over_under if o.line == 2.5).over
         btts_yes = next(m.probability for m in s.btts if m.name == "Yes")
-        fav = f.home if home_p >= away_p else f.away
+        pick_p = max(home_p, draw_p, away_p)
+        fav = "Draw" if draw_p == pick_p else f.home if home_p == pick_p else f.away
         cells = [
             f.kickoff_utc.strftime("%m-%d %H:%M"),
             f'<span style="color:#8b8b8b">{_esc(f.competition)}</span>',
@@ -1962,6 +1969,7 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
             _pct_cell(over25, over25 >= 0.5),
             _pct_cell(btts_yes, btts_yes >= 0.5),
             f'<span style="color:{_YES}">{_esc(fav)}</span>',
+            _confidence_cell(pick_p),
         ]
         tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
         body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
@@ -1974,7 +1982,9 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     st.caption(
         "Exp gls = the model's expected goals per side (this is where matches differ — the "
         "single most-likely scoreline is 1-1 for most games and only ~12% likely, so it's not "
-        "shown). 1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score."
+        "shown). 1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score. "
+        "Confidence = the probability the model gave its favourite; ~33% is a coin flip, "
+        "anything near that is barely a lean."
     )
     _render_uncovered_fixtures(uncovered)
 
@@ -2002,6 +2012,16 @@ def _pct_cell(p: float, is_max: bool) -> str:
     """Outcome probability as a Kalshi cent price; leader in Yes-green, tabular figures."""
     color = _YES if is_max else _MUTE
     return f"<b style='color:{color};font-variant-numeric:tabular-nums'>{_cents(p)}</b>"
+
+
+def _confidence_cell(p: float) -> str:
+    """How sure the model is on its favourite -- the probability it gave the pick.
+
+    Loose bands, not a calibration claim: ~33% is the no-skill 3-way baseline, so anything
+    near that is barely a lean at all.
+    """
+    color = _YES if p >= 0.5 else "#f0a020" if p >= 0.4 else _MUTE
+    return f"<b style='color:{color};font-variant-numeric:tabular-nums'>{p:.0%}</b>"
 
 
 # Per-page identity: a Material Symbol icon and a one-line description, for a consistent

@@ -25,6 +25,7 @@ from soccer.models.backtest import (
     expected_calibration_error,
 )
 from soccer.models.value import implied_probabilities
+from soccer.sources.football_data_co_uk import current_season_code
 from soccer.storage.analytics_db import OddsRow
 
 _EPS = 1e-15
@@ -117,6 +118,8 @@ class PredictionRecord:
     actual: int  # 0 home / 1 draw / 2 away
     home_goals: int
     away_goals: int
+    home_expected: float
+    away_expected: float
 
     @property
     def predicted(self) -> int:
@@ -126,6 +129,13 @@ class PredictionRecord:
     @property
     def correct(self) -> bool:
         return self.predicted == self.actual
+
+    @property
+    def goals_within_one(self) -> bool:
+        """Predicted total goals (rounded), within 1 of the actual total scored."""
+        predicted_total = round(self.home_expected + self.away_expected)
+        actual_total = self.home_goals + self.away_goals
+        return abs(predicted_total - actual_total) <= 1
 
 
 @dataclass(frozen=True)
@@ -144,8 +154,10 @@ class ForecastReport:
     divergences: list[Divergence]
     hit_rate: float
     """Fraction of matches where the model's highest-probability outcome was the actual one."""
+    goals_within_one_rate: float
+    """Fraction of matches where predicted total goals (rounded) was within 1 of the actual."""
     recent: list[PredictionRecord]
-    """Most recent matches first -- the track record, capped for display."""
+    """The track record: this season's predictions, most recent first."""
 
     @property
     def blend_beats_market(self) -> bool:
@@ -170,7 +182,6 @@ def evaluate_forecasts(
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
-    recent_limit: int = 30,
 ) -> ForecastReport | None:
     """Walk a slice, scoring model vs market vs blend vs baseline. None if too little data.
 
@@ -193,6 +204,7 @@ def evaluate_forecasts(
     played: list[OddsRow] = []
     seen: set[str] = set()
     records: list[tuple[Probs, Probs, int, OddsRow]] = []  # (model_p, market_p, actual, row)
+    expected_goals: list[tuple[float, float]] = []  # (home_expected, away_expected), aligned
     goals_preds: list[tuple[Probs, int]] = []  # goals-only Poisson, for comparison
     compare_goals = model != "poisson"
 
@@ -215,6 +227,7 @@ def evaluate_forecasts(
             )
             actual = _outcome_index(o.fthg, o.ftag)
             records.append((model_p, market_p, actual, o))
+            expected_goals.append((fc.home_expected, fc.away_expected))
             if compare_goals:
                 gfc = fit_poisson(played).forecast(o.home_norm, o.away_norm)
                 goals_preds.append(((gfc.prob_home, gfc.prob_draw, gfc.prob_away), actual))
@@ -272,22 +285,32 @@ def evaluate_forecasts(
         )
 
     hits = sum(1 for m, a in model_preds if max(range(3), key=lambda i: m[i]) == a)
+    all_predictions = [
+        PredictionRecord(
+            match_date=o.match_date,
+            home=o.home,
+            away=o.away,
+            model=m,
+            actual=a,
+            home_goals=o.fthg,
+            away_goals=o.ftag,
+            home_expected=lam,
+            away_expected=mu,
+        )
+        for (m, _k, a, o), (lam, mu) in zip(records, expected_goals, strict=True)
+    ]
+    goals_within_one = sum(1 for r in all_predictions if r.goals_within_one) / n
+
+    # "Recent" is the current season, not a fixed match count -- a season boundary is the
+    # natural cutoff a reader expects from "recent form", and a fixed count can straddle two
+    # seasons or bury the season's start under an arbitrary limit. The record with the latest
+    # match_date is always in its own season, so this is never empty.
+    latest_season = current_season_code(max(r.match_date for r in all_predictions))
     recent = sorted(
-        (
-            PredictionRecord(
-                match_date=o.match_date,
-                home=o.home,
-                away=o.away,
-                model=m,
-                actual=a,
-                home_goals=o.fthg,
-                away_goals=o.ftag,
-            )
-            for m, _k, a, o in records
-        ),
+        (r for r in all_predictions if current_season_code(r.match_date) == latest_season),
         key=lambda r: r.match_date,
         reverse=True,
-    )[:recent_limit]
+    )
 
     return ForecastReport(
         n=n,
@@ -303,5 +326,6 @@ def evaluate_forecasts(
         calibration_by_outcome=calibration_by_outcome,
         divergences=divergences,
         hit_rate=hits / n,
+        goals_within_one_rate=goals_within_one,
         recent=recent,
     )

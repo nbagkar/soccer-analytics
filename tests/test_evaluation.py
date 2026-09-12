@@ -35,8 +35,13 @@ class TestBlend:
         assert b == pytest.approx(tuple(r / total for r in raw))
 
 
-def _synthetic_rows():
-    """A few round-robins among six ranked teams, with vig-loaded odds tracking strength."""
+def _synthetic_rows(start: date = date(2025, 1, 1)):
+    """A few round-robins among six ranked teams, with vig-loaded odds tracking strength.
+
+    All dates land within `start`'s season -- four rounds among six teams is 120 days, so
+    keep `start` well clear of a season boundary (e.g. not late June/early July) for that
+    to hold.
+    """
     from soccer.domain.names import normalize_name
     from soccer.storage.analytics_db import OddsRow
 
@@ -55,7 +60,7 @@ def _synthetic_rows():
                 tot = eh + ed + ea
                 rows.append(
                     OddsRow(
-                        match_date=date(2025, 1, 1) + timedelta(days=day),
+                        match_date=start + timedelta(days=day),
                         home=h,
                         away=a,
                         home_norm=normalize_name(h),
@@ -103,21 +108,33 @@ class TestEvaluateForecasts:
     def test_track_record_is_most_recent_first_and_matches_the_hit_rate(self) -> None:
         """The synthetic rows have a real skill signal (odds track true strength), so the
         model should call the right outcome noticeably more than a random 3-way guess."""
-        report = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=10)
+        report = evaluate_forecasts(_synthetic_rows(), min_history=20)
         assert report is not None
-        assert len(report.recent) == 10
+        assert report.recent  # single-season fixture -> every scored match is "recent"
+        assert len(report.recent) == report.n
         dates = [r.match_date for r in report.recent]
         assert dates == sorted(dates, reverse=True)  # newest first
         assert 0.0 <= report.hit_rate <= 1.0
         assert report.hit_rate > 0.4  # clears a random 3-way guess by a wide margin
+        assert 0.0 <= report.goals_within_one_rate <= 1.0
         for r in report.recent:
             assert r.correct == (r.predicted == r.actual)
             assert r.actual in (0, 1, 2)
+            assert r.goals_within_one == (
+                abs(round(r.home_expected + r.away_expected) - (r.home_goals + r.away_goals)) <= 1
+            )
 
-    def test_recent_limit_caps_the_track_record_without_changing_hit_rate(self) -> None:
-        full = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=1000)
-        capped = evaluate_forecasts(_synthetic_rows(), min_history=20, recent_limit=5)
-        assert full is not None and capped is not None
-        assert len(full.recent) == full.n
-        assert len(capped.recent) == 5
-        assert full.hit_rate == capped.hit_rate  # the cap only trims display, not scoring
+    def test_recent_track_record_is_limited_to_the_latest_season(self) -> None:
+        """Two full seasons of results -- the track record should only show the later one,
+        not spill into the earlier season the way a fixed match-count cap would."""
+        from soccer.sources.football_data_co_uk import current_season_code
+
+        earlier = _synthetic_rows(start=date(2023, 8, 1))  # season "2324"
+        later = _synthetic_rows(start=date(2024, 8, 1))  # season "2425"
+        report = evaluate_forecasts(earlier + later, min_history=20)
+        assert report is not None
+        assert len(report.recent) < report.n  # excludes the earlier season entirely
+        seasons_in_recent = {current_season_code(r.match_date) for r in report.recent}
+        assert seasons_in_recent == {current_season_code(date(2024, 9, 1))}
+        dates = [r.match_date for r in report.recent]
+        assert dates == sorted(dates, reverse=True)  # newest first
