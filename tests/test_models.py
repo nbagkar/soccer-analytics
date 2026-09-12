@@ -192,6 +192,48 @@ class TestPoissonShotsHomeBoost:
         assert boosted > flat
 
 
+def _improving_form_rows() -> list[Row]:
+    """'x' was weak in January, dominant by June -- a real change in form over time, not
+    noise, so time-decay weighting toward the recent games should visibly raise its rating
+    versus an unweighted fit that treats every game the same regardless of age."""
+    rows = []
+    for day in range(1, 5):
+        rows.append(Row("x", "filler", 0, 3, date(2026, 1, day)))
+        rows.append(Row("filler", "x", 3, 0, date(2026, 1, day + 10)))
+    for day in range(1, 5):
+        rows.append(Row("x", "filler", 3, 0, date(2026, 6, day)))
+        rows.append(Row("filler", "x", 0, 3, date(2026, 6, day + 10)))
+    return rows
+
+
+class TestPoissonShotsTimeDecay:
+    def test_off_by_default_is_a_plain_unweighted_fit(self) -> None:
+        rows = _improving_form_rows()
+        a = fit_poisson_shots(rows)
+        b = fit_poisson_shots(rows, time_decay=0.0)
+        assert a.strengths == b.strengths
+        assert a.home_avg == b.home_avg
+
+    def test_weights_recent_form_more_heavily(self) -> None:
+        rows = _improving_form_rows()
+        flat = fit_poisson_shots(rows).strengths["x"].attack
+        decayed = fit_poisson_shots(rows, time_decay=0.02).strengths["x"].attack
+        assert decayed > flat  # recent (strong) form now dominates the weighted average
+
+    def test_ignored_without_match_date(self) -> None:
+        @dataclass(frozen=True)
+        class Undated:
+            home_norm: str
+            away_norm: str
+            fthg: int
+            ftag: int
+
+        rows = [Undated("a", "b", 2, 0), Undated("b", "a", 0, 2)]
+        flat = fit_poisson_shots(rows)
+        decayed = fit_poisson_shots(rows, time_decay=0.5)  # would error if not guarded
+        assert decayed.strengths == flat.strengths
+
+
 class TestElo:
     def test_ratings_are_zero_sum_around_initial(self) -> None:
         # Elo only redistributes points, so the mean stays at the initial rating.

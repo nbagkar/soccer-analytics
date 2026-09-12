@@ -215,6 +215,7 @@ def fit_poisson_shots(
     rho: float = DEFAULT_RHO,
     shrinkage: float = 0.0,
     home_shrinkage: float = 0.0,
+    time_decay: float = 0.0,
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 
@@ -239,26 +240,41 @@ def fit_poisson_shots(
     ACTUAL home opponents (so a tough home slate isn't mistaken for a weak home boost),
     then shrink that ratio toward 1.0 (no team effect) by this many pseudo home-games --
     same mechanic as `shrinkage`, applied to home advantage instead of attack/defence.
+
+    ``time_decay`` (xi per day, 0 = off) down-weights older matches by
+    ``exp(-xi * age_days)``, age measured from the most recent match in `outcomes` -- same
+    weighting `fit_dixon_coles` uses, applied here to the ratio method's sums instead of an
+    MLE. Requires every outcome to carry `match_date`; silently ignored (all games weighted
+    equally) otherwise, same defensive fallback `fit_dixon_coles` uses.
     """
     if not outcomes:
         raise ValueError("cannot fit a model with no results")
 
-    tot_goals = tot_sot = 0
-    for o in outcomes:
+    if time_decay > 0 and all(hasattr(o, "match_date") for o in outcomes):
+        max_date = max(o.match_date for o in outcomes)  # type: ignore[attr-defined]
+        weights = [
+            math.exp(-time_decay * (max_date - o.match_date).days)  # type: ignore[attr-defined]
+            for o in outcomes
+        ]
+    else:
+        weights = [1.0] * len(outcomes)
+
+    tot_goals = tot_sot = 0.0
+    for o, w in zip(outcomes, weights, strict=True):
         hst, ast = getattr(o, "home_shots_target", None), getattr(o, "away_shots_target", None)
         if hst is not None and ast is not None:
-            tot_goals += o.fthg + o.ftag
-            tot_sot += hst + ast
+            tot_goals += w * (o.fthg + o.ftag)
+            tot_sot += w * (hst + ast)
     conv = tot_goals / tot_sot if tot_sot else 0.0
 
     scored: dict[str, float] = {}
     conceded: dict[str, float] = {}
-    games: dict[str, int] = {}
-    home_goals = away_goals = 0
+    games: dict[str, float] = {}
+    home_goals = away_goals = 0.0
 
-    for o in outcomes:
-        home_goals += o.fthg
-        away_goals += o.ftag
+    for o, w in zip(outcomes, weights, strict=True):
+        home_goals += w * o.fthg
+        away_goals += w * o.ftag
         hst, ast = getattr(o, "home_shots_target", None), getattr(o, "away_shots_target", None)
         if conv and hst is not None and ast is not None:
             h_val = alpha * o.fthg + (1 - alpha) * hst * conv
@@ -266,14 +282,14 @@ def fit_poisson_shots(
         else:  # no shot data for this match -> trust the scoreline
             h_val, a_val = float(o.fthg), float(o.ftag)
         for team, gf, ga in ((o.home_norm, h_val, a_val), (o.away_norm, a_val, h_val)):
-            scored[team] = scored.get(team, 0.0) + gf
-            conceded[team] = conceded.get(team, 0.0) + ga
-            games[team] = games.get(team, 0) + 1
+            scored[team] = scored.get(team, 0.0) + w * gf
+            conceded[team] = conceded.get(team, 0.0) + w * ga
+            games[team] = games.get(team, 0.0) + w
 
-    matches = len(outcomes)
+    matches = sum(weights)
     overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
 
-    def _strength(total: float, n: int) -> float:
+    def _strength(total: float, n: float) -> float:
         # per-game rate relative to the league, shrunk toward 1.0 by `shrinkage` pseudo-games
         rate = (total / n) / overall
         return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
@@ -292,8 +308,8 @@ def fit_poisson_shots(
     if home_shrinkage:
         observed_home: dict[str, float] = {}
         expected_home: dict[str, float] = {}
-        n_home: dict[str, int] = {}
-        for o in outcomes:
+        n_home: dict[str, float] = {}
+        for o, w in zip(outcomes, weights, strict=True):
             hst = getattr(o, "home_shots_target", None)
             ast = getattr(o, "away_shots_target", None)
             h_val = (
@@ -302,11 +318,11 @@ def fit_poisson_shots(
                 else float(o.fthg)
             )
             team = o.home_norm
-            observed_home[team] = observed_home.get(team, 0.0) + h_val
-            expected_home[team] = expected_home.get(team, 0.0) + (
+            observed_home[team] = observed_home.get(team, 0.0) + w * h_val
+            expected_home[team] = expected_home.get(team, 0.0) + w * (
                 home_avg * strengths[team].attack * strengths[o.away_norm].defence
             )
-            n_home[team] = n_home.get(team, 0) + 1
+            n_home[team] = n_home.get(team, 0.0) + w
 
         home_boost = {}
         for team, n in n_home.items():

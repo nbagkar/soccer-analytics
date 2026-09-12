@@ -259,7 +259,12 @@ def analytics_snapshot(
     power = power_ranking(outcomes)
     fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
     projections = simulate_season(
-        fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE),
+        fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        ),
         fixtures,
         teams=list(names),
         n_sims=sims,
@@ -496,7 +501,12 @@ def season_briefing(
 
     names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
     teams = sorted(names)
-    model = fit_poisson_shots(window, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+    model = fit_poisson_shots(
+        window,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+    )
 
     match_counts: dict[str, int] = {}
     for o in window:
@@ -580,7 +590,12 @@ def upcoming_season_briefing(
     if not window:
         return None
     assert anchor_season is not None  # window is only non-empty when anchor_season was truthy
-    model = fit_poisson_shots(window, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+    model = fit_poisson_shots(
+        window,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+    )
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
     match_counts: dict[str, int] = {}
     for o in window:
@@ -636,11 +651,11 @@ def upcoming_season_briefing(
 # Recency-aware forecasting: fit on the last few seasons and re-fit as new results land,
 # so the model tracks current form instead of one frozen old season. Time-decay was the
 # obvious next knob, but a walk-forward backtest measured it DOWN skill monotonically
-# (+2.7% none, +2.4% at 140d, +1.6% at 90d on E0), so it is deliberately off -- the win is
-# the multi-season window plus self-updating, not down-weighting. Kept as a tunable, not a
-# default. (See docs / `soccer backtest --half-life`.)
+# (+2.7% none, +2.4% at 140d, +1.6% at 90d on E0) -- on the OLD goals-only Dixon-Coles MLE
+# model, before the shots-on-target blend below existed. Deliberately off for that model.
+# Kept as a tunable for the Matchup tab's "Dixon-Coles instead" toggle, not a default.
 FORECAST_SEASONS = 3
-FORECAST_HALF_LIFE_DAYS = 0  # 0 = no time-decay (measured best); >0 halves weight every N days
+FORECAST_HALF_LIFE_DAYS = 0  # 0 = no time-decay (measured best, DC MLE); see note above
 # Shots-on-target blend for the standalone forecast model: pseudo-goals = a*goals + (1-a)*SoT-xG.
 # Backtest across the top leagues put the model's log-loss gap to the closing line at roughly
 # half the goals-only model's (best around 0.25); matches without shot data fall back to goals.
@@ -650,6 +665,14 @@ FORECAST_ALPHA = 0.25
 # one result. Measured: k=3 slightly improves overall log loss AND rescues promoted teams'
 # early games (E0 that slice 1.33 -> 0.90, near the market's 0.86).
 FORECAST_SHRINKAGE = 3.0
+# Time-decay for the shots-blend model specifically -- NOT the same finding as
+# FORECAST_HALF_LIFE_DAYS above (that was the older goals-only DC model). Re-measured after
+# the shots blend shipped: walk-forward across 5 leagues, half-life in {90,180,250,365,500}d.
+# 4 of 5 leagues improve at a long, gentle decay (E0 -0.81% log loss at 180d, Bundesliga
+# -0.22% at 250d, Serie A -0.10% at 500d, Ligue 1 -0.20% at 250d); only La Liga disagrees, and
+# by a smaller margin (+0.21% at 250d) than the gains elsewhere. 250 days sits in every
+# league's good range. See forecast-model-quality memory for the full sweep.
+FORECAST_TIME_DECAY_DAYS = 250
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
@@ -702,7 +725,12 @@ def _expected_for(
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
     else:
-        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+        model = fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        )
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -879,7 +907,12 @@ def forecast_explanation(
         outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
     if not outcomes:
         return None
-    model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+    model = fit_poisson_shots(
+        outcomes,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+    )
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -1058,7 +1091,12 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
         form = next((f for f in forms if f.team == row.team), None)
         streak = next((s for s in adb.team_streaks(season, division) if s.team == row.team), None)
         outcomes = adb.outcomes_for(season, division)
-        model = fit_poisson_shots(outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE)
+        model = fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        )
 
     strength = model.strengths.get(norm)
     attack = strength.attack if strength else 1.0
@@ -1278,7 +1316,12 @@ def forecast_report(
     if not rows:
         return None
     return evaluate_forecasts(
-        rows, model=model, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE, min_history=60
+        rows,
+        model=model,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        min_history=60,
     )
 
 
@@ -1308,6 +1351,7 @@ def accumulator_backtest(
         legs_per_bet=legs_per_bet,
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
         min_history=60,
     )
 
@@ -1616,7 +1660,10 @@ def fixture_forecasts(
                     # Recency window (last few seasons), fit on the shots-on-target blend --
                     # measured to roughly halve the goals-only model's gap to the market.
                     model = fit_poisson_shots(
-                        outcomes, alpha=FORECAST_ALPHA, shrinkage=FORECAST_SHRINKAGE
+                        outcomes,
+                        alpha=FORECAST_ALPHA,
+                        shrinkage=FORECAST_SHRINKAGE,
+                        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
                     )
                     model_names[division] = {o.home_norm: o.home for o in outcomes} | {
                         o.away_norm: o.away for o in outcomes

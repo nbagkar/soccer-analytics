@@ -53,6 +53,7 @@ def backtest_accumulator(
     model: str = "shots",
     alpha: float = 0.25,
     shrinkage: float = 3.0,
+    time_decay: float = 0.0,
     min_history: int = 60,
 ) -> ParlayBacktestResult | None:
     """Walk forward, one accumulator per calendar week.
@@ -71,7 +72,9 @@ def backtest_accumulator(
 
     def fit(played: list[OddsRow]) -> object:
         if model == "shots":
-            return fit_poisson_shots(played, alpha=alpha, shrinkage=shrinkage)
+            return fit_poisson_shots(
+                played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay
+            )
         if model == "dixon_coles":
             return fit_dixon_coles(played)
         return fit_poisson(played)
