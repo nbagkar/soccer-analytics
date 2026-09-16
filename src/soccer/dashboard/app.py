@@ -2172,19 +2172,14 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
 
 
 def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
-    """Cross-match accumulator: combine legs from different Premier League fixtures.
-
-    Unlike the same-game combo above, different matches are close enough to independent
-    that the combined true probability is just the product of each leg's own probability --
-    which is also how a bookmaker prices a straight accumulator (multiplying each leg's own
-    decimal odds). So there's no correlation correction to make here; what's worth
-    surfacing is how fast the combined price drifts from fair as legs are added, since
-    every leg's own margin compounds into the whole.
+    """Cross-match accumulator, built automatically from the model's own most confident
+    Premier League picks -- no manual leg-picking. Different matches are close enough to
+    independent that the combined true probability is just the product of each leg's own
+    probability, which is also how a bookmaker prices a straight accumulator (multiplying
+    each leg's own decimal odds), so there's no correlation correction to make here.
     """
-    from soccer.models.markets import combo_probability, same_match_legs
     from soccer.models.value import expected_value, kelly_fraction
 
-    st.caption("Combine legs across different Premier League matches into one accumulator.")
     pl = [f for f in fixtures if f.competition == "Premier League" and f.slate is not None]
     if len(pl) < 2:
         st.info(
@@ -2193,73 +2188,60 @@ def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
         )
         return
 
-    options = {f"{f.kickoff_utc:%m-%d} {f.home} v {f.away}": f for f in pl}
-    picked = st.multiselect("Matches", list(options.keys()), key="acc_matches")
-    if len(picked) < 2:
-        st.info("Pick two or more matches to build the accumulator.")
-        return
-
-    rows, true_probs, odds_in = [], [], []
-    for label in picked:
-        f = options[label]
+    # Same ranking as the Upcoming tab's Favourite/Confidence columns: each match's pick is
+    # whichever of home/draw/away the model rates highest, ranked most confident first.
+    candidates = []
+    for f in pl:
         assert f.slate is not None
-        legs = same_match_legs(f.home, f.away)
-        sel = st.selectbox(f"Selection — {label}", list(legs.keys()), key=f"acc_sel_{label}")
-        p = combo_probability(f.slate.grid, [legs[sel]])
-        true_probs.append(p)
-        default_odds = round(1.0 / p, 2) if p > 0 else 100.0
-        odds = st.number_input(
-            f"Your odds — {label}: {sel}",
-            min_value=1.01,
-            value=default_odds,
-            step=0.05,
-            key=f"acc_odds_{label}",
-        )
-        odds_in.append(odds)
-        rows.append(
-            {"Match": label, "Selection": sel, "Model prob": f"{p:.0%}", "Your odds": f"{odds:.2f}"}
-        )
+        home_p, draw_p, away_p = (m.probability for m in f.slate.result)
+        pick_p = max(home_p, draw_p, away_p)
+        pick = "Draw" if draw_p == pick_p else f.home if home_p == pick_p else f.away
+        candidates.append((f, pick, pick_p))
+    candidates.sort(key=lambda c: -c[2])
+
+    legs = st.slider("Legs", 2, min(4, len(candidates)), 2)
+    chosen = candidates[:legs]
+
+    rows = [
+        {"Match": f"{f.home} v {f.away}", "Pick": pick, "Confidence": f"{p:.0%}"}
+        for f, pick, p in chosen
+    ]
     st.markdown(_html_table(rows), unsafe_allow_html=True)
+    st.caption("The model's own most confident picks this week, strongest first.")
 
-    combined_p = math.prod(true_probs)
-    implied_odds = math.prod(odds_in)
-
-    c = st.columns(3)
-    c[0].metric("Combined true probability", f"{combined_p:.1%}", border=True)
-    c[1].metric(
-        "Combined fair odds", f"{1.0 / combined_p:.2f}" if combined_p > 0 else "—", border=True
-    )
-    c[2].metric("Implied parlay price (your odds multiplied)", f"{implied_odds:.2f}", border=True)
+    combined_p = math.prod(p for _f, _pick, p in chosen)
+    fair_odds = 1.0 / combined_p if combined_p > 0 else float("inf")
+    c = st.columns(2)
+    c[0].metric("Combined probability", f"{combined_p:.1%}", border=True)
+    c[1].metric("Fair odds", f"{fair_odds:.2f}", border=True)
 
     actual_price = st.number_input(
-        "The combined price your bookmaker actually quotes (defaults to the product above — "
-        "some books shade parlay prices below it, which is extra margin on top)",
+        "What price is your bookmaker offering for this combo?",
         min_value=1.01,
-        value=round(implied_odds, 2),
+        value=round(fair_odds, 2),
         step=0.05,
     )
     ev = expected_value(combined_p, actual_price)
     kelly = kelly_fraction(combined_p, actual_price)
-    colour = "#16a34a" if ev > 0 else "#8b8b8b"
+    colour = "#16a34a" if ev > 0 else "#dc2626"
     stake = f"{kelly * 100:.1f}% of bankroll" if kelly > 0 else "—"
     st.markdown(
-        f"Combined edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
+        f"Edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
         f"Kelly stake: <span style='color:{colour}'>{stake}</span>",
         unsafe_allow_html=True,
     )
     st.caption(
-        f"{len(picked)} legs. Each leg's own bookmaker margin compounds into the whole -- "
-        "e.g. a 5% margin on every leg alone stacks to roughly "
-        f"{100 * (1 - 0.95 ** len(picked)):.0f}% on a {len(picked)}-leg combo, which is why "
-        "parlays are systematically worse value than the same picks bet straight, even when "
-        "every individual leg looks fine."
+        "Heads up: backtested on real history, parlaying the model's most-confident weekly "
+        "picks like this lost MORE than betting the same picks straight (see Scorecard → "
+        "Parlay backtest: -6.5% vs -0.6% at 2 legs) -- each added leg compounds the "
+        "bookmaker's own margin. This prices the combo honestly; it doesn't make it a good bet."
     )
     _log_bet_button(
         "log_accumulator",
         competition="Premier League",
-        home=f"{len(picked)}-leg accumulator",
+        home=f"{legs}-leg accumulator",
         away="",
-        selection="; ".join(f"{r['Match']}: {r['Selection']}" for r in rows),
+        selection="; ".join(f"{r['Match']}: {r['Pick']}" for r in rows),
         odds=actual_price,
         model_probability=combined_p,
     )
