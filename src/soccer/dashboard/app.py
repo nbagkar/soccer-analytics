@@ -240,6 +240,12 @@ def _render_home(settings: Settings) -> None:
             with st.spinner("Fetching team news…"):
                 st.toast(actions.update_availability(settings), icon="✅")
             _go("Home")
+        if st.button(
+            "Check confirmed lineups", icon=":material/checklist:", width="stretch"
+        ):
+            with st.spinner("Checking for confirmed Premier League lineups…"):
+                st.toast(actions.update_confirmed_lineups(settings), icon="✅")
+            _go("Home")
 
     st.caption(
         "Everything's loaded and ready — nothing to add. To pull in an extra league or "
@@ -1338,7 +1344,10 @@ def _render_forecast_adjustment(adj: AdjustedForecast) -> None:
         outs.append(f"**{home}** without {format_missing(adj.home_adj)}")
     if adj.away_adj.is_material:
         outs.append(f"**{away}** without {format_missing(adj.away_adj)}")
-    st.caption(" · ".join(outs))
+    caption = " · ".join(outs)
+    if adj.confirmed_lineup_used:
+        caption += " (includes today's confirmed lineup, not just FPL's team news)"
+    st.caption(caption)
     c = st.columns(3)
     c[0].metric(
         f"{home} win",

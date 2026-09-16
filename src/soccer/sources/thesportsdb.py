@@ -9,8 +9,15 @@ sudden 403 or an empty response degrades visibly rather than silently. Callers g
 
 **Its free tier is live-only.** Bulk endpoints are crippled -- `all_leagues` returns
 5 leagues, a full-season query returns 15 events of 380. This adapter deliberately
-exposes only the live endpoint; backfill must come from football-data.org or the
-open datasets. Adding a bulk method here would produce quietly truncated data.
+exposes only per-match/per-day endpoints; backfill must come from football-data.org or
+the open datasets. Adding a bulk sweep here would produce quietly truncated data.
+
+**Lineups are a newer, best-effort addition.** `lookuplineup.php` (verified working on
+the free key) returns a match's confirmed starting XI + substitutes once they're
+announced -- `null` before that. Unlike `livescore`, a lineup miss fails open (returns
+`[]`, no cache fallback, no exception): it feeds an optional forecast nudge
+(`domain/availability.py::confirmed_squad_gap`), not the live-score path, so a quiet
+"not available yet" is the correct behaviour, not an error.
 """
 
 from __future__ import annotations
@@ -33,7 +40,14 @@ logger = logging.getLogger(__name__)
 
 # Re-exported for callers that import MatchStatus from this adapter; the canonical
 # definition now lives in the domain so football-data.org can share it.
-__all__ = ["ATTRIBUTION", "LiveMatch", "LiveResult", "MatchStatus", "TheSportsDB"]
+__all__ = [
+    "ATTRIBUTION",
+    "LineupEntry",
+    "LiveMatch",
+    "LiveResult",
+    "MatchStatus",
+    "TheSportsDB",
+]
 
 BASE_URL = "https://www.thesportsdb.com/api/v1/json"
 ATTRIBUTION = "Data from TheSportsDB (https://www.thesportsdb.com)"
@@ -190,6 +204,49 @@ class LiveResult:
         return [m for m in self.matches if m.is_in_play]
 
 
+@dataclass(frozen=True)
+class LineupEntry:
+    event_id: str
+    team: str
+    player: str
+    position: str | None
+    is_home: bool
+    is_substitute: bool
+
+
+def parse_lineup(payload: Any) -> list[LineupEntry]:
+    """Build the confirmed matchday squad from a `lookuplineup.php` payload.
+
+    The provider sends `{"lineup": null}` before lineups are announced, and (per the
+    other parsers here) may send oddly-shaped rows -- tolerant of both, returning `[]`
+    rather than raising, since this feeds a best-effort forecast nudge, not a critical path.
+    """
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("lineup")
+    if not isinstance(rows, list):
+        return []
+    out: list[LineupEntry] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        player = row.get("strPlayer")
+        event_id = row.get("idEvent")
+        if not player or not event_id:
+            continue
+        out.append(
+            LineupEntry(
+                event_id=str(event_id),
+                team=str(row.get("strTeam") or "Unknown"),
+                player=str(player),
+                position=row.get("strPosition") or None,
+                is_home=str(row.get("strHome") or "").strip().lower() == "yes",
+                is_substitute=str(row.get("strSubstitute") or "").strip().lower() == "yes",
+            )
+        )
+    return out
+
+
 class TheSportsDB:
     def __init__(
         self,
@@ -283,6 +340,50 @@ class TheSportsDB:
         raise SourceUnavailableError(
             "TheSportsDB livescore failed and no cache exists"
         ) from last_error
+
+    async def next_league_events(self, league_id: str) -> list[dict[str, Any]]:
+        """A league's next scheduled fixtures (raw rows), for resolving a known fixture to
+        this provider's event id. Small and per-league, not a bulk sweep -- fails open to
+        `[]` (no cache, no raise) since it feeds an optional lookup, not the live-score path.
+        """
+        await self._limiter.acquire()
+        try:
+            response = await self._client.get(
+                "/eventsnextleague.php", params={"id": league_id}
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("eventsnextleague fetch failed for league %s: %s", league_id, exc)
+            return []
+        if response.status_code != 200:
+            return []
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+        events = payload.get("events") if isinstance(payload, dict) else None
+        return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
+
+    async def lookup_lineup(self, event_id: str) -> list[LineupEntry]:
+        """Confirmed matchday squad for one event -- starters + substitutes, both teams.
+
+        Returns `[]` before lineups are announced and on any fetch failure. Deliberately
+        no retry/backoff/cache-fallback ceremony here (contrast `livescore`): this is a
+        best-effort, ephemeral, per-fixture check feeding an optional forecast nudge, so a
+        transient miss should just mean "try again closer to kickoff," not an error.
+        """
+        await self._limiter.acquire()
+        try:
+            response = await self._client.get("/lookuplineup.php", params={"id": event_id})
+        except httpx.HTTPError as exc:
+            logger.warning("lookuplineup fetch failed for event %s: %s", event_id, exc)
+            return []
+        if response.status_code != 200:
+            return []
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+        return parse_lineup(payload)
 
     @staticmethod
     def _parse(payload: Any) -> list[LiveMatch]:

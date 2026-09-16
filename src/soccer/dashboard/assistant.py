@@ -692,6 +692,8 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
                 news.append(f"- {home} without {format_missing(adjusted.home_adj)}")
             if adjusted.away_adj.is_material:
                 news.append(f"- {away} without {format_missing(adjusted.away_adj)}")
+            if adjusted.confirmed_lineup_used:
+                news.append("- includes today's confirmed lineup, not just FPL's team news")
             news.append(result_line)
             news.append(xg_line)
             text += "\n" + "\n".join(news)

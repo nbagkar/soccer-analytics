@@ -16,7 +16,7 @@ from typing import Any, cast
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
-from soccer.domain.availability import AvailabilityAdjustment
+from soccer.domain.availability import AvailabilityAdjustment, AvailabilityRow
 from soccer.domain.bets import Bet, BetLedger, BetStatus, LedgerSummary
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
@@ -797,6 +797,10 @@ class AdjustedForecast:
     adjusted: MarketSlate
     home_adj: AvailabilityAdjustment
     away_adj: AvailabilityAdjustment
+    confirmed_lineup_used: bool = False
+    """Whether either side's nudge is informed by today's TheSportsDB confirmed matchday
+    squad (`confirmed_squad_gap`), not just FPL's season-long snapshot -- shown in the UI
+    so a "team news" caption is honest about which source(s) it's drawing on."""
 
     @property
     def is_material(self) -> bool:
@@ -824,19 +828,43 @@ def availability_adjusted_slate(
     The nudge routes each club's loss to the right side of the ball: a club scores less with its
     own attackers out (attack_factor) and concedes more with the opponent's defenders out
     (the opponent's leak_factor). Same rho, so only the goal expectations move.
+
+    Also folds in today's confirmed matchday squad when one is cached (close to kickoff --
+    see `dashboard.actions.update_confirmed_lineups`): a regular missing from that squad
+    entirely is treated as fully unavailable for this match even if FPL's own season-long
+    snapshot hasn't caught up (`confirmed_squad_gap`/`apply_confirmed_gap`). Falls back to
+    FPL-only, byte-for-byte as before, whenever no confirmed lineup is cached yet.
     """
     if division != ADJUSTABLE_DIVISION:
         return None
-    from soccer.domain.availability import AvailabilityStore, team_adjustment
+    from soccer.domain.availability import (
+        AvailabilityStore,
+        ConfirmedLineupStore,
+        apply_confirmed_gap,
+        confirmed_squad_gap,
+        team_adjustment,
+    )
     from soccer.models.markets import compute_markets
 
     # Read the (cheap) availability first and bail before fitting when nothing is flagged, so a
     # PL forecast with an empty/disabled feed costs exactly one model fit in the caller, not two.
     home_norm, away_norm = normalize_name(home), normalize_name(away)
+    confirmed_lineup_used = False
     with LiveDB(live_db) as db:
         store = AvailabilityStore(db)
-        home_adj = team_adjustment(store.for_team(home_norm))
-        away_adj = team_adjustment(store.for_team(away_norm))
+        lineups = ConfirmedLineupStore(db)
+
+        def _rows_with_confirmed_gap(team_norm: str) -> list[AvailabilityRow]:
+            rows = store.for_team(team_norm)
+            confirmed = lineups.for_team(team_norm)
+            if confirmed is None:
+                return rows
+            nonlocal confirmed_lineup_used
+            confirmed_lineup_used = True
+            return apply_confirmed_gap(rows, confirmed_squad_gap(rows, confirmed))
+
+        home_adj = team_adjustment(_rows_with_confirmed_gap(home_norm))
+        away_adj = team_adjustment(_rows_with_confirmed_gap(away_norm))
     if not (home_adj.is_material or away_adj.is_material):
         return None  # nobody flagged -> identical to the plain forecast; nothing to show
 
@@ -849,7 +877,13 @@ def availability_adjusted_slate(
     adj_lam = lam * home_adj.attack_factor * away_adj.leak_factor
     adj_mu = mu * away_adj.attack_factor * home_adj.leak_factor
     adjusted = compute_markets(home_disp, away_disp, adj_lam, adj_mu, rho)
-    return AdjustedForecast(raw=raw, adjusted=adjusted, home_adj=home_adj, away_adj=away_adj)
+    return AdjustedForecast(
+        raw=raw,
+        adjusted=adjusted,
+        home_adj=home_adj,
+        away_adj=away_adj,
+        confirmed_lineup_used=confirmed_lineup_used,
+    )
 
 
 def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:

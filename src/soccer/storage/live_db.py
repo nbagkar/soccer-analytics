@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -129,11 +129,25 @@ CREATE TABLE IF NOT EXISTS player_availability (
     fetched_at    TEXT NOT NULL,
     element_type  INTEGER,            -- FPL position: 1 GK, 2 DEF, 3 MID, 4 FWD (routes the loss)
     price         INTEGER,            -- FPL now_cost (price x10): quality weight for the loss
+    minutes       INTEGER,            -- FPL season-to-date minutes: who's a regular starter
     PRIMARY KEY (source, team_norm, player)
 );
 
 CREATE INDEX IF NOT EXISTS idx_availability_team
     ON player_availability (team_norm);
+
+-- Confirmed matchday squad (starters + substitutes) from TheSportsDB's lineup endpoint --
+-- domain/availability.py::confirmed_squad_gap's real-time supplement to the FPL snapshot
+-- above. Replaced wholesale PER TEAM (not globally) on each refresh, since a refresh only
+-- has fresh data for the club(s) whose upcoming fixture it checked, and other clubs' rows
+-- must not be wiped in the meantime. No rows for a team means "not fetched / not
+-- announced yet", not "confirmed empty".
+CREATE TABLE IF NOT EXISTS confirmed_lineup (
+    team_norm  TEXT NOT NULL,
+    player     TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (team_norm, player)
+);
 
 -- Personal bet ledger (domain/bets.py): a manually-entered record of real decisions and
 -- their real outcomes, kept because everything else here is judged by a walk-forward
@@ -166,9 +180,12 @@ CREATE INDEX IF NOT EXISTS idx_bet_match_date ON bet (match_date);
 # Registered here so _migrate reconciles them onto already-created databases via ALTER TABLE
 # (a bare CREATE TABLE IF NOT EXISTS cannot). element_type/price were added to
 # player_availability in v6 to drive the forecast adjustment; a v5 cache upgrades in place.
+# minutes was added in v8 -- season-to-date FPL minutes, the "who's a regular" signal behind
+# the confirmed-squad-gap adjustment; a v7 cache upgrades in place.
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("player_availability", "element_type", "INTEGER"),
     ("player_availability", "price", "INTEGER"),
+    ("player_availability", "minutes", "INTEGER"),
 )
 
 

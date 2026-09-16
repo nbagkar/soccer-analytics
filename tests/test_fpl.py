@@ -44,6 +44,7 @@ BOOTSTRAP = {
             "news": "",
             "news_added": None,
             "chance_of_playing_next_round": None,
+            "minutes": 2700,
         },
         # No usable name -> dropped rather than stored as a blank row.
         {"team": 2, "web_name": "", "first_name": "", "second_name": "", "status": "a"},
@@ -80,6 +81,13 @@ class TestParseAvailability:
         (raya,) = [r for r in parse_availability(BOOTSTRAP, fetched_at="x") if r.player == "Raya"]
         assert raya.status == "a"
         assert raya.news is None  # "" collapses to None, not a blank string
+
+    def test_minutes_round_trip_and_default_to_none(self) -> None:
+        recs = parse_availability(BOOTSTRAP, fetched_at="x")
+        raya = next(r for r in recs if r.player == "Raya")
+        assert raya.minutes == 2700
+        saka = next(r for r in recs if r.player == "Saka")  # BOOTSTRAP's Saka has no "minutes"
+        assert saka.minutes is None
 
     def test_missing_status_defaults_to_available(self) -> None:
         payload = {

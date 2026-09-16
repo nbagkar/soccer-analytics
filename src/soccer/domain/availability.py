@@ -12,7 +12,7 @@ resolves the club the same way every other intent does.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from soccer.storage.live_db import LiveDB
 
@@ -61,6 +61,10 @@ class PlayerAvailability:
     # stores availability (it just can't weight the adjustment).
     element_type: int | None = None
     price: int | None = None
+    # Season-to-date minutes played -- the "who's a regular starter" proxy behind
+    # `confirmed_squad_gap`. Not used by `team_adjustment` (which is price/role-weighted,
+    # not minutes-weighted), only by the confirmed-squad-gap detector below.
+    minutes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,7 @@ class AvailabilityRow:
     news_added: str | None
     element_type: int | None = None
     price: int | None = None
+    minutes: int | None = None
 
     @property
     def is_flagged(self) -> bool:
@@ -182,6 +187,86 @@ def team_adjustment(rows: list[AvailabilityRow]) -> AvailabilityAdjustment:
     return AvailabilityAdjustment(attack_factor, leak_factor, lost_attack, lost_defence, ordered)
 
 
+# --- confirmed-squad-gap: a real-time supplement to the season-long FPL news snapshot ------
+#
+# FPL's injury/suspension status is a snapshot that updates on the provider's own schedule --
+# it can miss a tactical rest, a late fitness call, or a suspension not yet reflected. A club's
+# CONFIRMED matchday squad (starters + substitutes, from TheSportsDB's lineup endpoint) is a
+# same-day ground truth for who's actually involved, but on its own it's just a list of names --
+# it doesn't say who *should* have been there. Season-to-date minutes is the "who's a regular"
+# proxy that turns "not in today's squad" into a signal: a regular who's inexplicably absent is
+# team news; a fringe player's absence never was.
+
+_REGULARS_SQUAD_SIZE = 14  # a typical matchday squad: 11 starters plus a handful of key regulars
+
+
+def confirmed_squad_gap(rows: list[AvailabilityRow], confirmed_squad: set[str]) -> tuple[str, ...]:
+    """Regulars (highest season-to-date minutes) missing from today's confirmed squad.
+
+    `confirmed_squad` is every player name TheSportsDB's lineup endpoint listed for this
+    match -- starters AND substitutes, so missing the bench entirely (not just the XI) is
+    what counts as absent, the strongest signal available. Ranks `rows` by `minutes`
+    (excluding unpriced/not-in-squad rows, same filter `team_adjustment` applies) and takes
+    the top `_REGULARS_SQUAD_SIZE` as "who should be here"; a fringe player never in that set
+    going unnamed is not surfaced. Returns `()` when there's no minutes data to rank by or
+    nothing is missing -- a clean no-op the caller can check before doing anything further.
+    """
+    regulars = sorted(
+        (r for r in rows if r.minutes is not None and r.price is not None and r.status != "n"),
+        key=lambda r: r.minutes,  # type: ignore[arg-type,return-value]
+        reverse=True,
+    )[:_REGULARS_SQUAD_SIZE]
+    return tuple(r.player for r in regulars if r.player not in confirmed_squad)
+
+
+class ConfirmedLineupStore:
+    """Today's confirmed matchday squad (starters + substitutes), from TheSportsDB.
+
+    Replaced wholesale PER TEAM (`replace_team`), not globally: a refresh only has fresh
+    data for the club(s) whose fixture it just checked, so other clubs' cached squads must
+    survive. `for_team` returns `None` (not an empty set) when nothing is cached, so a
+    caller can tell "lineup not out yet" apart from a genuinely empty squad.
+    """
+
+    def __init__(self, db: LiveDB) -> None:
+        self._conn = db.connection
+
+    def replace_team(self, team_norm: str, players: list[str], fetched_at: str) -> None:
+        with self._conn:  # BEGIN/COMMIT; rolls back on error
+            self._conn.execute("DELETE FROM confirmed_lineup WHERE team_norm=?", (team_norm,))
+            self._conn.executemany(
+                "INSERT INTO confirmed_lineup (team_norm, player, fetched_at) VALUES (?, ?, ?)",
+                [(team_norm, player, fetched_at) for player in players],
+            )
+
+    def for_team(self, team_norm: str) -> set[str] | None:
+        rows = self._conn.execute(
+            "SELECT player FROM confirmed_lineup WHERE team_norm=?", (team_norm,)
+        ).fetchall()
+        return {row["player"] for row in rows} if rows else None
+
+
+def apply_confirmed_gap(
+    rows: list[AvailabilityRow], gap: tuple[str, ...]
+) -> list[AvailabilityRow]:
+    """Fold a confirmed-squad gap into `rows` for `team_adjustment`, without inventing a
+    second adjustment formula: a gap player is marked fully unavailable (status "u"), same
+    price/role weighting `team_adjustment` already applies to an FPL-flagged absence. A
+    player FPL already flags (already in `FLAGGED_STATUSES`) is left as FPL reported it --
+    this only escalates someone FPL still shows fit when today's confirmed squad disagrees.
+    A no-op (returns `rows` unchanged) when `gap` is empty.
+    """
+    if not gap:
+        return rows
+    gap_set = set(gap)
+    return [
+        replace(r, status="u", availability=status_label("u"), chance=None)
+        if r.player in gap_set and r.status not in FLAGGED_STATUSES
+        else r
+        for r in rows
+    ]
+
+
 # Read order: worst status first, then club, then player -- a stable, human-sensible sort.
 _ORDER_BY = (
     "CASE status WHEN 'i' THEN 0 WHEN 's' THEN 1 WHEN 'u' THEN 2 "
@@ -189,7 +274,7 @@ _ORDER_BY = (
 )
 _COLUMNS = (
     "team, team_norm, player, full_name, status, availability, chance, news, news_added, "
-    "element_type, price"
+    "element_type, price, minutes"
 )
 
 
@@ -209,8 +294,8 @@ class AvailabilityStore:
             self._conn.executemany(
                 "INSERT INTO player_availability "
                 "(source, team, team_norm, player, full_name, status, availability, "
-                " chance, news, news_added, fetched_at, element_type, price) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " chance, news, news_added, fetched_at, element_type, price, minutes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         r.source,
@@ -226,6 +311,7 @@ class AvailabilityStore:
                         r.fetched_at,
                         r.element_type,
                         r.price,
+                        r.minutes,
                     )
                     for r in records
                 ],
@@ -251,6 +337,7 @@ class AvailabilityStore:
                 news_added=row["news_added"],
                 element_type=row["element_type"],
                 price=row["price"],
+                minutes=row["minutes"],
             )
             for row in self._conn.execute(sql, params)
         ]

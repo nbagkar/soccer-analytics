@@ -16,7 +16,10 @@ from soccer.domain.availability import (
     NEUTRAL_ADJUSTMENT,
     AvailabilityRow,
     AvailabilityStore,
+    ConfirmedLineupStore,
     PlayerAvailability,
+    apply_confirmed_gap,
+    confirmed_squad_gap,
     status_label,
     team_adjustment,
 )
@@ -34,6 +37,7 @@ def _rec(
     full_name: str | None = None,
     element_type: int | None = None,
     price: int | None = None,
+    minutes: int | None = None,
 ) -> PlayerAvailability:
     return PlayerAvailability(
         source="fpl",
@@ -49,6 +53,7 @@ def _rec(
         fetched_at="2026-08-04T00:00:00+00:00",
         element_type=element_type,
         price=price,
+        minutes=minutes,
     )
 
 
@@ -146,21 +151,36 @@ class TestLabel:
         assert row.element_type == 3
         assert row.price == 100
 
+    def test_minutes_survive_the_round_trip(self, tmp_path) -> None:
+        # confirmed_squad_gap ranks by minutes straight off the stored row.
+        store = _store(tmp_path)
+        store.replace_source("fpl", [_rec("Arsenal", "Saka", "a", minutes=2500)])
+        (row,) = store.for_team("arsenal")
+        assert row.minutes == 2500
 
-# A plausible priced Arsenal XI: (player, FPL element_type, now_cost). Enough depth that one
-# absence is a fraction of the whole, and a spread of prices so quality actually weights.
-_SQUAD: tuple[tuple[str, int, int], ...] = (
-    ("Raya", 1, 55),  # GK
-    ("Saliba", 2, 60),  # DEF
-    ("Gabriel", 2, 55),  # DEF
-    ("White", 2, 50),  # DEF
-    ("Timber", 2, 45),  # DEF
-    ("Rice", 3, 65),  # MID
-    ("Odegaard", 3, 85),  # MID
-    ("Saka", 3, 100),  # MID (winger; FPL classes wingers as MID)
-    ("Merino", 3, 55),  # MID
-    ("Havertz", 4, 80),  # FWD
-    ("Jesus", 4, 70),  # FWD
+
+# A plausible priced Arsenal XI: (player, FPL element_type, now_cost, season minutes).
+# Enough depth that one absence is a fraction of the whole, a spread of prices so quality
+# actually weights, and a spread of minutes so regulars (Saka, Odegaard, ...) are clearly
+# separated from fringe squad players (Merino, Jesus) for the confirmed-squad-gap tests.
+_SQUAD: tuple[tuple[str, int, int, int], ...] = (
+    ("Raya", 1, 55, 2700),  # GK
+    ("Saliba", 2, 60, 2600),  # DEF
+    ("Gabriel", 2, 55, 2500),  # DEF
+    ("White", 2, 50, 2400),  # DEF
+    ("Timber", 2, 45, 2000),  # DEF
+    ("Rice", 3, 65, 2600),  # MID
+    ("Odegaard", 3, 85, 2500),  # MID
+    ("Saka", 3, 100, 2700),  # MID (winger; FPL classes wingers as MID)
+    ("Merino", 3, 55, 900),  # MID -- fringe, low minutes
+    ("Havertz", 4, 80, 2200),  # FWD
+    ("Jesus", 4, 70, 600),  # FWD -- fringe, low minutes
+    # Deeper bench, so the squad exceeds `_REGULARS_SQUAD_SIZE` (14) and the "who's a
+    # regular" cutoff actually excludes someone -- the youngest fringe player, below.
+    ("Nwaneri", 3, 45, 500),
+    ("Norton-Cuffy", 2, 40, 400),
+    ("Kiwior", 2, 45, 300),
+    ("YouthPlayer", 2, 40, 200),  # the least-used squad player -- outside the top 14
 )
 
 
@@ -171,6 +191,7 @@ def _arow(
     price: int | None,
     *,
     chance: int | None = None,
+    minutes: int | None = None,
 ) -> AvailabilityRow:
     return AvailabilityRow(
         team="Arsenal",
@@ -184,6 +205,7 @@ def _arow(
         news_added=None,
         element_type=element_type,
         price=price,
+        minutes=minutes,
     )
 
 
@@ -192,9 +214,9 @@ def _squad(flags: dict[str, tuple[str, int | None]] | None = None) -> list[Avail
     with a (status, chance) pair."""
     flags = flags or {}
     rows: list[AvailabilityRow] = []
-    for player, etype, price in _SQUAD:
+    for player, etype, price, minutes in _SQUAD:
         status, chance = flags.get(player, ("a", None))
-        rows.append(_arow(player, status, etype, price, chance=chance))
+        rows.append(_arow(player, status, etype, price, chance=chance, minutes=minutes))
     return rows
 
 
@@ -265,11 +287,11 @@ class TestTeamAdjustment:
 
     def test_factors_are_bounded_by_their_caps(self) -> None:
         # Everyone who attacks is out: the attack cut floors rather than running away.
-        attackers_out = {p: ("i", None) for p, etype, _ in _SQUAD if etype in (3, 4)}
+        attackers_out = {p: ("i", None) for p, etype, _, _ in _SQUAD if etype in (3, 4)}
         adj = team_adjustment(_squad(attackers_out))
         assert adj.attack_factor == pytest.approx(_ATTACK_FLOOR)
         # Every keeper and defender out: the leak ceils.
-        defenders_out = {p: ("i", None) for p, etype, _ in _SQUAD if etype in (1, 2)}
+        defenders_out = {p: ("i", None) for p, etype, _, _ in _SQUAD if etype in (1, 2)}
         adj2 = team_adjustment(_squad(defenders_out))
         assert adj2.leak_factor == pytest.approx(_LEAK_CEIL)
 
@@ -309,3 +331,92 @@ class TestTeamAdjustmentSanity:
         deep = team_adjustment(deeper)
         assert deep.is_material
         assert deep.attack_factor > shallow.attack_factor
+
+
+class TestConfirmedLineupStore:
+    def test_no_data_is_none_not_an_empty_set(self, tmp_path) -> None:
+        store = ConfirmedLineupStore(LiveDB(tmp_path / "live.sqlite"))
+        assert store.for_team("arsenal") is None
+
+    def test_replace_and_read_back(self, tmp_path) -> None:
+        store = ConfirmedLineupStore(LiveDB(tmp_path / "live.sqlite"))
+        store.replace_team("arsenal", ["Raya", "Saka"], "2026-09-16T12:00:00+00:00")
+        assert store.for_team("arsenal") == {"Raya", "Saka"}
+
+    def test_replace_is_wholesale_not_upsert(self, tmp_path) -> None:
+        store = ConfirmedLineupStore(LiveDB(tmp_path / "live.sqlite"))
+        store.replace_team("arsenal", ["Raya", "Saka"], "t1")
+        store.replace_team("arsenal", ["Raya"], "t2")  # Saka dropped from the new squad
+        assert store.for_team("arsenal") == {"Raya"}
+
+    def test_replace_is_scoped_to_one_team(self, tmp_path) -> None:
+        store = ConfirmedLineupStore(LiveDB(tmp_path / "live.sqlite"))
+        store.replace_team("arsenal", ["Raya"], "t1")
+        store.replace_team("chelsea", ["Sanchez"], "t1")
+        store.replace_team("arsenal", ["Raya", "Saka"], "t2")
+        assert store.for_team("chelsea") == {"Sanchez"}  # untouched by arsenal's refresh
+
+
+class TestConfirmedSquadGap:
+    """The real-time supplement to FPL's season-long snapshot: a regular missing from
+    today's confirmed matchday squad is team news; a fringe player's absence never was."""
+
+    def test_a_regular_missing_from_the_confirmed_squad_is_flagged(self) -> None:
+        rows = _squad()  # everyone "available" per FPL -- nothing flagged there
+        confirmed = {p for p, *_ in _SQUAD if p != "Saka"}  # Saka didn't make the squad at all
+        gap = confirmed_squad_gap(rows, confirmed)
+        assert "Saka" in gap
+
+    def test_a_fringe_players_absence_is_not_flagged(self) -> None:
+        rows = _squad()  # 15 players; YouthPlayer (200 mins) falls outside the top 14
+        confirmed = {p for p, *_ in _SQUAD if p != "YouthPlayer"}
+        gap = confirmed_squad_gap(rows, confirmed)
+        assert "YouthPlayer" not in gap
+
+    def test_everyone_confirmed_present_is_a_clean_no_op(self) -> None:
+        rows = _squad()
+        confirmed = {p for p, *_ in _SQUAD}
+        assert confirmed_squad_gap(rows, confirmed) == ()
+
+    def test_rows_without_minutes_data_cannot_be_ranked(self) -> None:
+        rows = [_arow(p, "a", et, pr) for p, et, pr, _ in _SQUAD]  # minutes=None throughout
+        assert confirmed_squad_gap(rows, set()) == ()
+
+    def test_already_fpl_flagged_players_are_excluded_from_the_ranking(self) -> None:
+        # A regular FPL already reports injured ('n' == not in squad, excluded like the
+        # existing team_adjustment filter) shouldn't count toward "who should be here".
+        rows = _squad({"Saka": ("n", None)})
+        confirmed = {p for p, *_ in _SQUAD if p not in ("Saka", "Havertz")}
+        gap = confirmed_squad_gap(rows, confirmed)
+        assert "Saka" not in gap  # already excluded from the regulars ranking (status "n")
+        assert "Havertz" in gap  # a genuinely regular player missing from today's squad
+
+
+class TestApplyConfirmedGap:
+    def test_empty_gap_is_a_strict_no_op(self) -> None:
+        rows = _squad()
+        assert apply_confirmed_gap(rows, ()) is rows
+
+    def test_gap_player_becomes_fully_unavailable(self) -> None:
+        rows = _squad()
+        updated = apply_confirmed_gap(rows, ("Saka",))
+        saka = next(r for r in updated if r.player == "Saka")
+        assert saka.status == "u"
+        assert saka.availability == status_label("u")
+        # team_adjustment then treats it exactly like an FPL-flagged absence.
+        assert team_adjustment(updated).is_material
+
+    def test_already_flagged_player_keeps_its_own_fpl_status(self) -> None:
+        # FPL already says Havertz is doubtful at 40% -- the confirmed-squad-gap signal
+        # (which only means "fully out today") must not override that finer-grained read.
+        rows = _squad({"Havertz": ("d", 40)})
+        updated = apply_confirmed_gap(rows, ("Havertz",))
+        havertz = next(r for r in updated if r.player == "Havertz")
+        assert havertz.status == "d"
+        assert havertz.chance == 40
+
+    def test_untouched_players_are_unaffected(self) -> None:
+        rows = _squad()
+        updated = apply_confirmed_gap(rows, ("Saka",))
+        others = [r for r in updated if r.player != "Saka"]
+        assert others == [r for r in rows if r.player != "Saka"]

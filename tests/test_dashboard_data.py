@@ -809,6 +809,74 @@ class TestAvailabilityAdjustedSlate:
         assert adj.raw.home_expected == pytest.approx(plain.home_expected)
         assert adj.raw.away_expected == pytest.approx(plain.away_expected)
 
+    def test_confirmed_lineup_catches_an_absence_fpl_missed(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate
+        from soccer.domain.availability import (
+            AvailabilityStore,
+            ConfirmedLineupStore,
+            PlayerAvailability,
+            status_label,
+        )
+        from soccer.domain.names import normalize_name
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+
+        # FPL's season-long snapshot shows the whole Brentford squad "available" (it hasn't
+        # caught a late change), but season-to-date minutes mark Mbeumo a clear regular.
+        minutes_by_player = {
+            "Flekken": 2700, "Collins": 2600, "Pinnock": 2500,
+            "Janelt": 2400, "Norgaard": 2300, "Mbeumo": 2700, "Wissa": 2600,
+        }
+        squad = [
+            PlayerAvailability(
+                source="fpl",
+                team="Brentford",
+                team_norm=normalize_name("Brentford"),
+                player=name,
+                full_name=None,
+                status="a",
+                availability=status_label("a"),
+                chance=None,
+                news=None,
+                news_added=None,
+                fetched_at="2026-08-04T00:00:00+00:00",
+                element_type=4 if name in ("Mbeumo", "Wissa") else 2,
+                price=70,
+                minutes=minutes,
+            )
+            for name, minutes in minutes_by_player.items()
+        ]
+        with LiveDB(live) as db:
+            AvailabilityStore(db).replace_source("fpl", squad)
+            # Today's confirmed matchday squad -- announced close to kickoff -- doesn't
+            # include Mbeumo at all (a late, undisclosed absence FPL hasn't reflected yet).
+            confirmed = [p.player for p in squad if p.player != "Mbeumo"]
+            ConfirmedLineupStore(db).replace_team(
+                normalize_name("Brentford"), confirmed, "2026-08-04T12:00:00+00:00"
+            )
+
+        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+        assert adj is not None
+        assert adj.confirmed_lineup_used
+        assert adj.away_adj.is_material  # FPL alone would have said "nobody flagged"
+        assert "Mbeumo" in adj.away_adj.missing
+
+    def test_no_confirmed_lineup_cached_falls_back_to_fpl_only(self, tmp_path) -> None:
+        from soccer.dashboard.data import availability_adjusted_slate
+
+        analytics = tmp_path / "analytics.duckdb"
+        live = tmp_path / "live.sqlite"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+        squad = [
+            (n, "i" if n == "Mbeumo" else s, e, p, c) for (n, s, e, p, c) in self._BRENTFORD_FIT
+        ]
+        self._seed_availability(live, "Brentford", squad)  # no ConfirmedLineupStore data at all
+        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+        assert adj is not None
+        assert not adj.confirmed_lineup_used
+
 
 class TestUnderlyingTable:
     def _seed_with_shots(self, path):
@@ -1659,3 +1727,27 @@ class TestAppSmoke:
             assert not at.radio, "nav must not render before the password is entered"
         finally:
             config._settings = None
+
+
+class TestParseEventKickoff:
+    """The pure timestamp-parsing half of `update_confirmed_lineups`'s pre-kickoff window
+    check -- the network-fetch half isn't separately tested at the actions layer, matching
+    how `update_availability`'s live fetch also isn't (only its disabled-gate is, in
+    test_fpl.py); the adapter methods it calls are unit-tested in test_thesportsdb.py."""
+
+    def test_parses_a_real_timestamp_as_utc(self) -> None:
+        from soccer.dashboard.actions import _parse_event_kickoff
+
+        kickoff = _parse_event_kickoff({"strTimestamp": "2026-09-18T19:00:00"})
+        assert kickoff == datetime(2026, 9, 18, 19, 0, tzinfo=UTC)
+
+    def test_missing_timestamp_is_none(self) -> None:
+        from soccer.dashboard.actions import _parse_event_kickoff
+
+        assert _parse_event_kickoff({}) is None
+        assert _parse_event_kickoff({"strTimestamp": None}) is None
+
+    def test_malformed_timestamp_is_none_not_a_raise(self) -> None:
+        from soccer.dashboard.actions import _parse_event_kickoff
+
+        assert _parse_event_kickoff({"strTimestamp": "not-a-date"}) is None

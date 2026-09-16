@@ -192,6 +192,9 @@ def parse_availability(payload: dict[str, Any], *, fetched_at: str) -> list[Play
                 # it by quality. Both drive the forecast adjustment; kept as FPL sends them.
                 element_type=element.get("element_type"),
                 price=element.get("now_cost"),
+                # Season-to-date minutes -- the "who's a regular starter" proxy behind the
+                # confirmed-squad-gap adjustment (domain/availability.py).
+                minutes=element.get("minutes"),
             )
         )
     return out

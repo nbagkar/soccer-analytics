@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from soccer.config import Settings
@@ -510,6 +510,86 @@ def update_availability(settings: Settings) -> str:
     return (
         f"Loaded availability for {len(records)} players — {flagged} flagged as team news{stale}."
     )
+
+
+# TheSportsDB's own id for the English Premier League -- confirmed live via
+# eventsnextleague.php?id=4328 while building this feature (see plan/memory).
+_PL_THESPORTSDB_LEAGUE_ID = "4328"
+# How far either side of kickoff to bother checking for a confirmed lineup. Official
+# lineups are typically announced under two hours out; checking earlier or later than
+# this window is a harmless no-op (the endpoint just returns nothing), not an error.
+_LINEUP_LEAD_WINDOW = timedelta(hours=6)
+_LINEUP_TRAIL_WINDOW = timedelta(hours=2)
+
+
+def _parse_event_kickoff(event: dict[str, Any]) -> datetime | None:
+    """TheSportsDB's `strTimestamp` ('YYYY-MM-DDTHH:MM:SS', naive) as an aware UTC datetime."""
+    raw = event.get("strTimestamp")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+def update_confirmed_lineups(settings: Settings) -> str:
+    """Pull today's confirmed starting XI + substitutes for imminent Premier League fixtures.
+
+    A same-day supplement to `update_availability`'s season-long FPL snapshot -- see
+    `domain.availability.confirmed_squad_gap`. TheSportsDB's free lineup endpoint returns
+    nothing until lineups are actually announced, so this is a harmless no-op far from
+    kickoff, not an error; no enable-flag needed (unlike FPL, TheSportsDB's live surface is
+    already used unconditionally elsewhere in this app).
+    """
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        registry = _canonical_registry(adb)
+
+    async def run() -> list[tuple[str, list[str]]]:
+        from soccer.dashboard.data import resolve_canonical_name
+        from soccer.sources.thesportsdb import TheSportsDB
+
+        now = datetime.now(UTC)
+        found: list[tuple[str, list[str]]] = []
+        async with TheSportsDB(raw) as sdb:
+            events = await sdb.next_league_events(_PL_THESPORTSDB_LEAGUE_ID)
+            for event in events:
+                kickoff = _parse_event_kickoff(event)
+                if kickoff is None or not (
+                    now - _LINEUP_TRAIL_WINDOW <= kickoff <= now + _LINEUP_LEAD_WINDOW
+                ):
+                    continue
+                event_id = event.get("idEvent")
+                if not event_id:
+                    continue
+                entries = await sdb.lookup_lineup(str(event_id))
+                by_team: dict[str, list[str]] = {}
+                for entry in entries:
+                    by_team.setdefault(entry.team, []).append(entry.player)
+                for team_name, players in by_team.items():
+                    _display, norm = resolve_canonical_name(team_name, registry)
+                    found.append((norm, players))
+        return found
+
+    results = asyncio.run(run())
+    if not results:
+        return (
+            "No confirmed lineups yet -- none of the upcoming Premier League fixtures "
+            "are close enough to kickoff."
+        )
+
+    from soccer.domain.availability import ConfirmedLineupStore
+
+    fetched_at = datetime.now(UTC).isoformat()
+    with LiveDB(settings.live_db) as db:
+        store = ConfirmedLineupStore(db)
+        for team_norm, players in results:
+            store.replace_team(team_norm, players, fetched_at)
+    names = ", ".join(sorted({team_norm for team_norm, _ in results}))
+    return f"Loaded confirmed lineups for: {names}."
 
 
 def remove_league(settings: Settings, division: str) -> str:

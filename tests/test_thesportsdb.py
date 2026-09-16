@@ -18,6 +18,7 @@ from soccer.sources.thesportsdb import (
     MatchStatus,
     SourceUnavailableError,
     TheSportsDB,
+    parse_lineup,
     parse_live_match,
     parse_progress,
     parse_status,
@@ -149,6 +150,111 @@ class TestRowParsing:
         match = parse_live_match({"idEvent": "1"})
         assert match is not None
         assert match.home_team == "Unknown"
+
+
+# Shape taken from a real lookuplineup.php response.
+LINEUP_ROW = {
+    "idLineup": "976794",
+    "idEvent": "2494036",
+    "strPosition": "Right Winger",
+    "strHome": "No",
+    "strSubstitute": "No",
+    "intSquadNumber": "23",
+    "idPlayer": "34147821",
+    "strPlayer": "Jacob Murphy",
+    "idTeam": "134777",
+    "strTeam": "Newcastle United",
+}
+
+
+class TestLineupParsing:
+    def test_parses_a_real_row(self) -> None:
+        entries = parse_lineup({"lineup": [LINEUP_ROW]})
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.event_id == "2494036"
+        assert entry.player == "Jacob Murphy"
+        assert entry.team == "Newcastle United"
+        assert entry.position == "Right Winger"
+        assert not entry.is_home
+        assert not entry.is_substitute
+
+    def test_home_and_substitute_flags(self) -> None:
+        row = {**LINEUP_ROW, "strHome": "Yes", "strSubstitute": "Yes"}
+        entry = parse_lineup({"lineup": [row]})[0]
+        assert entry.is_home
+        assert entry.is_substitute
+
+    def test_null_lineup_before_kickoff_is_not_an_error(self) -> None:
+        # The real behaviour verified against a fixture still days out.
+        assert parse_lineup({"lineup": None}) == []
+
+    def test_row_without_player_or_event_is_dropped(self) -> None:
+        assert parse_lineup({"lineup": [{"strTeam": "Newcastle United"}]}) == []
+        assert parse_lineup({"lineup": [{**LINEUP_ROW, "idEvent": None}]}) == []
+
+    def test_one_bad_row_does_not_discard_the_rest(self) -> None:
+        entries = parse_lineup({"lineup": [LINEUP_ROW, "not a dict", {"strTeam": "x"}]})
+        assert len(entries) == 1
+
+    def test_non_dict_payload_is_empty(self) -> None:
+        assert parse_lineup(None) == []
+        assert parse_lineup([LINEUP_ROW]) == []
+
+
+class TestLineupEndpoint:
+    async def test_returns_confirmed_squad_once_announced(self, store: RawStore) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"lineup": [LINEUP_ROW]})
+        )
+        async with make_adapter(store, transport) as adapter:
+            entries = await adapter.lookup_lineup("2494036")
+        assert [e.player for e in entries] == ["Jacob Murphy"]
+
+    async def test_null_before_lineups_are_announced_is_empty_not_an_error(
+        self, store: RawStore
+    ) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"lineup": None})
+        )
+        async with make_adapter(store, transport) as adapter:
+            entries = await adapter.lookup_lineup("9999999")
+        assert entries == []
+
+    async def test_failure_fails_open_rather_than_raising(self, store: RawStore) -> None:
+        forbidden = httpx.MockTransport(lambda request: httpx.Response(403, json={}))
+        async with make_adapter(store, forbidden) as adapter:
+            entries = await adapter.lookup_lineup("1")  # must not raise
+        assert entries == []
+
+    async def test_non_json_response_fails_open(self, store: RawStore) -> None:
+        html = httpx.MockTransport(lambda request: httpx.Response(200, text="<html>"))
+        async with make_adapter(store, html) as adapter:
+            entries = await adapter.lookup_lineup("1")
+        assert entries == []
+
+
+class TestNextLeagueEvents:
+    async def test_returns_raw_event_rows(self, store: RawStore) -> None:
+        payload = {"events": [{"idEvent": "1", "strHomeTeam": "Arsenal"}]}
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+        async with make_adapter(store, transport) as adapter:
+            events = await adapter.next_league_events("4328")
+        assert events == payload["events"]
+
+    async def test_no_upcoming_fixtures_is_not_an_error(self, store: RawStore) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"events": None})
+        )
+        async with make_adapter(store, transport) as adapter:
+            events = await adapter.next_league_events("4328")
+        assert events == []
+
+    async def test_failure_fails_open_rather_than_raising(self, store: RawStore) -> None:
+        forbidden = httpx.MockTransport(lambda request: httpx.Response(403, json={}))
+        async with make_adapter(store, forbidden) as adapter:
+            events = await adapter.next_league_events("4328")  # must not raise
+        assert events == []
 
 
 class TestLiveEndpoint:
