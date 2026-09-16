@@ -2184,7 +2184,7 @@ def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
     from soccer.models.markets import combo_probability, same_match_legs
     from soccer.models.value import expected_value, kelly_fraction
 
-    st.markdown("**Accumulator** — combine legs across different Premier League matches")
+    st.caption("Combine legs across different Premier League matches into one accumulator.")
     pl = [f for f in fixtures if f.competition == "Premier League" and f.slate is not None]
     if len(pl) < 2:
         st.info(
@@ -2696,8 +2696,8 @@ def main() -> None:
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        upcoming_tab, match_tab, season_tab, card_tab = st.tabs(
-            ["Upcoming", "Matchup", "Season", "Scorecard"]
+        upcoming_tab, accumulator_tab, match_tab, season_tab, card_tab = st.tabs(
+            ["Upcoming", "Accumulator", "Matchup", "Season", "Scorecard"]
         )
 
         with upcoming_tab:
@@ -2705,7 +2705,8 @@ def main() -> None:
                 str(settings.live_db), str(settings.analytics_db), 5000
             )
             _render_fixtures(upcoming_fixtures)
-            st.divider()
+
+        with accumulator_tab:
             _render_accumulator_calculator(upcoming_fixtures)
 
         with match_tab:
