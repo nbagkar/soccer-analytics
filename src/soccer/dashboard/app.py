@@ -138,6 +138,38 @@ def _go(page: str) -> None:
     st.rerun()
 
 
+def _log_bet_button(
+    key: str,
+    *,
+    competition: str,
+    home: str,
+    away: str,
+    selection: str,
+    odds: float,
+    model_probability: float | None = None,
+) -> None:
+    """A small 'Log bet' button that hands off to the Bet Ledger's form, pre-filled.
+
+    Avoids re-typing what a calculator already computed -- match, selection, the model's
+    own probability, and whatever odds are currently entered -- into the ledger by hand.
+    """
+    if st.button("Log bet", key=key, icon=":material/receipt_long:"):
+        st.session_state["_bet_prefill"] = {
+            "competition": competition,
+            "home": home,
+            "away": away,
+            "selection": selection,
+            "odds": odds,
+            "model_probability": model_probability,
+        }
+        # Bump so the ledger's form widgets get fresh keys -- Streamlit ignores a widget's
+        # `value=` once it already has session state under that key, so re-using the same
+        # keys would silently keep a PREVIOUS prefill (or hand-edited values) on screen
+        # instead of the one just requested.
+        st.session_state["_bet_prefill_nonce"] = st.session_state.get("_bet_prefill_nonce", 0) + 1
+        _go("Bet Ledger")
+
+
 def _render_home(settings: Settings) -> None:
     from soccer.dashboard import actions
 
@@ -1452,7 +1484,7 @@ def _render_forecast_explanation(exp: ForecastExplanation) -> None:
     st.caption("Attack and defence are each team's rate vs the league average (higher is better).")
 
 
-def _render_ev_calculator(slate: MarketSlate) -> None:
+def _render_ev_calculator(slate: MarketSlate, competition: str) -> None:
     """Model probabilities vs the odds a bookmaker is actually offering -> edge, EV, Kelly."""
     from soccer.models.value import expected_value, implied_probabilities, kelly_fraction, overround
 
@@ -1499,9 +1531,21 @@ def _render_ev_calculator(slate: MarketSlate) -> None:
         f"Bookmaker margin (overround): {overround(*odds) * 100:.1f}%. "
         "Edge = model probability * odds - 1. Kelly = fraction of bankroll at that edge."
     )
+    log_cols = st.columns(3)
+    for i, name in enumerate(names):
+        with log_cols[i]:
+            _log_bet_button(
+                f"log_ev_{i}",
+                competition=competition,
+                home=slate.home,
+                away=slate.away,
+                selection=f"{name} win" if name != "Draw" else "Draw",
+                odds=odds[i],
+                model_probability=result[name],
+            )
 
 
-def _render_combo_calculator(slate: MarketSlate) -> None:
+def _render_combo_calculator(slate: MarketSlate, competition: str) -> None:
     """Same-game combo: the TRUE joint probability of two-plus same-match selections.
 
     Not the naive shortcut of multiplying the legs' standalone probabilities -- same-match
@@ -1570,6 +1614,15 @@ def _render_combo_calculator(slate: MarketSlate) -> None:
         "Every added leg multiplies the bookmaker's margin into the combo too, so a parlay "
         "is systematically worse value than betting the same legs straight — this prices "
         "the combo honestly, it doesn't undo that."
+    )
+    _log_bet_button(
+        "log_combo",
+        competition=competition,
+        home=slate.home,
+        away=slate.away,
+        selection=" + ".join(picked),
+        odds=odds,
+        model_probability=combo_p,
     )
 
 
@@ -2201,6 +2254,15 @@ def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
         "parlays are systematically worse value than the same picks bet straight, even when "
         "every individual leg looks fine."
     )
+    _log_bet_button(
+        "log_accumulator",
+        competition="Premier League",
+        home=f"{len(picked)}-leg accumulator",
+        away="",
+        selection="; ".join(f"{r['Match']}: {r['Selection']}" for r in rows),
+        odds=actual_price,
+        model_probability=combined_p,
+    )
 
 
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
@@ -2429,28 +2491,66 @@ def _render_bet_ledger(settings: Settings) -> None:
     pending = list_bets(settings.live_db, status=BetStatus.PENDING)
     settled = [b for b in list_bets(settings.live_db) if b.status is not BetStatus.PENDING]
 
-    with st.expander(
-        "Log a new bet", icon=":material/add_circle:", expanded=not pending and not settled
-    ), st.form("add_bet_form", clear_on_submit=True):
+    prefill = st.session_state.pop("_bet_prefill", None)
+    if prefill is not None:
+        st.toast("Bet details filled in below — check the odds, then log it.", icon="🧾")
+    prefill = prefill or {}
+    prefill_prob = prefill.get("model_probability")
+    # Suffixing every widget key with this bumps them to fresh instances whenever a new
+    # prefill arrives, since Streamlit otherwise ignores `value=` for a key that already
+    # has session state (from a previous prefill, or the user's own typing).
+    nonce = st.session_state.get("_bet_prefill_nonce", 0)
+
+    with (
+        st.expander(
+            "Log a new bet",
+            icon=":material/add_circle:",
+            expanded=bool(prefill) or (not pending and not settled),
+        ),
+        st.form("add_bet_form", clear_on_submit=True),
+    ):
         cols = st.columns(3)
-        competition = cols[0].text_input("Competition", value="Premier League")
-        home = cols[1].text_input("Home team")
-        away = cols[2].text_input("Away team")
+        competition = cols[0].text_input(
+            "Competition",
+            value=prefill.get("competition", "Premier League"),
+            key=f"bf_comp_{nonce}",
+        )
+        home = cols[1].text_input(
+            "Home team", value=prefill.get("home", ""), key=f"bf_home_{nonce}"
+        )
+        away = cols[2].text_input(
+            "Away team", value=prefill.get("away", ""), key=f"bf_away_{nonce}"
+        )
         cols2 = st.columns(3)
-        match_date = cols2[0].date_input("Kickoff date")
-        odds = cols2[1].number_input("Odds (decimal)", min_value=1.01, value=2.0, step=0.05)
-        stake = cols2[2].number_input("Stake", min_value=0.01, value=10.0, step=1.0)
+        match_date = cols2[0].date_input("Kickoff date", key=f"bf_date_{nonce}")
+        odds = cols2[1].number_input(
+            "Odds (decimal)",
+            min_value=1.01,
+            value=float(prefill.get("odds", 2.0)),
+            step=0.05,
+            key=f"bf_odds_{nonce}",
+        )
+        stake = cols2[2].number_input(
+            "Stake", min_value=0.01, value=10.0, step=1.0, key=f"bf_stake_{nonce}"
+        )
         selection = st.text_input(
-            "Selection", placeholder="e.g. Arsenal win, or Home win + Over 2.5"
+            "Selection",
+            value=prefill.get("selection", ""),
+            placeholder="e.g. Arsenal win, or Home win + Over 2.5",
+            key=f"bf_sel_{nonce}",
         )
         cols3 = st.columns(2)
         model_pct = cols3[0].number_input(
-            "Model probability % (optional)", min_value=0.0, max_value=100.0, value=0.0
+            "Model probability % (optional)",
+            min_value=0.0,
+            max_value=100.0,
+            value=round(prefill_prob * 100, 1) if prefill_prob else 0.0,
+            key=f"bf_prob_{nonce}",
         )
-        notes = cols3[1].text_input("Notes (optional)")
+        notes = cols3[1].text_input("Notes (optional)", key=f"bf_notes_{nonce}")
         if st.form_submit_button("Log bet", type="primary"):
-            if not home or not away or not selection:
-                st.error("Home, away and selection are required.")
+            if not home or not selection:
+                st.error("Home and selection are required.")
             else:
                 actions.add_bet(
                     settings,
@@ -2659,9 +2759,9 @@ def main() -> None:
                         if exp is not None:
                             _render_forecast_explanation(exp)
                             st.divider()
-                        _render_ev_calculator(slate)
+                        _render_ev_calculator(slate, division_name(division))
                         st.divider()
-                        _render_combo_calculator(slate)
+                        _render_combo_calculator(slate, division_name(division))
                         report = _cached_market_edge(str(settings.analytics_db), season, division)
                         if report is not None:
                             st.divider()
