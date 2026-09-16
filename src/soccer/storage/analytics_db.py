@@ -410,6 +410,8 @@ class ResultRow:
     ftag: int
     home_shots_target: int | None = None
     away_shots_target: int | None = None
+    home_xg: float | None = None
+    away_xg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +434,8 @@ class OddsRow:
     close_away_odds: float | None
     home_shots_target: int | None = None
     away_shots_target: int | None = None
+    home_xg: float | None = None
+    away_xg: float | None = None
 
     @property
     def has_odds(self) -> bool:
@@ -899,6 +903,27 @@ class AnalyticsDB:
             [match_id, limit],
         ).fetchall()
         return [XgRow(name=r[0], team=r[1], xg=r[2], goals=r[3], shots=r[4]) for r in rows]
+
+    def match_xg_by_competition(
+        self, competition: str, season: str
+    ) -> list[tuple[int, str | None, str, str, float, float]]:
+        """(match_id, match_date, home_team, away_team, home_xg, away_xg) for one StatsBomb
+        competition/season, raw team-name strings as StatsBomb spells them (not normalized).
+
+        The raw ingredient for bridging StatsBomb's own shot-quality xG onto a
+        football-data.co.uk result row for backtesting -- name resolution and the actual
+        merge live with the caller (see `fit_poisson_xg` and the model comparison
+        experiment), since this method only knows what StatsBomb itself reports.
+        """
+        return self._con.execute(
+            "SELECT m.match_id, m.match_date, m.home_team, m.away_team, "
+            "  SUM(CASE WHEN s.team = m.home_team THEN s.xg ELSE 0 END) AS home_xg, "
+            "  SUM(CASE WHEN s.team = m.away_team THEN s.xg ELSE 0 END) AS away_xg "
+            "FROM match_meta m JOIN shots s ON s.match_id = m.match_id "
+            "WHERE m.competition = ? AND m.season = ? "
+            "GROUP BY m.match_id, m.match_date, m.home_team, m.away_team",
+            [competition, season],
+        ).fetchall()
 
     def shots_for(self, match_id: int) -> list[dict[str, object]]:
         """All shots in a match with location, for shot-map rendering."""

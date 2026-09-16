@@ -191,15 +191,21 @@ def evaluate_forecasts(
     ``model="shots"`` fits on a shots-on-target expected-goals blend (weight ``alpha``,
     with ``shrinkage`` pseudo-matches pulling thin samples toward league average, and
     ``time_decay`` down-weighting older matches -- see ``fit_poisson_shots``).
+    ``model="xg"`` is the same blend shape but on StatsBomb's own per-shot xG instead of
+    shots-on-target counts (see ``fit_poisson_xg``) -- only meaningful for rows that carry
+    ``home_xg``/``away_xg`` (StatsBomb-covered matches merged in by the caller); rows without
+    it fall back to the actual scoreline, same as a shots-blend row missing shot data.
     """
     from soccer.models.dixon_coles import fit_dixon_coles
-    from soccer.models.poisson import fit_poisson, fit_poisson_shots
+    from soccer.models.poisson import fit_poisson, fit_poisson_shots, fit_poisson_xg
 
     def fit(played: list[OddsRow]) -> object:
         if model == "shots":
             return fit_poisson_shots(
                 played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay
             )
+        if model == "xg":
+            return fit_poisson_xg(played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay)
         if model == "dixon_coles":
             return fit_dixon_coles(played)
         return fit_poisson(played)

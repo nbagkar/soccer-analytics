@@ -13,7 +13,7 @@ from datetime import date
 import pytest
 
 from soccer.models.elo import EloConfig, compute_ratings, expected_score, power_ranking
-from soccer.models.poisson import fit_poisson, fit_poisson_shots
+from soccer.models.poisson import fit_poisson, fit_poisson_shots, fit_poisson_xg
 
 
 @dataclass(frozen=True)
@@ -138,6 +138,61 @@ class TestPoissonShots:
         rows = season("strong", "weak")
         fc0 = fit_poisson(rows, rho=0.0).forecast("strong", "weak")
         assert fc0.prob_home + fc0.prob_draw + fc0.prob_away == pytest.approx(1.0, abs=1e-6)
+
+
+@dataclass(frozen=True)
+class XgRow(Row):
+    home_xg: float = 0.0
+    away_xg: float = 0.0
+
+
+def _xg_rows() -> list[XgRow]:
+    # a,b,c double round-robin. 'a' consistently creates much better chances (high xG) but
+    # converts poorly (an unlucky finisher) -- so xG should rate its attack above its goals.
+    return [
+        XgRow("a", "b", 1, 0, date(2026, 1, 1), 2.4, 0.3),
+        XgRow("b", "a", 0, 1, date(2026, 1, 2), 0.3, 2.4),
+        XgRow("a", "c", 1, 1, date(2026, 1, 3), 2.4, 0.3),
+        XgRow("c", "a", 1, 1, date(2026, 1, 4), 0.3, 2.4),
+        XgRow("b", "c", 2, 0, date(2026, 1, 5), 1.2, 0.6),
+        XgRow("c", "b", 0, 2, date(2026, 1, 6), 0.6, 1.2),
+    ]
+
+
+class TestPoissonXg:
+    def test_alpha_one_recovers_the_goals_model(self) -> None:
+        rows = _xg_rows()
+        goals = fit_poisson(
+            [Row(r.home_norm, r.away_norm, r.fthg, r.ftag, r.match_date) for r in rows]
+        )
+        xg = fit_poisson_xg(rows, alpha=1.0)
+        for team in goals.strengths:
+            assert xg.strengths[team].attack == pytest.approx(goals.strengths[team].attack)
+            assert xg.strengths[team].defence == pytest.approx(goals.strengths[team].defence)
+
+    def test_falls_back_to_goals_without_xg_data(self) -> None:
+        # Plain Rows carry no xg -> even alpha=0 must reduce to the goals-only fit.
+        rows = season("strong", "weak")
+        goals = fit_poisson(rows)
+        xg = fit_poisson_xg(rows, alpha=0.0)
+        assert xg.strengths["strong"].attack == pytest.approx(goals.strengths["strong"].attack)
+
+    def test_xg_credits_chance_creation(self) -> None:
+        rows = _xg_rows()  # 'a' creates much better chances than its goals show
+        goals_attack = fit_poisson_xg(rows, alpha=1.0).strengths["a"].attack
+        xg_attack = fit_poisson_xg(rows, alpha=0.0).strengths["a"].attack
+        assert xg_attack > goals_attack
+
+    def test_shrinkage_regularises_a_thin_sample(self) -> None:
+        rows = [*_xg_rows(), XgRow("x", "a", 5, 0, date(2026, 2, 1), 4.0, 0.5)]
+        raw = fit_poisson_xg(rows, alpha=1.0, shrinkage=0.0).strengths["x"].attack
+        shrunk = fit_poisson_xg(rows, alpha=1.0, shrinkage=5.0).strengths["x"].attack
+        assert raw > shrunk > 1.0
+        assert abs(shrunk - 1.0) < abs(raw - 1.0)
+
+    def test_empty_results_rejected(self) -> None:
+        with pytest.raises(ValueError, match="no results"):
+            fit_poisson_xg([])
 
 
 def _lopsided_home_team_rows() -> list[Row]:

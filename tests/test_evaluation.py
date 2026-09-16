@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -123,6 +124,24 @@ class TestEvaluateForecasts:
             assert r.goals_within_one == (
                 abs(round(r.home_expected + r.away_expected) - (r.home_goals + r.away_goals)) <= 1
             )
+
+    def test_xg_model_runs_end_to_end(self) -> None:
+        """model="xg" (StatsBomb-xG blend) plugs into the same harness as "shots" -- rows
+        carrying home_xg/away_xg (the winner's side rated a much better chance) should score
+        without error, exactly like the shots-blend path."""
+        rows = [
+            replace(
+                r,
+                home_xg=1.4 if r.fthg > r.ftag else 0.3,
+                away_xg=1.4 if r.ftag > r.fthg else 0.3,
+            )
+            for r in _synthetic_rows()
+        ]
+        report = evaluate_forecasts(rows, model="xg", alpha=0.25, min_history=20)
+        assert report is not None
+        assert report.n >= 30
+        for s in (report.model, report.market, report.baseline, report.blend):
+            assert s.log_loss > 0 and 0.0 <= s.rps <= 1.0 and s.brier >= 0.0
 
     def test_recent_track_record_is_limited_to_the_latest_season(self) -> None:
         """Two full seasons of results -- the track record should only show the later one,

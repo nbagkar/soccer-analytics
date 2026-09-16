@@ -336,3 +336,79 @@ def fit_poisson_shots(
         rho=rho,
         home_boost=home_boost,
     )
+
+
+def fit_poisson_xg(
+    outcomes: Sequence[Outcome],
+    *,
+    alpha: float = 0.5,
+    rho: float = DEFAULT_RHO,
+    shrinkage: float = 0.0,
+    time_decay: float = 0.0,
+) -> PoissonModel:
+    """Fit strengths on a shrinkage blend of goals and StatsBomb's own shot-quality xG.
+
+    Same shape as `fit_poisson_shots`, but the second signal is per-shot xG (a chance's
+    modelled scoring probability, StatsBomb's `statsbomb_xg`) rather than a shots-on-target
+    count -- a direct chance-quality read instead of a chance-quantity proxy. xG is already
+    goal-scaled, so the pseudo-goal blend needs no conversion factor:
+    ``alpha*goals + (1-alpha)*xg``. ``alpha=1`` recovers the goals-only model; ``alpha=0`` is
+    pure xG. A match missing xg data (StatsBomb events aren't loaded for it) falls back to
+    its actual scoreline, same degrade-gracefully contract as the shots blend.
+
+    ``shrinkage`` and ``time_decay`` behave exactly as in `fit_poisson_shots` (pseudo-match
+    shrinkage toward the league average; exponential down-weighting of older matches by
+    age in days). No `home_shrinkage` here -- that was a separate, already-tested experiment
+    (see `fit_poisson_shots`) and isn't part of what this variant is measuring.
+    """
+    if not outcomes:
+        raise ValueError("cannot fit a model with no results")
+
+    if time_decay > 0 and all(hasattr(o, "match_date") for o in outcomes):
+        max_date = max(o.match_date for o in outcomes)  # type: ignore[attr-defined]
+        weights = [
+            math.exp(-time_decay * (max_date - o.match_date).days)  # type: ignore[attr-defined]
+            for o in outcomes
+        ]
+    else:
+        weights = [1.0] * len(outcomes)
+
+    scored: dict[str, float] = {}
+    conceded: dict[str, float] = {}
+    games: dict[str, float] = {}
+    home_goals = away_goals = 0.0
+
+    for o, w in zip(outcomes, weights, strict=True):
+        home_goals += w * o.fthg
+        away_goals += w * o.ftag
+        hxg, axg = getattr(o, "home_xg", None), getattr(o, "away_xg", None)
+        if hxg is not None and axg is not None:
+            h_val = alpha * o.fthg + (1 - alpha) * hxg
+            a_val = alpha * o.ftag + (1 - alpha) * axg
+        else:  # no xg data for this match -> trust the scoreline
+            h_val, a_val = float(o.fthg), float(o.ftag)
+        for team, gf, ga in ((o.home_norm, h_val, a_val), (o.away_norm, a_val, h_val)):
+            scored[team] = scored.get(team, 0.0) + w * gf
+            conceded[team] = conceded.get(team, 0.0) + w * ga
+            games[team] = games.get(team, 0.0) + w
+
+    matches = sum(weights)
+    overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
+
+    def _strength(total: float, n: float) -> float:
+        rate = (total / n) / overall
+        return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
+
+    strengths = {
+        team: TeamStrength(
+            attack=_strength(scored[team], games[team]),
+            defence=_strength(conceded[team], games[team]),
+        )
+        for team in games
+    }
+    return PoissonModel(
+        strengths=strengths,
+        home_avg=home_goals / matches,
+        away_avg=away_goals / matches,
+        rho=rho,
+    )
