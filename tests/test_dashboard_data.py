@@ -1171,6 +1171,20 @@ class TestPlayerProfileData:
         seed_player_events(path)
         assert player_percentiles(path, "Nobody", min_minutes=1) == []
 
+    def test_match_log(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_match_log
+
+        path = tmp_path / "analytics.duckdb"
+        seed_player_events(path)
+        log = player_match_log(path, "Messi")
+        assert len(log) == 1
+        assert log[0].match_id == 1
+
+    def test_match_log_empty_when_db_missing(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_match_log
+
+        assert player_match_log(tmp_path / "nope.duckdb", "Messi") == []
+
 
 class TestLiveCentreModes:
     def test_shows_live_matches_first(self, tmp_path) -> None:

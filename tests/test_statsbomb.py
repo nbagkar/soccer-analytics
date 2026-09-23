@@ -315,6 +315,152 @@ class TestPlayerProfiles:
         assert adb.player_profile("Nobody") is None
 
 
+class TestPlayerMatchLog:
+    def test_one_row_per_match_most_recent_first(self, adb: AnalyticsDB) -> None:
+        from soccer.sources.statsbomb import PlayerMatchStats, parse_match_meta
+        from soccer.storage.analytics_db import MatchMeta
+
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        adb.load_shots(
+            [Shot(1, "A", "P2", 10, 1, 100.0, 40.0, 0.5, "Goal", True, False, "Right Foot")]
+        )
+        # A second, later match: P1 away at "C", nothing eventful.
+        adb.load_player_stats(
+            [
+                PlayerMatchStats(
+                    match_id=2,
+                    player="P1",
+                    team="A",
+                    position="CM",
+                    minutes=90,
+                    passes=10,
+                    passes_completed=9,
+                    key_passes=0,
+                    assists=0,
+                    xa=0.0,
+                    progressive_passes=0,
+                    carries=0,
+                    progressive_carries=0,
+                    dribbles=0,
+                    dribbles_completed=0,
+                    tackles=0,
+                    tackles_won=0,
+                    interceptions=0,
+                    blocks=0,
+                    clearances=0,
+                    ball_recoveries=0,
+                    pressures=0,
+                    fouls=0,
+                    fouled=0,
+                    yellow_cards=0,
+                    red_cards=0,
+                    touches=10,
+                )
+            ]
+        )
+        adb.load_match_meta(
+            [
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 1,
+                            "competition": {"competition_name": "World Cup"},
+                            "season": {"season_name": "2022"},
+                            "home_team": {"home_team_name": "A"},
+                            "away_team": {"away_team_name": "B"},
+                            "match_date": "2022-12-18",
+                        }
+                    )
+                ),
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 2,
+                            "competition": {"competition_name": "World Cup"},
+                            "season": {"season_name": "2022"},
+                            "home_team": {"home_team_name": "C"},
+                            "away_team": {"away_team_name": "A"},
+                            "match_date": "2022-12-25",
+                        }
+                    )
+                ),
+            ]
+        )
+
+        log = adb.player_match_log("P1")
+        assert [r.match_id for r in log] == [2, 1]  # most recent first
+
+        later, earlier = log
+        assert later.opponent == "C" and later.is_home is False
+        assert earlier.opponent == "B" and earlier.is_home is True
+        assert earlier.match_date == "2022-12-18"
+        assert earlier.competition == "World Cup" and earlier.season == "2022"
+        assert earlier.tackles == 1 and earlier.interceptions == 1 and earlier.yellow_cards == 1
+        assert earlier.assists == 1
+
+    def test_shooter_gets_goals_and_xg_the_non_shooter_gets_zero(self, adb: AnalyticsDB) -> None:
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        adb.load_shots(
+            [Shot(1, "A", "P2", 10, 1, 100.0, 40.0, 0.5, "Goal", True, False, "Right Foot")]
+        )
+        (p2_row,) = adb.player_match_log("P2")
+        assert p2_row.goals == 1 and p2_row.xg == pytest.approx(0.5)
+        (p1_row,) = adb.player_match_log("P1")
+        assert p1_row.goals == 0 and p1_row.xg == 0.0  # never shot -> LEFT JOIN zero, not dropped
+
+    def test_missing_match_meta_degrades_instead_of_dropping_the_row(
+        self, adb: AnalyticsDB
+    ) -> None:
+        # No load_match_meta call at all -- the row must still appear, just without identity.
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        (row,) = adb.player_match_log("P1")
+        assert row.match_id == 1
+        assert row.opponent is None and row.is_home is None
+        assert row.competition is None and row.season is None
+        assert row.tackles == 1  # the event-stat columns are unaffected
+
+    def test_competition_and_season_filter(self, adb: AnalyticsDB) -> None:
+        from soccer.sources.statsbomb import PlayerMatchStats, parse_match_meta
+        from soccer.storage.analytics_db import MatchMeta
+
+        adb.load_player_stats(parse_player_stats(PLAYER_EVENTS, match_id=1))
+        adb.load_player_stats(
+            [
+                PlayerMatchStats(
+                    match_id=2, player="P1", team="A", position="CM", minutes=90, passes=0,
+                    passes_completed=0, key_passes=0, assists=0, xa=0.0, progressive_passes=0,
+                    carries=0, progressive_carries=0, dribbles=0, dribbles_completed=0,
+                    tackles=0, tackles_won=0, interceptions=0, blocks=0, clearances=0,
+                    ball_recoveries=0, pressures=0, fouls=0, fouled=0, yellow_cards=0,
+                    red_cards=0, touches=0,
+                )
+            ]
+        )
+        adb.load_match_meta(
+            [
+                MatchMeta(**parse_match_meta({
+                    "match_id": 1,
+                    "competition": {"competition_name": "World Cup"},
+                    "season": {"season_name": "2022"},
+                    "home_team": {"home_team_name": "A"}, "away_team": {"away_team_name": "B"},
+                })),
+                MatchMeta(**parse_match_meta({
+                    "match_id": 2,
+                    "competition": {"competition_name": "La Liga"},
+                    "season": {"season_name": "2020/2021"},
+                    "home_team": {"home_team_name": "A"}, "away_team": {"away_team_name": "C"},
+                })),
+            ]
+        )
+        wc_only = adb.player_match_log("P1", competition="World Cup")
+        assert [r.match_id for r in wc_only] == [1]
+        wrong_season = adb.player_match_log("P1", competition="World Cup", season="1900")
+        assert wrong_season == []
+
+    def test_unknown_player_is_empty(self, adb: AnalyticsDB) -> None:
+        assert adb.player_match_log("Nobody") == []
+
+
 class TestMatchMeta:
     def test_metadata_and_competition_filter(self, adb: AnalyticsDB) -> None:
         from soccer.sources.statsbomb import PlayerMatchStats, parse_match_meta

@@ -398,6 +398,56 @@ class PlayerProfile:
 
 
 @dataclass(frozen=True)
+class MatchLogRow:
+    """One player's full stat line from a SINGLE match -- shooting + every event-stat column,
+    with that match's own identity attached (date, competition, season, opponent, home/away).
+
+    `PlayerProfile` sums this shape across every match into a season-long aggregate; this is
+    the un-aggregated row it's built from, for a match-by-match view rather than one number.
+    """
+
+    match_id: int
+    match_date: str | None
+    competition: str | None
+    season: str | None
+    team: str
+    opponent: str | None
+    is_home: bool | None
+    minutes: int
+    goals: int
+    xg: float
+    assists: int
+    xa: float
+    key_passes: int
+    passes: int
+    passes_completed: int
+    progressive_passes: int
+    carries: int
+    progressive_carries: int
+    tackles: int
+    interceptions: int
+    blocks: int
+    clearances: int
+    ball_recoveries: int
+    pressures: int
+    fouls: int
+    fouled: int
+    yellow_cards: int
+    red_cards: int
+    touches: int
+
+    @property
+    def pass_pct(self) -> float:
+        return 100.0 * self.passes_completed / self.passes if self.passes else 0.0
+
+    @property
+    def defensive_actions(self) -> int:
+        return (
+            self.tackles + self.interceptions + self.blocks + self.clearances + self.ball_recoveries
+        )
+
+
+@dataclass(frozen=True)
 class ResultRow:
     """The slim result shape the models consume (satisfies their Outcome protocols)."""
 
@@ -1097,6 +1147,52 @@ class AnalyticsDB:
         select, params = _profile_select(competition, season)
         rows = self._con.execute(f"{select} WHERE p.player = ?", [*params, player]).fetchall()
         return PlayerProfile(*rows[0]) if rows else None
+
+    def player_match_log(
+        self, player: str, *, competition: str | None = None, season: str | None = None
+    ) -> list[MatchLogRow]:
+        """One player's full stat line per match, most recent first.
+
+        Shooting (goals/xg) comes from a per-match aggregate of the `shots` table (a player
+        can take several shots in one match, so it's summed there before joining -- unlike
+        `_profile_select`, which sums across ALL matches at once); the rest of the row is the
+        matching `player_match_stats` row as-is (already one row per player per match); match
+        identity (date/competition/season/opponent/home-away) comes from `match_meta`, kept
+        as a LEFT JOIN so a match ingested before metadata existed still shows up, just with
+        those fields blank rather than dropping the row.
+        """
+        conditions = ["p.player = ?"]
+        params: list[str] = [player]
+        if competition:
+            conditions.append("m.competition = ?")
+            params.append(competition)
+        if season:
+            conditions.append("m.season = ?")
+            params.append(season)
+        rows = self._con.execute(
+            f"""
+            SELECT p.match_id, m.match_date, m.competition, m.season, p.team,
+                   CASE WHEN p.team = m.home_team THEN m.away_team
+                        WHEN p.team = m.away_team THEN m.home_team END AS opponent,
+                   CASE WHEN p.team = m.home_team THEN true
+                        WHEN p.team = m.away_team THEN false END AS is_home,
+                   p.minutes, COALESCE(sh.goals, 0), COALESCE(sh.xg, 0.0),
+                   p.assists, p.xa, p.key_passes, p.passes, p.passes_completed,
+                   p.progressive_passes, p.carries, p.progressive_carries,
+                   p.tackles, p.interceptions, p.blocks, p.clearances, p.ball_recoveries,
+                   p.pressures, p.fouls, p.fouled, p.yellow_cards, p.red_cards, p.touches
+            FROM player_match_stats p
+            LEFT JOIN match_meta m ON m.match_id = p.match_id
+            LEFT JOIN (
+                SELECT match_id, player, SUM(xg) AS xg, SUM(is_goal::INT) AS goals
+                FROM shots GROUP BY match_id, player
+            ) sh ON sh.match_id = p.match_id AND sh.player = p.player
+            WHERE {" AND ".join(conditions)}
+            ORDER BY m.match_date DESC NULLS LAST, p.match_id DESC
+            """,
+            params,
+        ).fetchall()
+        return [MatchLogRow(*r) for r in rows]
 
     # --- StatsBomb match metadata ---------------------------------------------
 

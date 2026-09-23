@@ -57,6 +57,7 @@ from soccer.dashboard.data import (
     market_edge,
     player_board,
     player_competitions,
+    player_match_log,
     player_percentiles,
     player_profile,
     player_profiles,
@@ -84,7 +85,7 @@ from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
-from soccer.storage.analytics_db import MatchRecord, PlayerProfile, PlayerRow, TeamForm
+from soccer.storage.analytics_db import MatchLogRow, MatchRecord, PlayerProfile, PlayerRow, TeamForm
 from soccer.storage.live_db import LiveDB
 
 # What st.altair_chart actually accepts -- a plain `alt.Chart` return type is too narrow for
@@ -2130,8 +2131,45 @@ def _percentile_bars_chart(rows: list[dict[str, Any]]) -> AltChart:
     return cast(AltChart, (bars + labels + midline).properties(height=22 * len(rows) + 10))
 
 
+def _match_log_table(rows: list[MatchLogRow]) -> str:
+    table_rows = []
+    for r in rows:
+        venue = "H" if r.is_home else "A" if r.is_home is False else ""
+        opponent = f"{_esc(r.opponent)} ({venue})" if r.opponent else "—"
+        cards = " ".join(
+            filter(
+                None,
+                [
+                    f"Y{r.yellow_cards}" if r.yellow_cards > 1 else "Y" if r.yellow_cards else "",
+                    "R" if r.red_cards else "",
+                ],
+            )
+        )
+        table_rows.append(
+            {
+                "Date": r.match_date or "—",
+                "Competition": _esc(r.competition) if r.competition else "—",
+                "Opponent": opponent,
+                "Min": r.minutes,
+                "G": r.goals,
+                "xG": f"{r.xg:.2f}",
+                "A": r.assists,
+                "xA": f"{r.xa:.2f}",
+                "Pass %": f"{r.pass_pct:.0f}%" if r.passes else "—",
+                "Prog": r.progressive_passes + r.progressive_carries,
+                "Def": r.defensive_actions,
+                "Cards": cards or "—",
+            }
+        )
+    return _html_table(table_rows)
+
+
 def _render_player_profile(
-    profile: PlayerProfile, percentiles: list[MetricPercentile], *, pool_label: str = ""
+    profile: PlayerProfile,
+    percentiles: list[MetricPercentile],
+    match_log: list[MatchLogRow],
+    *,
+    pool_label: str = "",
 ) -> None:
     pos = f" · {profile.position}" if profile.position else ""
     st.subheader(f"{profile.player}", anchor=False)
@@ -2145,6 +2183,14 @@ def _render_player_profile(
     row[4].metric(
         "Prog. actions", profile.progressive_passes + profile.progressive_carries, border=True
     )
+
+    if match_log:
+        with st.expander(f"Match log ({len(match_log)} matches)"):
+            st.markdown(_match_log_table(match_log), unsafe_allow_html=True)
+            st.caption(
+                "Every loaded match, most recent first. Def = tackles + interceptions + "
+                "blocks + clearances + recoveries. " + ATTRIBUTION_STATSBOMB
+            )
 
     if not percentiles:
         st.info("Not enough minutes for a percentile fingerprint at this threshold.")
@@ -2488,10 +2534,13 @@ def _render_players_page(settings: Settings) -> None:
             competition=competition,
             season=season,
         )
+        match_log = player_match_log(
+            settings.analytics_db, picked, competition=competition, season=season
+        )
         if profile is None:
             st.info("No profile for that player.")
         else:
-            _render_player_profile(profile, pcts, pool_label=scope)
+            _render_player_profile(profile, pcts, match_log, pool_label=scope)
     else:
         rc = st.columns([3, 1])
         rank_label = rc[0].selectbox("Rank by", list(_RANK_OPTIONS))

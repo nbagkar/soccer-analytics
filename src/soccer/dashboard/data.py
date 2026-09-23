@@ -31,6 +31,7 @@ from soccer.models.value import ValueReport
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
 from soccer.storage.analytics_db import (
     AnalyticsDB,
+    MatchLogRow,
     MatchRecord,
     PlayerProfile,
     PlayerRow,
@@ -1453,6 +1454,16 @@ def player_profile(
         return None
     with AnalyticsDB(analytics_db) as adb:
         return adb.player_profile(player, competition=competition, season=season)
+
+
+def player_match_log(
+    analytics_db: Path, player: str, *, competition: str | None = None, season: str | None = None
+) -> list[MatchLogRow]:
+    """A player's full stat line per match, most recent first. [] if none loaded."""
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        return adb.player_match_log(player, competition=competition, season=season)
 
 
 def player_competitions(analytics_db: Path) -> list[tuple[str, int]]:
