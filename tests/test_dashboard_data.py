@@ -984,6 +984,13 @@ class TestCanonicalNames:
         # a club from an unloaded league keeps its own name
         assert resolve_canonical_name("Shakhtar Donetsk", registry)[0] == "Shakhtar Donetsk"
 
+    def test_racing_santander_alias_beats_ambiguous_subset(self) -> None:
+        from soccer.dashboard.data import resolve_canonical_name
+
+        # with Argentina loaded, "racing club" makes the token-subset ambiguous
+        registry = {"santander": "Santander", "racing club": "Racing Club"}
+        assert resolve_canonical_name("Real Racing Club de Santander", registry)[0] == "Santander"
+
 
 class TestLeagueProfile:
     def test_style_fingerprint(self, tmp_path) -> None:

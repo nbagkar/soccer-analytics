@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import math
+from pathlib import Path
 from typing import Any, Literal, cast, overload
 
 import altair as alt
@@ -240,9 +241,7 @@ def _render_home(settings: Settings) -> None:
             with st.spinner("Fetching team news…"):
                 st.toast(actions.update_availability(settings), icon="✅")
             _go("Home")
-        if st.button(
-            "Check confirmed lineups", icon=":material/checklist:", width="stretch"
-        ):
+        if st.button("Check confirmed lineups", icon=":material/checklist:", width="stretch"):
             with st.spinner("Checking for confirmed Premier League lineups…"):
                 st.toast(actions.update_confirmed_lineups(settings), icon="✅")
             _go("Home")
@@ -559,8 +558,19 @@ def _html_table(rows: list[dict[str, Any]]) -> str:
     )
 
 
+def _db_version(path: Path) -> float:
+    """The store's last-modified time, passed into cached loaders as part of the cache key so
+    any data refresh (a Home button or the CLI) invalidates stale tables and simulations."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @st.cache_data(show_spinner="Simulating season…")
-def _cached_analytics(db_path: str, season: str, division: str) -> AnalyticsSnapshot | None:
+def _cached_analytics(
+    db_path: str, db_version: float, season: str, division: str
+) -> AnalyticsSnapshot | None:
     # Cached on plain args so switching pages does not re-run the Monte Carlo each time.
     from pathlib import Path
 
@@ -568,7 +578,9 @@ def _cached_analytics(db_path: str, season: str, division: str) -> AnalyticsSnap
 
 
 @st.cache_data(show_spinner="Testing the model against the closing line…")
-def _cached_market_edge(db_path: str, season: str, division: str) -> ValueReport | None:
+def _cached_market_edge(
+    db_path: str, db_version: float, season: str, division: str
+) -> ValueReport | None:
     # The walk-forward value backtest is heavy; cache it per (path, season, division).
     from pathlib import Path
 
@@ -576,7 +588,9 @@ def _cached_market_edge(db_path: str, season: str, division: str) -> ValueReport
 
 
 @st.cache_data(show_spinner="Scoring the model against the market over recent seasons…")
-def _cached_forecast_report(db_path: str, division: str, n_seasons: int) -> ForecastReport | None:
+def _cached_forecast_report(
+    db_path: str, db_version: float, division: str, n_seasons: int
+) -> ForecastReport | None:
     from pathlib import Path
 
     return forecast_report(Path(db_path), division, n_seasons=n_seasons)
@@ -584,7 +598,7 @@ def _cached_forecast_report(db_path: str, division: str, n_seasons: int) -> Fore
 
 @st.cache_data(show_spinner="Backtesting the accumulator strategy over recent seasons…")
 def _cached_accumulator_backtest(
-    db_path: str, division: str, legs_per_bet: int
+    db_path: str, db_version: float, division: str, legs_per_bet: int
 ) -> ParlayBacktestResult | None:
     from pathlib import Path
 
@@ -592,21 +606,25 @@ def _cached_accumulator_backtest(
 
 
 @st.cache_data(show_spinner="Building the team dossier…")
-def _cached_team_dossier(db_path: str, division: str, season: str, team: str) -> TeamDossier | None:
+def _cached_team_dossier(
+    db_path: str, db_version: float, division: str, season: str, team: str
+) -> TeamDossier | None:
     from pathlib import Path
 
     return team_dossier(Path(db_path), division, season, team)
 
 
 @st.cache_data(show_spinner="Gathering the all-time records…")
-def _cached_league_history(db_path: str, division: str) -> LeagueHistory | None:
+def _cached_league_history(db_path: str, db_version: float, division: str) -> LeagueHistory | None:
     from pathlib import Path
 
     return league_history(Path(db_path), division)
 
 
 @st.cache_data(show_spinner="Simulating the season…")
-def _cached_season_briefing(db_path: str, season: str, division: str) -> SeasonBriefing | None:
+def _cached_season_briefing(
+    db_path: str, db_version: float, season: str, division: str
+) -> SeasonBriefing | None:
     from pathlib import Path
 
     return season_briefing(Path(db_path), season, division)
@@ -614,7 +632,7 @@ def _cached_season_briefing(db_path: str, season: str, division: str) -> SeasonB
 
 @st.cache_data(ttl=600, show_spinner="Projecting the upcoming season…")
 def _cached_upcoming_season_briefing(
-    live_db: str, analytics_db: str, division: str
+    live_db: str, analytics_db: str, db_version: float, division: str
 ) -> tuple[SeasonBriefing, list[str]] | None:
     from pathlib import Path
 
@@ -622,7 +640,9 @@ def _cached_upcoming_season_briefing(
 
 
 @st.cache_data(ttl=600, show_spinner="Forecasting the season's fixtures…")
-def _cached_fixture_forecasts(live_db: str, analytics_db: str, limit: int) -> list[FixtureForecast]:
+def _cached_fixture_forecasts(
+    live_db: str, analytics_db: str, db_version: float, limit: int
+) -> list[FixtureForecast]:
     """Cached full-season fixtures + forecasts. Forecasting a whole season's ~3k fixtures
     is a few seconds, so it's cached (TTL, and cleared when fixtures are refreshed) rather
     than recomputed on every rerun and filter change."""
@@ -2693,7 +2713,10 @@ def main() -> None:
 
         with upcoming_tab:
             upcoming_fixtures = _cached_fixture_forecasts(
-                str(settings.live_db), str(settings.analytics_db), 5000
+                str(settings.live_db),
+                str(settings.analytics_db),
+                _db_version(settings.analytics_db),
+                5000,
             )
             _render_fixtures(upcoming_fixtures)
 
@@ -2754,7 +2777,12 @@ def main() -> None:
                         _render_ev_calculator(slate, division_name(division))
                         st.divider()
                         _render_combo_calculator(slate, division_name(division))
-                        report = _cached_market_edge(str(settings.analytics_db), season, division)
+                        report = _cached_market_edge(
+                            str(settings.analytics_db),
+                            _db_version(settings.analytics_db),
+                            season,
+                            division,
+                        )
                         if report is not None:
                             st.divider()
                             _render_market_edge(report)
@@ -2777,7 +2805,10 @@ def main() -> None:
                 )
                 division = by_league[league]
                 result = _cached_upcoming_season_briefing(
-                    str(settings.live_db), str(settings.analytics_db), division
+                    str(settings.live_db),
+                    str(settings.analytics_db),
+                    _db_version(settings.analytics_db),
+                    division,
                 )
                 if result is not None:
                     briefing, promoted = result
@@ -2798,7 +2829,10 @@ def main() -> None:
                     seasons = [s for s, d, _n in available if d == division]
                     season = max(seasons, key=season_sort_key)
                     latest_briefing = _cached_season_briefing(
-                        str(settings.analytics_db), season, division
+                        str(settings.analytics_db),
+                        _db_version(settings.analytics_db),
+                        season,
+                        division,
                     )
                     if latest_briefing is None:
                         st.info("No results or fixtures for that selection.")
@@ -2828,7 +2862,10 @@ def main() -> None:
                 )
                 league = st.selectbox("League", league_names, index=default_idx, key="card_league")
                 fc_report = _cached_forecast_report(
-                    str(settings.analytics_db), by_league[league], 6
+                    str(settings.analytics_db),
+                    _db_version(settings.analytics_db),
+                    by_league[league],
+                    6,
                 )
                 if fc_report is None:
                     st.info("No closing odds loaded for that league yet.")
@@ -2839,7 +2876,10 @@ def main() -> None:
                     st.divider()
                     legs = st.slider("Legs per accumulator", 2, 4, 2, key="parlay_legs")
                     parlay_report = _cached_accumulator_backtest(
-                        str(settings.analytics_db), by_league[league], legs
+                        str(settings.analytics_db),
+                        _db_version(settings.analytics_db),
+                        by_league[league],
+                        legs,
                     )
                     if parlay_report is None:
                         st.info(
@@ -2864,7 +2904,9 @@ def main() -> None:
             return
         season, division, extra = _league_season_pickers(available, extra=1)
         last_n = extra[0].slider("Form window (matches)", 3, 10, 5)
-        snap = _cached_analytics(str(settings.analytics_db), season, division)
+        snap = _cached_analytics(
+            str(settings.analytics_db), _db_version(settings.analytics_db), season, division
+        )
         if snap is None:
             st.info("No results for that selection.")
             return
@@ -2899,7 +2941,9 @@ def main() -> None:
             st.info("No teams for that selection.")
             return
         team = extra[0].selectbox("Team", teams)
-        dossier = _cached_team_dossier(str(settings.analytics_db), division, season, team)
+        dossier = _cached_team_dossier(
+            str(settings.analytics_db), _db_version(settings.analytics_db), division, season, team
+        )
         if dossier is None:
             st.info("No data for that team in the chosen season.")
         else:
@@ -2923,7 +2967,9 @@ def main() -> None:
             else:
                 _render_records(records)
         with all_time_tab:
-            hist = _cached_league_history(str(settings.analytics_db), division)
+            hist = _cached_league_history(
+                str(settings.analytics_db), _db_version(settings.analytics_db), division
+            )
             if hist is None:
                 st.info("No history loaded for that league.")
             else:

@@ -1577,6 +1577,9 @@ _FDCOUK_ALIASES_RAW = {
     "Atlético de Madrid": "Ath Madrid",
     "RCD Espanyol de Barcelona": "Espanol",
     "RCD Espanyol": "Espanol",
+    # "Racing" alone is ambiguous across leagues (e.g. Argentina's Racing Club).
+    "Real Racing Club de Santander": "Santander",
+    "Racing Santander": "Santander",
     # Portugal (P1)
     "Sporting Clube de Portugal": "Sp Lisbon",
     "Sporting CP": "Sp Lisbon",
