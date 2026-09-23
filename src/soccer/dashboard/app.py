@@ -1413,6 +1413,47 @@ def _render_forecast_adjustment(adj: AdjustedForecast) -> None:
     )
 
 
+def _correct_score_heatmap(
+    grid: dict[tuple[int, int], float], home: str, away: str, *, max_goals: int = 5
+) -> AltChart:
+    """Every scoreline's probability as a heatmap -- the full shape the top-8 list above only
+    samples the peak of. Capped at `max_goals` a side (0-5 by default); cells beyond that
+    are individually negligible and would only add unreadable clutter."""
+    rows = [
+        {"home_goals": hg, "away_goals": ag, "pct": grid.get((hg, ag), 0.0) * 100}
+        for hg in range(max_goals + 1)
+        for ag in range(max_goals + 1)
+    ]
+    frame = pl.DataFrame(rows).to_pandas()
+    # Light labels read on the low-probability (light) cells; above ~55% of the peak cell a
+    # dark fill needs a light label instead, so the number stays legible across the whole ramp.
+    label_switch = max(frame["pct"].max() * 0.55, 1.0)
+    cells = (
+        alt.Chart(frame)
+        .mark_rect(stroke="white", strokeWidth=1)
+        .encode(
+            x=alt.X("home_goals:O", title=f"{home} goals"),
+            y=alt.Y("away_goals:O", title=f"{away} goals", sort="descending"),
+            color=alt.Color(
+                "pct:Q",
+                title="Probability (%)",
+                scale=alt.Scale(scheme="greens"),
+                legend=alt.Legend(title="%"),
+            ),
+            tooltip=[
+                alt.Tooltip("home_goals:O", title=home),
+                alt.Tooltip("away_goals:O", title=away),
+                alt.Tooltip("pct:Q", title="Probability", format=".1f"),
+            ],
+        )
+    )
+    labels = cells.mark_text(baseline="middle").encode(
+        text=alt.Text("pct:Q", format=".0f"),
+        color=alt.condition(alt.datum.pct > label_switch, alt.value("white"), alt.value("#1a1a1a")),
+    )
+    return cast(AltChart, (cells + labels).properties(width=340, height=340))
+
+
 def _render_forecast(slate: MarketSlate) -> None:
     st.markdown(f"#### {slate.home}  ·  {slate.away}")
     st.markdown(_price_tiles(slate.result), unsafe_allow_html=True)
@@ -1444,6 +1485,10 @@ def _render_forecast(slate: MarketSlate) -> None:
             f"<div style='margin-bottom:12px'>{_mkt_title('Correct score')}{cs_rows}</div>",
             unsafe_allow_html=True,
         )
+
+    st.markdown(f"**Correct-score probability** — every likely {slate.home}-{slate.away} scoreline")
+    st.altair_chart(_correct_score_heatmap(slate.grid, slate.home, slate.away), width="stretch")
+
     st.caption(
         "Prices are the model's fair probability in cents (100¢ = certain), no bookmaker "
         "margin. Shots-on-target model over ~3 recent seasons, re-fit as results land. "
