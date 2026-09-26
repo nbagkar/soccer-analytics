@@ -718,6 +718,17 @@ def _render_season(briefing: SeasonBriefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
+def _previous_season(
+    available: list[tuple[str, str, int]], division: str, season: str
+) -> str | None:
+    """The most recent loaded season for `division` strictly before `season`, or None if
+    `season` is already the earliest loaded (or the only one) -- for a "vs last season"
+    trajectory overlay. Chronological, not lexical (`season_sort_key`, not string order)."""
+    cutoff = season_sort_key(season)
+    earlier = [s for s, d, _n in available if d == division and season_sort_key(s) < cutoff]
+    return max(earlier, key=season_sort_key) if earlier else None
+
+
 @overload
 def _league_season_pickers(
     available: list[tuple[str, str, int]],
@@ -1062,12 +1073,31 @@ def _team_strength_bars(d: TeamDossier) -> AltChart:
     return cast(AltChart, (bars + rule).properties(height=110))
 
 
-def _team_trajectory_chart(trajectory: list[dict[str, Any]]) -> AltChart:
+def _team_trajectory_chart(
+    trajectory: list[dict[str, Any]],
+    *,
+    previous: list[dict[str, Any]] | None = None,
+    previous_label: str = "",
+) -> AltChart:
+    """Cumulative points by matchday, this season vs its own underlying expectation -- and,
+    when `previous` is given, vs the FULL prior season's own trajectory as a reference line
+    (pace-setting context: is this season ahead of or behind where last season was at the
+    same point, and where last season ultimately finished). Deliberately just points for the
+    prior season, not its own expected line too -- three series reads cleanly, four would not.
+    """
     records = []
     for p in trajectory:
         records.append({"matchday": p["matchday"], "value": p["points"], "series": "Points"})
         if "xpoints" in p:
             records.append({"matchday": p["matchday"], "value": p["xpoints"], "series": "Expected"})
+    domain = ["Points", "Expected"]
+    range_ = ["#16c784", "#8b95a1"]
+    prev_series = f"Points ({previous_label})" if previous_label else "Points (previous season)"
+    if previous:
+        for p in previous:
+            records.append({"matchday": p["matchday"], "value": p["points"], "series": prev_series})
+        domain.append(prev_series)
+        range_.append("#3b82f6")
     frame = pl.DataFrame(records).to_pandas()
     return cast(
         AltChart,
@@ -1078,7 +1108,7 @@ def _team_trajectory_chart(trajectory: list[dict[str, Any]]) -> AltChart:
             y=alt.Y("value:Q", title="cumulative points"),
             color=alt.Color(
                 "series:N",
-                scale=alt.Scale(domain=["Points", "Expected"], range=["#16c784", "#8b95a1"]),
+                scale=alt.Scale(domain=domain, range=range_),
                 legend=alt.Legend(title=None, orient="top-left"),
             ),
             strokeDash=alt.condition(
@@ -1089,7 +1119,7 @@ def _team_trajectory_chart(trajectory: list[dict[str, Any]]) -> AltChart:
     )
 
 
-def _render_team(d: TeamDossier) -> None:
+def _render_team(d: TeamDossier, previous: TeamDossier | None = None) -> None:
     st.subheader(d.team, anchor=False)
     st.caption(f"{division_name(d.division)} {season_label(d.season)} · {d.played} played")
     c = st.columns(5)
@@ -1147,8 +1177,20 @@ def _render_team(d: TeamDossier) -> None:
         st.markdown("**Strength vs league** (1.0 = average)")
         st.altair_chart(_team_strength_bars(d), width="stretch")
 
+    show_previous = False
+    if previous is not None:
+        show_previous = st.toggle(
+            f"Compare with {season_label(previous.season)}", value=False, key="traj_compare_prev"
+        )
     st.markdown("**Season trajectory** — points earned vs deserved (the gap is luck)")
-    st.altair_chart(_team_trajectory_chart(d.trajectory), width="stretch")
+    st.altair_chart(
+        _team_trajectory_chart(
+            d.trajectory,
+            previous=previous.trajectory if show_previous and previous else None,
+            previous_label=season_label(previous.season) if previous else "",
+        ),
+        width="stretch",
+    )
 
 
 def _render_shot_map(data: ShotMapData) -> None:
@@ -3068,13 +3110,18 @@ def main() -> None:
             st.info("No teams for that selection.")
             return
         team = extra[0].selectbox("Team", teams)
-        dossier = _cached_team_dossier(
-            str(settings.analytics_db), _db_version(settings.analytics_db), division, season, team
-        )
+        db_path, db_version = str(settings.analytics_db), _db_version(settings.analytics_db)
+        dossier = _cached_team_dossier(db_path, db_version, division, season, team)
         if dossier is None:
             st.info("No data for that team in the chosen season.")
         else:
-            _render_team(dossier)
+            prev_season = _previous_season(available, division, season)
+            previous = (
+                _cached_team_dossier(db_path, db_version, division, prev_season, team)
+                if prev_season
+                else None
+            )
+            _render_team(dossier, previous)
         return
 
     if page == "Records":

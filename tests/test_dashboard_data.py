@@ -1884,6 +1884,38 @@ class TestAppSmoke:
             config._settings = None
 
 
+class TestPreviousSeason:
+    """The pure season-lookup half of the trajectory-overlay feature -- which season, if
+    any, counts as "last season" for a given (division, season), for the Team page's
+    "compare with previous season" toggle."""
+
+    def test_finds_the_immediately_prior_season_for_that_division(self) -> None:
+        from soccer.dashboard.app import _previous_season
+
+        available = [("2526", "E0", 380), ("2425", "E0", 380), ("2324", "E0", 380)]
+        assert _previous_season(available, "E0", "2526") == "2425"
+
+    def test_chronological_not_lexical_ordering(self) -> None:
+        # "9900" (1999/2000) must not lexically outrank "2526" -- season_sort_key, not str.
+        from soccer.dashboard.app import _previous_season
+
+        available = [("2526", "E0", 380), ("9900", "E0", 380)]
+        assert _previous_season(available, "E0", "2526") == "9900"
+
+    def test_earliest_loaded_season_has_no_predecessor(self) -> None:
+        from soccer.dashboard.app import _previous_season
+
+        available = [("2526", "E0", 380)]
+        assert _previous_season(available, "E0", "2526") is None
+
+    def test_scoped_to_the_same_division(self) -> None:
+        # An earlier season loaded for a DIFFERENT division must not leak in.
+        from soccer.dashboard.app import _previous_season
+
+        available = [("2526", "E0", 380), ("2425", "SP1", 380)]
+        assert _previous_season(available, "E0", "2526") is None
+
+
 class TestParseEventKickoff:
     """The pure timestamp-parsing half of `update_confirmed_lineups`'s pre-kickoff window
     check -- the network-fetch half isn't separately tested at the actions layer, matching
