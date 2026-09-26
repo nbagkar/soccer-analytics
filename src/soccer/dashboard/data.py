@@ -1561,6 +1561,98 @@ def player_percentiles(
     return out
 
 
+@dataclass(frozen=True)
+class SimilarPlayer:
+    player: str
+    team: str
+    position: str | None
+    distance: float
+    """Euclidean distance between the two players' standardized per-90 profiles. Lower is
+    more similar; 0 would be an identical profile."""
+    similarity: float
+    """A friendlier 0-100 score derived from `distance` (100 = identical). Not a
+    probability or a percentage of anything -- just `distance` inverted and rescaled so a
+    UI can show a single number without explaining a raw distance."""
+
+
+def player_similarity(
+    analytics_db: Path,
+    player: str,
+    *,
+    min_minutes: int = 450,
+    competition: str | None = None,
+    season: str | None = None,
+    limit: int = 10,
+) -> list[SimilarPlayer]:
+    """The `limit` players whose per-90 statistical profile is closest to `player`'s.
+
+    Reuses the exact metric set `_PERCENTILE_METRICS` already uses for the scouting
+    percentile fingerprint, so "similar players" and "percentile rank" describe playing
+    style the same way rather than inventing a second notion of it. Each metric is
+    z-scored across the qualifying pool first (so a raw-count metric like passes doesn't
+    swamp a rate like pass %, which live on very different scales), then similarity is
+    plain Euclidean distance in that standardized space -- a dependency-free nearest-
+    neighbour search; the pool here (a few hundred players at most) is far too small to
+    need a real ML library for one distance computation. `min_minutes` defaults higher
+    than `player_percentiles`' (450 vs 200) because a THIN sample's per-90 rates are
+    noisy enough to produce spurious "closest matches" -- style similarity needs more
+    signal than a single percentile bar does. [] if the player isn't in the qualifying pool.
+    """
+    profiles = player_profiles(
+        analytics_db,
+        top=100_000,
+        min_minutes=min_minutes,
+        order="minutes",
+        competition=competition,
+        season=season,
+    )
+    target = next((p for p in profiles if p.player == player), None)
+    if target is None or len(profiles) < 2:
+        return []
+
+    def value_of(profile: PlayerProfile, attr: str, is_per90: bool) -> float:
+        raw = getattr(profile, attr)
+        return float(profile.per90(raw)) if is_per90 else float(raw)
+
+    vectors = {
+        p.player: [value_of(p, attr, is_per90) for _, _, attr, is_per90 in _PERCENTILE_METRICS]
+        for p in profiles
+    }
+    n = len(_PERCENTILE_METRICS)
+    pool_size = len(vectors)
+    means = [sum(v[i] for v in vectors.values()) / pool_size for i in range(n)]
+    variances = [
+        sum((v[i] - means[i]) ** 2 for v in vectors.values()) / pool_size for i in range(n)
+    ]
+    # A metric with zero spread across this pool (everyone tied) contributes nothing to
+    # distance rather than dividing by zero.
+    stdevs = [v**0.5 or 1.0 for v in variances]
+
+    def standardize(vector: list[float]) -> list[float]:
+        return [(vector[i] - means[i]) / stdevs[i] for i in range(n)]
+
+    target_z = standardize(vectors[player])
+    by_player = {p.player: p for p in profiles}
+    ranked = []
+    for name, raw_vector in vectors.items():
+        if name == player:
+            continue
+        z = standardize(raw_vector)
+        distance = sum((a - b) ** 2 for a, b in zip(target_z, z, strict=True)) ** 0.5
+        ranked.append((distance, by_player[name]))
+    ranked.sort(key=lambda dp: dp[0])
+    return [
+        SimilarPlayer(
+            player=p.player,
+            team=p.team,
+            position=p.position,
+            distance=round(d, 3),
+            similarity=round(100.0 / (1.0 + d), 1),
+        )
+        for d, p in ranked[:limit]
+    ]
+
+
 # football-data.org competition names -> football-data.co.uk division codes, for
 # forecasting upcoming fixtures with the model fitted on that league's history.
 COMPETITION_TO_DIVISION = {

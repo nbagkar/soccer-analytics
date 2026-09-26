@@ -1186,6 +1186,140 @@ class TestPlayerProfileData:
         assert player_match_log(tmp_path / "nope.duckdb", "Messi") == []
 
 
+def _seed_similarity_players(path) -> None:
+    """Two near-identical attacking wingers plus one very different defender, so a
+    similarity ranking has an unambiguous right answer to assert against."""
+    from soccer.sources.statsbomb import PlayerMatchStats
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    def pms(player: str, **kw) -> PlayerMatchStats:
+        base = dict(
+            match_id=1,
+            player=player,
+            team="Club",
+            position="Right Wing",
+            minutes=900,
+            passes=0,
+            passes_completed=0,
+            key_passes=0,
+            assists=0,
+            xa=0.0,
+            progressive_passes=0,
+            carries=0,
+            progressive_carries=0,
+            dribbles=0,
+            dribbles_completed=0,
+            tackles=0,
+            tackles_won=0,
+            interceptions=0,
+            blocks=0,
+            clearances=0,
+            ball_recoveries=0,
+            pressures=0,
+            fouls=0,
+            fouled=0,
+            yellow_cards=0,
+            red_cards=0,
+            touches=0,
+        )
+        base.update(kw)
+        return PlayerMatchStats(**base)
+
+    winger_profile = dict(
+        passes=300,
+        passes_completed=250,
+        key_passes=20,
+        assists=8,
+        xa=6.0,
+        progressive_passes=30,
+        progressive_carries=60,
+        dribbles=100,
+        dribbles_completed=70,
+    )
+    stats = [
+        pms("WingerA", **winger_profile),
+        pms("WingerB", **{**winger_profile, "assists": 9, "xa": 6.5}),  # near-identical
+        pms(
+            "DefenderC",
+            position="Center Back",
+            passes=400,
+            passes_completed=370,
+            tackles=60,
+            tackles_won=45,
+            interceptions=50,
+            blocks=30,
+            clearances=100,
+            ball_recoveries=80,
+        ),
+    ]
+    with AnalyticsDB(path) as adb:
+        adb.load_player_stats(stats)
+
+
+class TestPlayerSimilarity:
+    def test_closest_match_is_the_near_identical_profile(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+
+        path = tmp_path / "analytics.duckdb"
+        _seed_similarity_players(path)
+        results = player_similarity(path, "WingerA", min_minutes=1)
+        assert results[0].player == "WingerB"
+        assert results[-1].player == "DefenderC"
+        # A near-identical profile scores much higher similarity than a very different one.
+        assert results[0].similarity > results[-1].similarity
+
+    def test_limit_caps_the_result_count(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+
+        path = tmp_path / "analytics.duckdb"
+        _seed_similarity_players(path)
+        assert len(player_similarity(path, "WingerA", min_minutes=1, limit=1)) == 1
+
+    def test_target_never_appears_in_its_own_results(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+
+        path = tmp_path / "analytics.duckdb"
+        _seed_similarity_players(path)
+        results = player_similarity(path, "WingerA", min_minutes=1)
+        assert "WingerA" not in {r.player for r in results}
+
+    def test_unknown_player_is_empty(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+
+        path = tmp_path / "analytics.duckdb"
+        _seed_similarity_players(path)
+        assert player_similarity(path, "Nobody", min_minutes=1) == []
+
+    def test_target_filtered_out_by_min_minutes_is_empty(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+
+        path = tmp_path / "analytics.duckdb"
+        seed_player_events(path)  # Messi + Otamendi, but min_minutes=1000 admits neither
+        assert player_similarity(path, "Messi", min_minutes=1000) == []
+
+    def test_a_single_qualifying_player_has_nothing_to_compare_against(self, tmp_path) -> None:
+        from soccer.dashboard.data import player_similarity
+        from soccer.sources.statsbomb import PlayerMatchStats
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "analytics.duckdb"
+        with AnalyticsDB(path) as adb:
+            adb.load_player_stats(
+                [
+                    PlayerMatchStats(
+                        match_id=1, player="Solo", team="Club", position="Striker",
+                        minutes=900, passes=0, passes_completed=0, key_passes=0,
+                        assists=0, xa=0.0, progressive_passes=0, carries=0,
+                        progressive_carries=0, dribbles=0, dribbles_completed=0,
+                        tackles=0, tackles_won=0, interceptions=0, blocks=0,
+                        clearances=0, ball_recoveries=0, pressures=0, fouls=0,
+                        fouled=0, yellow_cards=0, red_cards=0, touches=0,
+                    )
+                ]
+            )
+        assert player_similarity(path, "Solo", min_minutes=1) == []
+
+
 class TestLiveCentreModes:
     def test_shows_live_matches_first(self, tmp_path) -> None:
         from soccer.dashboard.data import live_snapshot

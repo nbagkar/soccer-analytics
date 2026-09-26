@@ -36,6 +36,7 @@ from soccer.dashboard.data import (
     SeasonBriefing,
     SeasonRecords,
     ShotMapData,
+    SimilarPlayer,
     TeamDossier,
     UnderlyingRow,
     accumulator_backtest,
@@ -62,6 +63,7 @@ from soccer.dashboard.data import (
     player_profile,
     player_profiles,
     player_seasons,
+    player_similarity,
     season_briefing,
     season_records,
     shot_map,
@@ -2164,10 +2166,24 @@ def _match_log_table(rows: list[MatchLogRow]) -> str:
     return _html_table(table_rows)
 
 
+def _similar_players_table(rows: list[SimilarPlayer]) -> str:
+    table_rows = [
+        {
+            "Player": _esc(r.player),
+            "Team": _esc(r.team),
+            "Position": _esc(r.position) if r.position else "—",
+            "Similarity": f"{r.similarity:.0f}",
+        }
+        for r in rows
+    ]
+    return _html_table(table_rows)
+
+
 def _render_player_profile(
     profile: PlayerProfile,
     percentiles: list[MetricPercentile],
     match_log: list[MatchLogRow],
+    similar: list[SimilarPlayer],
     *,
     pool_label: str = "",
 ) -> None:
@@ -2212,6 +2228,16 @@ def _render_player_profile(
         "Bar = percentile within the pool; number = the player's per-90 value. Dashed line "
         "is the median (50th). " + ATTRIBUTION_STATSBOMB
     )
+
+    if similar:
+        st.markdown(f"**Similar players** — closest per-90 statistical style to {profile.player}")
+        st.markdown(_similar_players_table(similar), unsafe_allow_html=True)
+        st.caption(
+            "Similarity compares standardized per-90 rates across the same metrics as the "
+            "percentile fingerprint above (attacking, possession, defending) -- a statistical "
+            "match, not a scouting judgement. 100 would be an identical profile. "
+            + ATTRIBUTION_STATSBOMB
+        )
 
 
 def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
@@ -2537,10 +2563,17 @@ def _render_players_page(settings: Settings) -> None:
         match_log = player_match_log(
             settings.analytics_db, picked, competition=competition, season=season
         )
+        similar = player_similarity(
+            settings.analytics_db,
+            picked,
+            min_minutes=min_minutes,
+            competition=competition,
+            season=season,
+        )
         if profile is None:
             st.info("No profile for that player.")
         else:
-            _render_player_profile(profile, pcts, match_log, pool_label=scope)
+            _render_player_profile(profile, pcts, match_log, similar, pool_label=scope)
     else:
         rc = st.columns([3, 1])
         rank_label = rc[0].selectbox("Rank by", list(_RANK_OPTIONS))
