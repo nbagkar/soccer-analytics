@@ -64,6 +64,7 @@ from soccer.dashboard.data import (
     player_profiles,
     player_seasons,
     player_similarity,
+    previous_season,
     season_briefing,
     season_records,
     shot_map,
@@ -323,7 +324,14 @@ def _render_chat_chart(chart: dict[str, Any] | None) -> None:
     if kind == "xg_race":
         st.altair_chart(_xg_race_chart(chart["data"]), width="stretch")
     elif kind == "trajectory":
-        st.altair_chart(_team_trajectory_chart(chart["data"]), width="stretch")
+        st.altair_chart(
+            _team_trajectory_chart(
+                chart["data"],
+                previous=chart.get("previous"),
+                previous_label=chart.get("previous_label", ""),
+            ),
+            width="stretch",
+        )
     elif kind == "percentiles":
         st.altair_chart(_percentile_bars_chart(chart["data"]), width="stretch")
     elif kind == "result_bar":
@@ -716,17 +724,6 @@ def _render_season(briefing: SeasonBriefing) -> None:
         },
     )
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
-
-
-def _previous_season(
-    available: list[tuple[str, str, int]], division: str, season: str
-) -> str | None:
-    """The most recent loaded season for `division` strictly before `season`, or None if
-    `season` is already the earliest loaded (or the only one) -- for a "vs last season"
-    trajectory overlay. Chronological, not lexical (`season_sort_key`, not string order)."""
-    cutoff = season_sort_key(season)
-    earlier = [s for s, d, _n in available if d == division and season_sort_key(s) < cutoff]
-    return max(earlier, key=season_sort_key) if earlier else None
 
 
 @overload
@@ -3115,7 +3112,7 @@ def main() -> None:
         if dossier is None:
             st.info("No data for that team in the chosen season.")
         else:
-            prev_season = _previous_season(available, division, season)
+            prev_season = previous_season(available, division, season)
             previous = (
                 _cached_team_dossier(db_path, db_version, division, prev_season, team)
                 if prev_season

@@ -266,6 +266,8 @@ def _route(q: str, analytics_db: Path, live_db: Path | None) -> Reply:
         _intent_value,
         _intent_honours,
         _intent_scout,
+        _intent_similar_players,
+        _intent_match_log,
         _intent_availability,
         _intent_squad,
         _intent_top_scorers,
@@ -1725,6 +1727,91 @@ def _intent_scout(q: str, analytics_db: Path, live_db: Path | None) -> Reply | N
     )
 
 
+def _intent_similar_players(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"similar to|players? like|who plays like|closest (match|style) to"
+        r"|statistically similar|find (players?|someone) like|comparable to",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_stats_count() == 0:
+            return None
+        player = _resolve_player(q, adb, _team_tokens(adb))
+    if player is None:
+        return None
+
+    from soccer.dashboard.data import player_similarity
+
+    matches = player_similarity(analytics_db, player)
+    if not matches:
+        return None
+    top = ", ".join(f"{m.player} ({m.similarity:.0f})" for m in matches[:3])
+    rows = [
+        {
+            "Player": m.player,
+            "Team": m.team,
+            "Position": m.position or "—",
+            "Similarity": m.similarity,
+        }
+        for m in matches
+    ]
+    return Reply(
+        f"**Players statistically similar to {player}**: {top}\n\n"
+        "Similarity compares standardized per-90 rates across attacking, possession and "
+        "defending metrics — a statistical match, not a scouting judgement. 100 would be an "
+        "identical profile.",
+        table=rows,
+        suggestions=[
+            f"Tell me about {matches[0].player}",
+            f"Compare {player} and {matches[0].player}",
+        ],
+    )
+
+
+def _intent_match_log(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    if not re.search(
+        r"match log|match.by.match|game.by.game|match history"
+        r"|(last|recent) \d+ (matches|games)|recent matches for|recent games for"
+        r"|every match (he|she|they)?.?s? (played|played this season)",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        if adb.player_stats_count() == 0:
+            return None
+        player = _resolve_player(q, adb, _team_tokens(adb))
+    if player is None:
+        return None
+
+    from soccer.dashboard.data import player_match_log
+
+    log = player_match_log(analytics_db, player)
+    if not log:
+        return None
+    shown = log[:10]
+    rows = []
+    for r in shown:
+        venue = "H" if r.is_home else "A" if r.is_home is False else ""
+        opponent = f"{r.opponent} ({venue})" if r.opponent else "—"
+        rows.append(
+            {
+                "Date": r.match_date or "—",
+                "Competition": r.competition or "—",
+                "Opponent": opponent,
+                "Min": r.minutes,
+                "G": r.goals,
+                "A": r.assists,
+            }
+        )
+    return Reply(
+        f"**{player}** — {len(log)} matches loaded, most recent first "
+        f"(showing the last {len(shown)}).",
+        table=rows,
+        suggestions=[f"Tell me about {player}", f"Players similar to {player}"],
+    )
+
+
 def _intent_value(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
         r"value bets?|betting|make money|profitable|\broi\b|\byield\b|closing line"
@@ -1904,6 +1991,16 @@ def _intent_season_compare(q: str, analytics_db: Path, live_db: Path | None) -> 
         f"({d_new.points / d_new.played:.2f} vs {d_old.points / d_old.played:.2f} ppg)",
         table=[row(d_old), row(d_new)],
         suggestions=[f"Tell me about {d_new.team}", f"Is {d_new.team} overperforming their xG?"],
+        chart=(
+            {
+                "kind": "trajectory",
+                "data": d_new.trajectory,
+                "previous": d_old.trajectory,
+                "previous_label": season_label(d_old.season),
+            }
+            if d_new.trajectory and d_old.trajectory
+            else None
+        ),
     )
 
 

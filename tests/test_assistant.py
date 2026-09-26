@@ -91,6 +91,66 @@ def _seed_shots(path):
         )
 
 
+def _seed_style_players(tmp_path):
+    """Two near-identical attacking wingers plus one very different defender -- enough
+    minutes to clear player_similarity's default threshold, and an unambiguous right
+    answer for which pair is closer (see test_dashboard_data.py's identical fixture)."""
+    from soccer.sources.statsbomb import PlayerMatchStats
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    def pms(player: str, **kw) -> PlayerMatchStats:
+        base = dict(
+            match_id=1,
+            player=player,
+            team="Club",
+            position="Right Wing",
+            minutes=900,
+            passes=0,
+            passes_completed=0,
+            key_passes=0,
+            assists=0,
+            xa=0.0,
+            progressive_passes=0,
+            carries=0,
+            progressive_carries=0,
+            dribbles=0,
+            dribbles_completed=0,
+            tackles=0,
+            tackles_won=0,
+            interceptions=0,
+            blocks=0,
+            clearances=0,
+            ball_recoveries=0,
+            pressures=0,
+            fouls=0,
+            fouled=0,
+            yellow_cards=0,
+            red_cards=0,
+            touches=0,
+        )
+        base.update(kw)
+        return PlayerMatchStats(**base)
+
+    winger_profile = dict(
+        passes=300, passes_completed=250, key_passes=20, assists=8, xa=6.0,
+        progressive_passes=30, progressive_carries=60, dribbles=100, dribbles_completed=70,
+    )
+    path = tmp_path / "analytics.duckdb"
+    with AnalyticsDB(path) as adb:
+        adb.load_player_stats(
+            [
+                pms("WingerA", **winger_profile),
+                pms("WingerB", **{**winger_profile, "assists": 9, "xa": 6.5}),
+                pms(
+                    "DefenderC", position="Center Back", passes=400, passes_completed=370,
+                    tackles=60, tackles_won=45, interceptions=50, blocks=30, clearances=100,
+                    ball_recoveries=80,
+                ),
+            ]
+        )
+    return path
+
+
 def _seed_availability(live_path, rows):
     """Seed FPL-style availability into a live store. `rows` are (team, player, status, chance,
     news) tuples; team_norm is derived exactly as the real ingest does so club lookups match."""
@@ -478,6 +538,39 @@ class TestRouting:
         reply = answer("compare Messi and Otamendi", _seed(tmp_path))
         assert "Messi" in reply.text and "Otamendi" in reply.text
         assert reply.table and reply.table[0]["Metric"] == "Matches"
+
+    def test_match_log_for_a_named_player(self, tmp_path) -> None:
+        reply = answer("match log for Messi", _seed(tmp_path))
+        assert "Messi" in reply.text
+        assert reply.table and reply.table[0]["G"] is not None
+
+    def test_similar_players_ranks_the_closer_profile_first(self, tmp_path) -> None:
+        path = _seed_style_players(tmp_path)
+        reply = answer("who plays like WingerA", path)
+        assert "WingerB" in reply.text
+        assert reply.table is not None
+        assert reply.table[0]["Player"] == "WingerB"
+        assert reply.table[-1]["Player"] == "DefenderC"
+
+    def test_team_vs_last_season_overlays_the_trajectory(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2425")
+        seed_results(path, division="E0", teams=teams, season="2526")
+        reply = answer("how is arsenal doing compared to last season", path)
+        assert reply.chart is not None
+        assert reply.chart["kind"] == "trajectory"
+        assert reply.chart.get("previous")
+        assert reply.chart["previous_label"] == "2024/25"
+
+    def test_team_dossier_without_the_trigger_phrase_has_no_overlay(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2425")
+        seed_results(path, division="E0", teams=teams, season="2526")
+        reply = answer("tell me about arsenal", path)
+        assert reply.chart is not None
+        assert "previous" not in reply.chart
 
 
 class TestAvailability:

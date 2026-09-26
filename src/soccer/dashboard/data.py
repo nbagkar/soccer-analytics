@@ -1226,6 +1226,23 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
     )
 
 
+def previous_season(
+    available: list[tuple[str, str, int]], division: str, season: str
+) -> str | None:
+    """The most recent loaded season for `division` strictly before `season`, or None if
+    `season` is already the earliest loaded (or the only one) -- for a "vs last season"
+    trajectory overlay (the Team page, and the assistant's team dossier). Chronological, not
+    lexical (`season_sort_key`, not string order -- the exact bug class the season-ordering
+    fix elsewhere in this codebase was about). `available` is the same (season, division,
+    count) shape `AnalyticsDB.seasons_loaded()` returns.
+    """
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    cutoff = season_sort_key(season)
+    earlier = [s for s, d, _n in available if d == division and season_sort_key(s) < cutoff]
+    return max(earlier, key=season_sort_key) if earlier else None
+
+
 @dataclass(frozen=True)
 class LeagueHistory:
     division: str
