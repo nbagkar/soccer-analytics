@@ -427,29 +427,60 @@ class TestPlayerMatchLog:
         adb.load_player_stats(
             [
                 PlayerMatchStats(
-                    match_id=2, player="P1", team="A", position="CM", minutes=90, passes=0,
-                    passes_completed=0, key_passes=0, assists=0, xa=0.0, progressive_passes=0,
-                    carries=0, progressive_carries=0, dribbles=0, dribbles_completed=0,
-                    tackles=0, tackles_won=0, interceptions=0, blocks=0, clearances=0,
-                    ball_recoveries=0, pressures=0, fouls=0, fouled=0, yellow_cards=0,
-                    red_cards=0, touches=0,
+                    match_id=2,
+                    player="P1",
+                    team="A",
+                    position="CM",
+                    minutes=90,
+                    passes=0,
+                    passes_completed=0,
+                    key_passes=0,
+                    assists=0,
+                    xa=0.0,
+                    progressive_passes=0,
+                    carries=0,
+                    progressive_carries=0,
+                    dribbles=0,
+                    dribbles_completed=0,
+                    tackles=0,
+                    tackles_won=0,
+                    interceptions=0,
+                    blocks=0,
+                    clearances=0,
+                    ball_recoveries=0,
+                    pressures=0,
+                    fouls=0,
+                    fouled=0,
+                    yellow_cards=0,
+                    red_cards=0,
+                    touches=0,
                 )
             ]
         )
         adb.load_match_meta(
             [
-                MatchMeta(**parse_match_meta({
-                    "match_id": 1,
-                    "competition": {"competition_name": "World Cup"},
-                    "season": {"season_name": "2022"},
-                    "home_team": {"home_team_name": "A"}, "away_team": {"away_team_name": "B"},
-                })),
-                MatchMeta(**parse_match_meta({
-                    "match_id": 2,
-                    "competition": {"competition_name": "La Liga"},
-                    "season": {"season_name": "2020/2021"},
-                    "home_team": {"home_team_name": "A"}, "away_team": {"away_team_name": "C"},
-                })),
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 1,
+                            "competition": {"competition_name": "World Cup"},
+                            "season": {"season_name": "2022"},
+                            "home_team": {"home_team_name": "A"},
+                            "away_team": {"away_team_name": "B"},
+                        }
+                    )
+                ),
+                MatchMeta(
+                    **parse_match_meta(
+                        {
+                            "match_id": 2,
+                            "competition": {"competition_name": "La Liga"},
+                            "season": {"season_name": "2020/2021"},
+                            "home_team": {"home_team_name": "A"},
+                            "away_team": {"away_team_name": "C"},
+                        }
+                    )
+                ),
             ]
         )
         wc_only = adb.player_match_log("P1", competition="World Cup")

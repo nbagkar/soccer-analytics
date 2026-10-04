@@ -149,9 +149,7 @@ _PROFILE_ORDER = {
 # a non-shooting defender still gets a row. Column order matches PlayerProfile's fields.
 # Optional competition/season filters restrict BOTH sides to matching matches, so
 # percentiles compare like with like (one league season, not a mix of eras).
-def _profile_select(
-    competition: str | None, season: str | None = None
-) -> tuple[str, list[str]]:
+def _profile_select(competition: str | None, season: str | None = None) -> tuple[str, list[str]]:
     conditions: list[str] = []
     meta_params: list[str] = []
     if competition:
@@ -1285,8 +1283,7 @@ class AnalyticsDB:
         so ordering is by keyword bucket, not an exact match.
         """
         rows = self._con.execute(
-            "SELECT player, position, nationality, date_of_birth "
-            "FROM squads WHERE team_norm = ?",
+            "SELECT player, position, nationality, date_of_birth FROM squads WHERE team_norm = ?",
             [team_norm],
         ).fetchall()
         seen: set[str] = set()

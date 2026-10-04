@@ -776,9 +776,10 @@ class TestAvailabilityAdjustedSlate:
         TestAnalyticsSnapshot()._seed_results(analytics)
         self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)  # all available
         # A fully fit pair is identical to the plain forecast, so there is nothing to compare.
-        assert availability_adjusted_slate(
-            analytics, live, "2526", "E0", "Arsenal", "Brentford"
-        ) is None
+        assert (
+            availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+            is None
+        )
 
     def test_none_outside_the_premier_league(self, tmp_path) -> None:
         from soccer.dashboard.data import availability_adjusted_slate
@@ -788,9 +789,10 @@ class TestAvailabilityAdjustedSlate:
         TestAnalyticsSnapshot()._seed_results(analytics)
         self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)
         # The availability feed is PL-only, so a non-E0 division never gets the nudge.
-        assert availability_adjusted_slate(
-            analytics, live, "2526", "SP1", "Arsenal", "Brentford"
-        ) is None
+        assert (
+            availability_adjusted_slate(analytics, live, "2526", "SP1", "Arsenal", "Brentford")
+            is None
+        )
 
     def test_matches_the_plain_slate_on_the_base_numbers(self, tmp_path) -> None:
         from soccer.dashboard.data import availability_adjusted_slate, forecast_slate
@@ -820,13 +822,29 @@ class TestUnderlyingTable:
 
         def mr(h, a, hg, ag, hst, ast, day):
             return MatchResult(
-                season="2526", division="E0", match_date=date(2026, 1, day),
-                home=h, away=a, home_norm=normalize_name(h), away_norm=normalize_name(a),
-                fthg=hg, ftag=ag, ftr="H" if hg > ag else "A" if ag > hg else "D",
-                hthg=None, htag=None, home_shots=None, away_shots=None,
-                home_shots_target=hst, away_shots_target=ast, home_corners=None,
-                away_corners=None, home_yellows=None, away_yellows=None, home_reds=None,
-                away_reds=None, referee=None,
+                season="2526",
+                division="E0",
+                match_date=date(2026, 1, day),
+                home=h,
+                away=a,
+                home_norm=normalize_name(h),
+                away_norm=normalize_name(a),
+                fthg=hg,
+                ftag=ag,
+                ftr="H" if hg > ag else "A" if ag > hg else "D",
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=hst,
+                away_shots_target=ast,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
             )
 
         # A dominates chances (SoT 10/9/8) but converts poorly; B barely creates.
@@ -1239,13 +1257,33 @@ class TestPlayerSimilarity:
             adb.load_player_stats(
                 [
                     PlayerMatchStats(
-                        match_id=1, player="Solo", team="Club", position="Striker",
-                        minutes=900, passes=0, passes_completed=0, key_passes=0,
-                        assists=0, xa=0.0, progressive_passes=0, carries=0,
-                        progressive_carries=0, dribbles=0, dribbles_completed=0,
-                        tackles=0, tackles_won=0, interceptions=0, blocks=0,
-                        clearances=0, ball_recoveries=0, pressures=0, fouls=0,
-                        fouled=0, yellow_cards=0, red_cards=0, touches=0,
+                        match_id=1,
+                        player="Solo",
+                        team="Club",
+                        position="Striker",
+                        minutes=900,
+                        passes=0,
+                        passes_completed=0,
+                        key_passes=0,
+                        assists=0,
+                        xa=0.0,
+                        progressive_passes=0,
+                        carries=0,
+                        progressive_carries=0,
+                        dribbles=0,
+                        dribbles_completed=0,
+                        tackles=0,
+                        tackles_won=0,
+                        interceptions=0,
+                        blocks=0,
+                        clearances=0,
+                        ball_recoveries=0,
+                        pressures=0,
+                        fouls=0,
+                        fouled=0,
+                        yellow_cards=0,
+                        red_cards=0,
+                        touches=0,
                     )
                 ]
             )
@@ -1861,4 +1899,3 @@ class TestPreviousSeason:
 
         available = [("2526", "E0", 380), ("2425", "SP1", 380)]
         assert previous_season(available, "E0", "2526") is None
-

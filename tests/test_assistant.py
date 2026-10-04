@@ -132,8 +132,15 @@ def _seed_style_players(tmp_path):
         return PlayerMatchStats(**base)
 
     winger_profile = dict(
-        passes=300, passes_completed=250, key_passes=20, assists=8, xa=6.0,
-        progressive_passes=30, progressive_carries=60, dribbles=100, dribbles_completed=70,
+        passes=300,
+        passes_completed=250,
+        key_passes=20,
+        assists=8,
+        xa=6.0,
+        progressive_passes=30,
+        progressive_carries=60,
+        dribbles=100,
+        dribbles_completed=70,
     )
     path = tmp_path / "analytics.duckdb"
     with AnalyticsDB(path) as adb:
@@ -142,8 +149,15 @@ def _seed_style_players(tmp_path):
                 pms("WingerA", **winger_profile),
                 pms("WingerB", **{**winger_profile, "assists": 9, "xa": 6.5}),
                 pms(
-                    "DefenderC", position="Center Back", passes=400, passes_completed=370,
-                    tackles=60, tackles_won=45, interceptions=50, blocks=30, clearances=100,
+                    "DefenderC",
+                    position="Center Back",
+                    passes=400,
+                    passes_completed=370,
+                    tackles=60,
+                    tackles_won=45,
+                    interceptions=50,
+                    blocks=30,
+                    clearances=100,
                     ball_recoveries=80,
                 ),
             ]
@@ -253,7 +267,6 @@ class TestRouting:
         # Only one season loaded -> not enough to compare; falls through, no crash.
         reply = answer("Arsenal this season vs last", _seed(tmp_path))
         assert reply.text  # some answer (dossier/fallback), no exception
-
 
     def test_forecast_needs_two_teams(self, tmp_path) -> None:
         # Only one team named -> not a forecast; should not crash, routes elsewhere/fallback.
@@ -365,7 +378,6 @@ class TestRouting:
         reply = answer("which league scores the most goals", path)
         assert "goals per game" in reply.text.lower()
         assert reply.table and len(reply.table) >= 2
-
 
     def test_fallback_is_honest(self, tmp_path) -> None:
         reply = answer("what is the weather tomorrow", _seed(tmp_path))

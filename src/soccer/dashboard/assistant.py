@@ -201,6 +201,7 @@ _AMBIGUOUS_ALIASES = {
 
 # Words that may sit right before a bare "United"/"City" without making it a club's suffix
 # ("vs United", "is City") -- as opposed to a club-name word ("Sheffield United").
+# fmt: off
 _ALIAS_STOPWORDS = frozenset(
     {
         "vs", "v", "versus", "against", "and", "or", "the", "a", "an", "is", "are",
@@ -209,6 +210,7 @@ _ALIAS_STOPWORDS = frozenset(
         "this", "that", "do", "does", "did", "who", "whos", "what", "whats",
     }
 )
+# fmt: on
 
 _STOP = {"fc", "afc", "cf", "real", "the", "de", "city", "united", "town", "club"}
 
@@ -650,8 +652,10 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         if live_db is not None and Path(live_db).exists()
         else None
     )
-    slate = adjusted.raw if adjusted is not None else forecast_slate(
-        analytics_db, season, division, home, away
+    slate = (
+        adjusted.raw
+        if adjusted is not None
+        else forecast_slate(analytics_db, season, division, home, away)
     )
     if slate is None:
         return None

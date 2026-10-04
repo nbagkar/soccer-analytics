@@ -140,9 +140,7 @@ class FantasyPremierLeague:
             return FplFetch(
                 payload=cached.payload, snapshot=cached, is_stale=True, fetched_at=cached.fetched_at
             )
-        raise SourceUnavailableError(
-            f"FPL {endpoint} failed and no cache exists"
-        ) from last_error
+        raise SourceUnavailableError(f"FPL {endpoint} failed and no cache exists") from last_error
 
     @staticmethod
     def _backoff(attempt: int) -> float:
