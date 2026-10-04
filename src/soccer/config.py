@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     thesportsdb_key: str = "123"
 
     # --- Source toggles ----------------------------------------------------
-    enable_openligadb: bool = False
     enable_fpl: bool = False
     """Off by default: Premier League terms bar 'creating a database'. Enabling this
     is a decision the operator makes knowingly. See registry caveats."""
@@ -61,10 +60,6 @@ class Settings(BaseSettings):
         return self.data_dir / "raw"
 
     @property
-    def parquet_dir(self) -> Path:
-        return self.data_dir / "parquet"
-
-    @property
     def live_db(self) -> Path:
         return self.data_dir / "live.sqlite"
 
@@ -76,7 +71,8 @@ class Settings(BaseSettings):
         """Whether a source may be used, honouring both its default and the override."""
         match source:
             case SourceId.OPENLIGADB:
-                return self.enable_openligadb
+                # Registry record of verified capabilities only -- no adapter is built.
+                return False
             case SourceId.FPL:
                 return self.enable_fpl
             case SourceId.FOOTBALL_DATA_ORG:
@@ -86,7 +82,7 @@ class Settings(BaseSettings):
                 return True
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.raw_dir, self.parquet_dir):
+        for path in (self.data_dir, self.raw_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 

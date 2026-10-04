@@ -16,15 +16,13 @@ from typing import Any, cast
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
-from soccer.domain.availability import AvailabilityAdjustment, AvailabilityRow
-from soccer.domain.bets import Bet, BetLedger, BetStatus, LedgerSummary
+from soccer.domain.availability import AvailabilityAdjustment
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
-from soccer.models.parlay import ParlayBacktestResult
 from soccer.models.poisson import PoissonModel, fit_poisson_shots
 from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.models.value import ValueReport
@@ -132,24 +130,6 @@ def live_snapshot(
 def _last_updated(db: LiveDB) -> datetime | None:
     row = db.connection.execute("SELECT MAX(updated_at) AS t FROM match_state").fetchone()
     return datetime.fromisoformat(row["t"]) if row and row["t"] else None
-
-
-def list_bets(live_db: Path, *, status: BetStatus | None = None) -> list[Bet]:
-    """The personal bet ledger, most recent match first. [] if nothing logged yet."""
-    if not Path(live_db).exists():
-        return []
-    with LiveDB(live_db) as db:
-        return BetLedger(db).list(status=status)
-
-
-def bet_ledger_summary(live_db: Path) -> LedgerSummary:
-    """Real, forward-looking yield over the ledger's settled bets. All-zero if empty."""
-    if not Path(live_db).exists():
-        return LedgerSummary(
-            n_settled=0, n_pending=0, wins=0, losses=0, voids=0, staked=0.0, returned=0.0
-        )
-    with LiveDB(live_db) as db:
-        return BetLedger(db).summary()
 
 
 @dataclass(frozen=True)
@@ -798,10 +778,6 @@ class AdjustedForecast:
     adjusted: MarketSlate
     home_adj: AvailabilityAdjustment
     away_adj: AvailabilityAdjustment
-    confirmed_lineup_used: bool = False
-    """Whether either side's nudge is informed by today's TheSportsDB confirmed matchday
-    squad (`confirmed_squad_gap`), not just FPL's season-long snapshot -- shown in the UI
-    so a "team news" caption is honest about which source(s) it's drawing on."""
 
     @property
     def is_material(self) -> bool:
@@ -829,20 +805,11 @@ def availability_adjusted_slate(
     The nudge routes each club's loss to the right side of the ball: a club scores less with its
     own attackers out (attack_factor) and concedes more with the opponent's defenders out
     (the opponent's leak_factor). Same rho, so only the goal expectations move.
-
-    Also folds in today's confirmed matchday squad when one is cached (close to kickoff --
-    see `dashboard.actions.update_confirmed_lineups`): a regular missing from that squad
-    entirely is treated as fully unavailable for this match even if FPL's own season-long
-    snapshot hasn't caught up (`confirmed_squad_gap`/`apply_confirmed_gap`). Falls back to
-    FPL-only, byte-for-byte as before, whenever no confirmed lineup is cached yet.
     """
     if division != ADJUSTABLE_DIVISION:
         return None
     from soccer.domain.availability import (
         AvailabilityStore,
-        ConfirmedLineupStore,
-        apply_confirmed_gap,
-        confirmed_squad_gap,
         team_adjustment,
     )
     from soccer.models.markets import compute_markets
@@ -850,22 +817,10 @@ def availability_adjusted_slate(
     # Read the (cheap) availability first and bail before fitting when nothing is flagged, so a
     # PL forecast with an empty/disabled feed costs exactly one model fit in the caller, not two.
     home_norm, away_norm = normalize_name(home), normalize_name(away)
-    confirmed_lineup_used = False
     with LiveDB(live_db) as db:
         store = AvailabilityStore(db)
-        lineups = ConfirmedLineupStore(db)
-
-        def _rows_with_confirmed_gap(team_norm: str) -> list[AvailabilityRow]:
-            rows = store.for_team(team_norm)
-            confirmed = lineups.for_team(team_norm)
-            if confirmed is None:
-                return rows
-            nonlocal confirmed_lineup_used
-            confirmed_lineup_used = True
-            return apply_confirmed_gap(rows, confirmed_squad_gap(rows, confirmed))
-
-        home_adj = team_adjustment(_rows_with_confirmed_gap(home_norm))
-        away_adj = team_adjustment(_rows_with_confirmed_gap(away_norm))
+        home_adj = team_adjustment(store.for_team(home_norm))
+        away_adj = team_adjustment(store.for_team(away_norm))
     if not (home_adj.is_material or away_adj.is_material):
         return None  # nobody flagged -> identical to the plain forecast; nothing to show
 
@@ -878,13 +833,7 @@ def availability_adjusted_slate(
     adj_lam = lam * home_adj.attack_factor * away_adj.leak_factor
     adj_mu = mu * away_adj.attack_factor * home_adj.leak_factor
     adjusted = compute_markets(home_disp, away_disp, adj_lam, adj_mu, rho)
-    return AdjustedForecast(
-        raw=raw,
-        adjusted=adjusted,
-        home_adj=home_adj,
-        away_adj=away_adj,
-        confirmed_lineup_used=confirmed_lineup_used,
-    )
+    return AdjustedForecast(raw=raw, adjusted=adjusted, home_adj=home_adj, away_adj=away_adj)
 
 
 def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:
@@ -1389,37 +1338,6 @@ def forecast_report(
     return evaluate_forecasts(
         rows,
         model=model,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        min_history=60,
-    )
-
-
-def accumulator_backtest(
-    analytics_db: Path, division: str, *, legs_per_bet: int = 2, n_seasons: int = 6
-) -> ParlayBacktestResult | None:
-    """Would a weekly 'parlay the model's most confident picks' strategy have paid off?
-
-    Walk-forward over a division's recent odds-bearing seasons, same no-leakage fit as
-    `forecast_report`. Returns None if no odds are loaded or too little data to place a
-    single accumulator of this size.
-    """
-    from soccer.models.parlay import backtest_accumulator
-    from soccer.sources.football_data_co_uk import season_sort_key
-
-    with AnalyticsDB(analytics_db) as adb:
-        seasons = sorted(
-            {s for s, d, _n in adb.seasons_loaded() if d == division},
-            key=season_sort_key,
-            reverse=True,
-        )[:n_seasons]
-        rows = [r for s in seasons for r in adb.outcomes_with_odds(s, division)]
-    if not rows:
-        return None
-    return backtest_accumulator(
-        rows,
-        legs_per_bet=legs_per_bet,
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),

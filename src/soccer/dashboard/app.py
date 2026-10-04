@@ -13,7 +13,6 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 from __future__ import annotations
 
 import html
-import math
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -39,11 +38,9 @@ from soccer.dashboard.data import (
     SimilarPlayer,
     TeamDossier,
     UnderlyingRow,
-    accumulator_backtest,
     analytics_available,
     analytics_snapshot,
     availability_adjusted_slate,
-    bet_ledger_summary,
     fixture_forecasts,
     forecast_explanation,
     forecast_report,
@@ -53,7 +50,6 @@ from soccer.dashboard.data import (
     has_player_events,
     health_snapshot,
     league_history,
-    list_bets,
     live_snapshot,
     market_edge,
     player_board,
@@ -74,7 +70,6 @@ from soccer.dashboard.data import (
     underlying_table,
     upcoming_season_briefing,
 )
-from soccer.domain.bets import BetStatus
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.models.evaluation import (
     BlendPoint,
@@ -83,7 +78,6 @@ from soccer.models.evaluation import (
     PredictionRecord,
 )
 from soccer.models.markets import Market, MarketSlate, OverUnder
-from soccer.models.parlay import ParlayBacktestResult
 from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
@@ -141,38 +135,6 @@ def _go(page: str) -> None:
     """
     st.session_state._nav_to = _LABEL_BY_KEY.get(page, page)
     st.rerun()
-
-
-def _log_bet_button(
-    key: str,
-    *,
-    competition: str,
-    home: str,
-    away: str,
-    selection: str,
-    odds: float,
-    model_probability: float | None = None,
-) -> None:
-    """A small 'Log bet' button that hands off to the Bet Ledger's form, pre-filled.
-
-    Avoids re-typing what a calculator already computed -- match, selection, the model's
-    own probability, and whatever odds are currently entered -- into the ledger by hand.
-    """
-    if st.button("Log bet", key=key, icon=":material/receipt_long:"):
-        st.session_state["_bet_prefill"] = {
-            "competition": competition,
-            "home": home,
-            "away": away,
-            "selection": selection,
-            "odds": odds,
-            "model_probability": model_probability,
-        }
-        # Bump so the ledger's form widgets get fresh keys -- Streamlit ignores a widget's
-        # `value=` once it already has session state under that key, so re-using the same
-        # keys would silently keep a PREVIOUS prefill (or hand-edited values) on screen
-        # instead of the one just requested.
-        st.session_state["_bet_prefill_nonce"] = st.session_state.get("_bet_prefill_nonce", 0) + 1
-        _go("Bet Ledger")
 
 
 def _render_home(settings: Settings) -> None:
@@ -244,10 +206,6 @@ def _render_home(settings: Settings) -> None:
         if st.button("Update injuries", icon=":material/personal_injury:", width="stretch"):
             with st.spinner("Fetching team news…"):
                 st.toast(actions.update_availability(settings), icon="✅")
-            _go("Home")
-        if st.button("Check confirmed lineups", icon=":material/checklist:", width="stretch"):
-            with st.spinner("Checking for confirmed Premier League lineups…"):
-                st.toast(actions.update_confirmed_lineups(settings), icon="✅")
             _go("Home")
 
     st.caption(
@@ -605,15 +563,6 @@ def _cached_forecast_report(
     from pathlib import Path
 
     return forecast_report(Path(db_path), division, n_seasons=n_seasons)
-
-
-@st.cache_data(show_spinner="Backtesting the accumulator strategy over recent seasons…")
-def _cached_accumulator_backtest(
-    db_path: str, db_version: float, division: str, legs_per_bet: int
-) -> ParlayBacktestResult | None:
-    from pathlib import Path
-
-    return accumulator_backtest(Path(db_path), division, legs_per_bet=legs_per_bet, n_seasons=6)
 
 
 @st.cache_data(show_spinner="Building the team dossier…")
@@ -1406,10 +1355,7 @@ def _render_forecast_adjustment(adj: AdjustedForecast) -> None:
         outs.append(f"**{home}** without {format_missing(adj.home_adj)}")
     if adj.away_adj.is_material:
         outs.append(f"**{away}** without {format_missing(adj.away_adj)}")
-    caption = " · ".join(outs)
-    if adj.confirmed_lineup_used:
-        caption += " (includes today's confirmed lineup, not just FPL's team news)"
-    st.caption(caption)
+    st.caption(" · ".join(outs))
     c = st.columns(3)
     c[0].metric(
         f"{home} win",
@@ -1598,148 +1544,6 @@ def _render_forecast_explanation(exp: ForecastExplanation) -> None:
     )
     st.altair_chart(_strength_bars(exp), width="stretch")
     st.caption("Attack and defence are each team's rate vs the league average (higher is better).")
-
-
-def _render_ev_calculator(slate: MarketSlate, competition: str) -> None:
-    """Model probabilities vs the odds a bookmaker is actually offering -> edge, EV, Kelly."""
-    from soccer.models.value import expected_value, implied_probabilities, kelly_fraction, overround
-
-    st.markdown("**Value calculator** — enter the odds you can get")
-    st.caption(
-        "There is no free feed of odds for upcoming matches, so bring your bookmaker's "
-        "decimal odds. Edge compares the model to the vig-free market; treat it sceptically."
-    )
-    result = {m.name: m.probability for m in slate.result}
-    names = [m.name for m in slate.result]  # [home, draw, away]
-    defaults = [round(1 / result[n], 2) if result[n] else 2.0 for n in names]
-
-    cols = st.columns(3)
-    odds = [
-        cols[i].number_input(f"{n} odds", min_value=1.01, value=float(defaults[i]), step=0.05)
-        for i, n in enumerate(names)
-    ]
-    market = implied_probabilities(*odds)
-
-    body = ""
-    for i, name in enumerate(names):
-        model_p = result[name]
-        ev = expected_value(model_p, odds[i])
-        kelly = kelly_fraction(model_p, odds[i])
-        colour = "#16a34a" if ev > 0 else "#8b8b8b"
-        cells = [
-            name,
-            f"{model_p:.0%}",
-            f"{market[i]:.0%}",
-            f'<span style="color:{colour}">{ev * 100:+.1f}%</span>',
-            f'<span style="color:{colour}">{kelly * 100:.1f}%</span>' if kelly > 0 else "—",
-        ]
-        tds = "".join(f'<td style="padding:3px 14px 3px 0">{c}</td>' for c in cells)
-        body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
-    head = "".join(
-        f'<th style="text-align:left;padding:4px 14px 4px 0">{h}</th>'
-        for h in ["Outcome", "Model", "Market", "Edge (EV)", "Kelly"]
-    )
-    st.markdown(
-        f'<table style="font-size:0.88rem;border-collapse:collapse">{head}{body}</table>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        f"Bookmaker margin (overround): {overround(*odds) * 100:.1f}%. "
-        "Edge = model probability * odds - 1. Kelly = fraction of bankroll at that edge."
-    )
-    log_cols = st.columns(3)
-    for i, name in enumerate(names):
-        with log_cols[i]:
-            _log_bet_button(
-                f"log_ev_{i}",
-                competition=competition,
-                home=slate.home,
-                away=slate.away,
-                selection=f"{name} win" if name != "Draw" else "Draw",
-                odds=odds[i],
-                model_probability=result[name],
-            )
-
-
-def _render_combo_calculator(slate: MarketSlate, competition: str) -> None:
-    """Same-game combo: the TRUE joint probability of two-plus same-match selections.
-
-    Not the naive shortcut of multiplying the legs' standalone probabilities -- same-match
-    outcomes are correlated (a home win is more often a 2-0 or 3-1 than a bare 1-0, so it
-    moves together with "over 2.5"), so that shortcut misprices the combo. This sums the
-    model's own scoreline grid instead, which is exact given the model.
-    """
-    from soccer.models.markets import combo_probability, same_match_legs
-    from soccer.models.value import expected_value, kelly_fraction
-
-    st.markdown("**Same-game combo** — priced from the true joint probability")
-    st.caption(
-        "Pick two or more selections from this match. Correlated outcomes (e.g. a home win "
-        "and over 2.5 goals) are NOT independent, so this doesn't multiply their standalone "
-        "probabilities -- it sums the model's actual scoreline distribution over every score "
-        "where all picks hold, which is the honest combined probability."
-    )
-    legs = same_match_legs(slate.home, slate.away)
-    default_picks = [slate.home, "Over 2.5"] if "Over 2.5" in legs else []
-    picked = st.multiselect("Selections", list(legs.keys()), default=default_picks)
-    if len(picked) < 2:
-        st.info("Pick two or more selections to price the combo.")
-        return
-
-    predicates = [legs[name] for name in picked]
-    combo_p = combo_probability(slate.grid, predicates)
-    naive_p = 1.0
-    for name in picked:
-        naive_p *= combo_probability(slate.grid, [legs[name]])
-
-    c = st.columns(3)
-    c[0].metric("True joint probability", f"{combo_p:.1%}", border=True)
-    c[1].metric("True fair odds", f"{1.0 / combo_p:.2f}" if combo_p > 0 else "—", border=True)
-    c[2].metric(
-        "Naive multiply (wrong)",
-        f"{1.0 / naive_p:.2f}" if naive_p > 0 else "—",
-        help="What you'd get by multiplying each leg's standalone decimal odds -- the "
-        "common but incorrect way to price a same-game combo, since it assumes the legs "
-        "are independent. Compare to the true fair odds alongside it.",
-        border=True,
-    )
-
-    if combo_p <= 0:
-        st.warning(
-            "These selections can never happen together (probability 0) — check for a "
-            "contradiction, like a result plus its own opposite."
-        )
-        return
-
-    odds = st.number_input(
-        "Your bookmaker's combo odds (decimal)",
-        min_value=1.01,
-        value=round(1.0 / combo_p, 2),
-        step=0.05,
-    )
-    ev = expected_value(combo_p, odds)
-    kelly = kelly_fraction(combo_p, odds)
-    colour = "#16a34a" if ev > 0 else "#8b8b8b"
-    stake = f"{kelly * 100:.1f}% of bankroll" if kelly > 0 else "—"
-    st.markdown(
-        f"Edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
-        f"Kelly stake: <span style='color:{colour}'>{stake}</span>",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Every added leg multiplies the bookmaker's margin into the combo too, so a parlay "
-        "is systematically worse value than betting the same legs straight — this prices "
-        "the combo honestly, it doesn't undo that."
-    )
-    _log_bet_button(
-        "log_combo",
-        competition=competition,
-        home=slate.home,
-        away=slate.away,
-        selection=" + ".join(picked),
-        odds=odds,
-        model_probability=combo_p,
-    )
 
 
 def _render_market_edge(report: ValueReport) -> None:
@@ -1948,48 +1752,6 @@ def _render_track_record(
             }
         )
     st.markdown(_html_table(rows), unsafe_allow_html=True)
-
-
-def _render_parlay_backtest(report: ParlayBacktestResult) -> None:
-    """Would 'parlay the model's most confident picks every week' have actually paid off?
-
-    Walk-forward, no leakage -- the same discipline as the scorecard above, applied to a
-    strategy instead of a single bet. The point isn't the parlay result alone, it's the
-    straight-bet result right next to it: the honest comparison this strategy needs to beat.
-    """
-    st.markdown(f"**Parlay backtest** — {report.legs_per_bet}-leg accumulator, every week")
-    st.caption(
-        f"Each week, the model's {report.legs_per_bet} most confident Premier-League picks "
-        "(by predicted probability) were combined into one accumulator, priced at the "
-        "product of each leg's own closing odds -- exactly how the Accumulator calculator "
-        "above prices one. Walk-forward: no match ever informs its own prediction."
-    )
-    c = st.columns(2)
-    with c[0]:
-        st.markdown(f"**Parlayed** ({report.n_bets} accumulators)")
-        st.metric("Hit rate (every leg correct)", f"{report.hit_rate:.0%}", border=True)
-        colour = "#16a34a" if report.yield_pct > 0 else "#dc2626"
-        st.markdown(
-            f"Yield: <span style='color:{colour};font-size:1.4rem;font-weight:600'>"
-            f"{report.yield_pct:+.1f}%</span>",
-            unsafe_allow_html=True,
-        )
-    with c[1]:
-        st.markdown(f"**Same picks, bet straight** ({report.straight_staked:.0f} bets)")
-        colour2 = "#16a34a" if report.straight_yield_pct > 0 else "#dc2626"
-        st.markdown(
-            f"Yield: <span style='color:{colour2};font-size:1.4rem;font-weight:600'>"
-            f"{report.straight_yield_pct:+.1f}%</span>",
-            unsafe_allow_html=True,
-        )
-    verdict = (
-        "parlaying did better than betting the same picks straight over this history"
-        if report.yield_pct > report.straight_yield_pct
-        else "betting the same picks straight did better than parlaying them over this "
-        "history -- the usual outcome, since each added leg compounds the bookmaker's "
-        "margin into the combined price"
-    )
-    st.info(f"Over {report.n_bets} weeks, {verdict}.", icon=":material/insights:")
 
 
 def _render_players(rows: list[PlayerRow]) -> None:
@@ -2356,82 +2118,6 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     _render_uncovered_fixtures(uncovered)
 
 
-def _render_accumulator_calculator(fixtures: list[FixtureForecast]) -> None:
-    """Cross-match accumulator, built automatically from the model's own most confident
-    Premier League picks -- no manual leg-picking. Different matches are close enough to
-    independent that the combined true probability is just the product of each leg's own
-    probability, which is also how a bookmaker prices a straight accumulator (multiplying
-    each leg's own decimal odds), so there's no correlation correction to make here.
-    """
-    from soccer.models.value import expected_value, kelly_fraction
-
-    pl = [f for f in fixtures if f.competition == "Premier League" and f.slate is not None]
-    if len(pl) < 2:
-        st.info(
-            "Need at least two upcoming, forecastable Premier League fixtures to build an "
-            "accumulator — go to **Home → Update fixtures** if this looks thin."
-        )
-        return
-
-    # Same ranking as the Upcoming tab's Favourite/Confidence columns: each match's pick is
-    # whichever of home/draw/away the model rates highest, ranked most confident first.
-    candidates = []
-    for f in pl:
-        assert f.slate is not None
-        home_p, draw_p, away_p = (m.probability for m in f.slate.result)
-        pick_p = max(home_p, draw_p, away_p)
-        pick = "Draw" if draw_p == pick_p else f.home if home_p == pick_p else f.away
-        candidates.append((f, pick, pick_p))
-    candidates.sort(key=lambda c: -c[2])
-
-    legs = st.slider("Legs", 2, min(4, len(candidates)), 2)
-    chosen = candidates[:legs]
-
-    rows = [
-        {"Match": f"{f.home} v {f.away}", "Pick": pick, "Confidence": f"{p:.0%}"}
-        for f, pick, p in chosen
-    ]
-    st.markdown(_html_table(rows), unsafe_allow_html=True)
-    st.caption("The model's own most confident picks this week, strongest first.")
-
-    combined_p = math.prod(p for _f, _pick, p in chosen)
-    fair_odds = 1.0 / combined_p if combined_p > 0 else float("inf")
-    c = st.columns(2)
-    c[0].metric("Combined probability", f"{combined_p:.1%}", border=True)
-    c[1].metric("Fair odds", f"{fair_odds:.2f}", border=True)
-
-    actual_price = st.number_input(
-        "What price is your bookmaker offering for this combo?",
-        min_value=1.01,
-        value=round(fair_odds, 2),
-        step=0.05,
-    )
-    ev = expected_value(combined_p, actual_price)
-    kelly = kelly_fraction(combined_p, actual_price)
-    colour = "#16a34a" if ev > 0 else "#dc2626"
-    stake = f"{kelly * 100:.1f}% of bankroll" if kelly > 0 else "—"
-    st.markdown(
-        f"Edge: <span style='color:{colour}'>{ev * 100:+.1f}%</span> &nbsp;·&nbsp; "
-        f"Kelly stake: <span style='color:{colour}'>{stake}</span>",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Heads up: backtested on real history, parlaying the model's most-confident weekly "
-        "picks like this lost MORE than betting the same picks straight (see Scorecard → "
-        "Parlay backtest: -6.5% vs -0.6% at 2 legs) -- each added leg compounds the "
-        "bookmaker's own margin. This prices the combo honestly; it doesn't make it a good bet."
-    )
-    _log_bet_button(
-        "log_accumulator",
-        competition="Premier League",
-        home=f"{legs}-leg accumulator",
-        away="",
-        selection="; ".join(f"{r['Match']}: {r['Pick']}" for r in rows),
-        odds=actual_price,
-        model_probability=combined_p,
-    )
-
-
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
     if not uncovered:
         return
@@ -2477,7 +2163,6 @@ _NAV = [
     ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
-    ("Bet Ledger", "Bet tracker", ":material/receipt_long:", "Log real bets, track real yield"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
@@ -2631,177 +2316,6 @@ def _render_players_page(settings: Settings) -> None:
             _render_player_leaderboard(profiles, per90=per90, pool_label=scope)
 
 
-def _render_bet_ledger(settings: Settings) -> None:
-    """Personal bet ledger: log real bets, settle them, and see a real (not backtested)
-    yield. See domain/bets.py -- everything else in this app is judged by a walk-forward
-    backtest, which can't score a decision that hasn't happened yet; this can."""
-    from soccer.dashboard import actions
-
-    summary = bet_ledger_summary(settings.live_db)
-    c = st.columns(5)
-    c[0].metric("Settled", summary.n_settled, border=True)
-    c[1].metric("Pending", summary.n_pending, border=True)
-    c[2].metric("Win rate", f"{summary.win_rate:.0%}" if summary.n_settled else "—", border=True)
-    profit_colour = "#16a34a" if summary.profit > 0 else "#dc2626" if summary.profit < 0 else _MUTE
-    with c[3]:
-        st.markdown("Profit")
-        st.markdown(
-            f"<span style='font-size:1.5rem;font-weight:600;color:{profit_colour}'>"
-            f"{summary.profit:+.2f}</span>",
-            unsafe_allow_html=True,
-        )
-    with c[4]:
-        st.markdown("Yield")
-        yield_label = f"{summary.yield_pct:+.1f}%" if summary.n_settled else "—"
-        st.markdown(
-            f"<span style='font-size:1.5rem;font-weight:600;color:{profit_colour}'>"
-            f"{yield_label}</span>",
-            unsafe_allow_html=True,
-        )
-    st.caption(
-        "A real, forward-looking result — not a backtest. Log a bet when you place (or "
-        "seriously consider) one, settle it once the match finishes, and this tracks your "
-        "actual yield over time. Needs weeks of entries before the numbers mean anything; "
-        "a handful of bets is noise, same as any small sample elsewhere in this app."
-    )
-
-    pending = list_bets(settings.live_db, status=BetStatus.PENDING)
-    settled = [b for b in list_bets(settings.live_db) if b.status is not BetStatus.PENDING]
-
-    prefill = st.session_state.pop("_bet_prefill", None)
-    if prefill is not None:
-        st.toast("Bet details filled in below — check the odds, then log it.", icon="🧾")
-    prefill = prefill or {}
-    prefill_prob = prefill.get("model_probability")
-    # Suffixing every widget key with this bumps them to fresh instances whenever a new
-    # prefill arrives, since Streamlit otherwise ignores `value=` for a key that already
-    # has session state (from a previous prefill, or the user's own typing).
-    nonce = st.session_state.get("_bet_prefill_nonce", 0)
-
-    with (
-        st.expander(
-            "Log a new bet",
-            icon=":material/add_circle:",
-            expanded=bool(prefill) or (not pending and not settled),
-        ),
-        st.form("add_bet_form", clear_on_submit=True),
-    ):
-        cols = st.columns(3)
-        competition = cols[0].text_input(
-            "Competition",
-            value=prefill.get("competition", "Premier League"),
-            key=f"bf_comp_{nonce}",
-        )
-        home = cols[1].text_input(
-            "Home team", value=prefill.get("home", ""), key=f"bf_home_{nonce}"
-        )
-        away = cols[2].text_input(
-            "Away team", value=prefill.get("away", ""), key=f"bf_away_{nonce}"
-        )
-        cols2 = st.columns(3)
-        match_date = cols2[0].date_input("Kickoff date", key=f"bf_date_{nonce}")
-        odds = cols2[1].number_input(
-            "Odds (decimal)",
-            min_value=1.01,
-            value=float(prefill.get("odds", 2.0)),
-            step=0.05,
-            key=f"bf_odds_{nonce}",
-        )
-        stake = cols2[2].number_input(
-            "Stake", min_value=0.01, value=10.0, step=1.0, key=f"bf_stake_{nonce}"
-        )
-        selection = st.text_input(
-            "Selection",
-            value=prefill.get("selection", ""),
-            placeholder="e.g. Arsenal win, or Home win + Over 2.5",
-            key=f"bf_sel_{nonce}",
-        )
-        cols3 = st.columns(2)
-        model_pct = cols3[0].number_input(
-            "Model probability % (optional)",
-            min_value=0.0,
-            max_value=100.0,
-            value=round(prefill_prob * 100, 1) if prefill_prob else 0.0,
-            key=f"bf_prob_{nonce}",
-        )
-        notes = cols3[1].text_input("Notes (optional)", key=f"bf_notes_{nonce}")
-        if st.form_submit_button("Log bet", type="primary"):
-            if not home or not selection:
-                st.error("Home and selection are required.")
-            else:
-                actions.add_bet(
-                    settings,
-                    competition=competition or "Premier League",
-                    home=home,
-                    away=away,
-                    match_date=match_date.isoformat(),
-                    selection=selection,
-                    odds=odds,
-                    stake=stake,
-                    model_probability=model_pct / 100 if model_pct else None,
-                    notes=notes or None,
-                )
-                st.toast("Bet logged.", icon=":material/check_circle:")
-                st.rerun()
-
-    if pending:
-        st.markdown(f"**Pending** ({len(pending)}) — settle once the match finishes")
-        for bet in pending:
-            with st.container(border=True):
-                info, won, lost, void, delete = st.columns([5, 1, 1, 1, 1])
-                info.markdown(
-                    f"**{_esc(bet.home)} v {_esc(bet.away)}** — {_esc(bet.selection)}  \n"
-                    f"<span style='color:{_MUTE}'>{bet.match_date} · odds {bet.odds:.2f} · "
-                    f"stake {bet.stake:.2f}</span>",
-                    unsafe_allow_html=True,
-                )
-                if won.button("Won", key=f"won_{bet.id}"):
-                    actions.settle_bet(settings, bet.id, BetStatus.WON)
-                    st.rerun()
-                if lost.button("Lost", key=f"lost_{bet.id}"):
-                    actions.settle_bet(settings, bet.id, BetStatus.LOST)
-                    st.rerun()
-                if void.button("Void", key=f"void_{bet.id}"):
-                    actions.settle_bet(settings, bet.id, BetStatus.VOID)
-                    st.rerun()
-                if delete.button(":material/delete:", key=f"del_{bet.id}", help="Delete"):
-                    actions.delete_bet(settings, bet.id)
-                    st.rerun()
-
-    if settled:
-        st.markdown(f"**Settled** ({len(settled)})")
-        rows = []
-        for b in settled:
-            profit = b.profit or 0.0
-            colour = "#16a34a" if profit > 0 else "#dc2626" if profit < 0 else _MUTE
-            rows.append(
-                {
-                    "Date": b.match_date,
-                    "Match": f"{_esc(b.home)} v {_esc(b.away)}",
-                    "Selection": _esc(b.selection),
-                    "Odds": f"{b.odds:.2f}",
-                    "Stake": f"{b.stake:.2f}",
-                    "Status": b.status.value.capitalize(),
-                    "Profit": f"<span style='color:{colour}'>{profit:+.2f}</span>",
-                }
-            )
-        st.markdown(_html_table(rows), unsafe_allow_html=True)
-        with st.expander("Fix a mistake", icon=":material/edit:"):
-            options = {
-                f"{b.match_date} — {b.home} v {b.away} — {b.selection} ({b.status.value})": b.id
-                for b in settled
-            }
-            choice = st.selectbox("Bet to delete", list(options), key="del_settled_choice")
-            if st.button("Delete this entry", key="del_settled_btn"):
-                actions.delete_bet(settings, options[choice])
-                st.rerun()
-    elif not pending:
-        st.info(
-            "No bets logged yet. Use **Log a new bet** above to start tracking.",
-            icon=":material/receipt_long:",
-        )
-
-
 def _require_password() -> None:
     """Gate the whole app behind SOCCER_DASHBOARD_PASSWORD when it is set.
 
@@ -2873,8 +2387,8 @@ def main() -> None:
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        upcoming_tab, accumulator_tab, match_tab, season_tab, card_tab = st.tabs(
-            ["Upcoming", "Accumulator", "Matchup", "Season", "Scorecard"]
+        upcoming_tab, match_tab, season_tab, card_tab = st.tabs(
+            ["Upcoming", "Matchup", "Season", "Scorecard"]
         )
 
         with upcoming_tab:
@@ -2885,9 +2399,6 @@ def main() -> None:
                 5000,
             )
             _render_fixtures(upcoming_fixtures)
-
-        with accumulator_tab:
-            _render_accumulator_calculator(upcoming_fixtures)
 
         with match_tab:
             if not available:
@@ -2901,16 +2412,13 @@ def main() -> None:
                 )
                 st.caption("Odds and a likely score for any upcoming matchup this season.")
                 teams = forecast_teams(settings.analytics_db, season, division)
-                fc = st.columns([2, 2, 1])
+                fc = st.columns(2)
                 home = fc[0].selectbox("Home", teams, index=0)
                 away = fc[1].selectbox("Away", teams, index=min(1, len(teams) - 1))
-                mle = fc[2].toggle("Dixon-Coles instead", value=False)
                 if home == away:
                     st.info("Pick two different teams.")
                 else:
-                    slate = forecast_slate(
-                        settings.analytics_db, season, division, home, away, mle=mle
-                    )
+                    slate = forecast_slate(settings.analytics_db, season, division, home, away)
                     if slate is None:
                         st.info("Could not forecast that matchup.")
                     else:
@@ -2925,7 +2433,6 @@ def main() -> None:
                                 division,
                                 home,
                                 away,
-                                mle=mle,
                             )
                             if settings.live_db.exists()
                             else None
@@ -2940,9 +2447,6 @@ def main() -> None:
                         if exp is not None:
                             _render_forecast_explanation(exp)
                             st.divider()
-                        _render_ev_calculator(slate, division_name(division))
-                        st.divider()
-                        _render_combo_calculator(slate, division_name(division))
                         report = _cached_market_edge(
                             str(settings.analytics_db),
                             _db_version(settings.analytics_db),
@@ -3038,26 +2542,6 @@ def main() -> None:
                 else:
                     _render_report_card(fc_report, by_league[league])
 
-                if by_league[league] == "E0":
-                    st.divider()
-                    legs = st.slider("Legs per accumulator", 2, 4, 2, key="parlay_legs")
-                    parlay_report = _cached_accumulator_backtest(
-                        str(settings.analytics_db),
-                        _db_version(settings.analytics_db),
-                        by_league[league],
-                        legs,
-                    )
-                    if parlay_report is None:
-                        st.info(
-                            "Not enough odds-bearing Premier League history to backtest a "
-                            f"{legs}-leg accumulator yet."
-                        )
-                    else:
-                        _render_parlay_backtest(parlay_report)
-        return
-
-    if page == "Bet Ledger":
-        _render_bet_ledger(settings)
         return
 
     if page == "Analytics":

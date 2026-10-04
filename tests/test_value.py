@@ -16,8 +16,6 @@ import pytest
 from soccer.models.value import (
     expected_value,
     implied_probabilities,
-    kelly_fraction,
-    overround,
     value_backtest,
 )
 
@@ -26,10 +24,6 @@ class TestImplied:
     def test_devig_sums_to_one(self) -> None:
         p = implied_probabilities(2.0, 3.5, 4.0)
         assert sum(p) == pytest.approx(1.0)
-
-    def test_overround_is_margin_above_one(self) -> None:
-        # A fair 2.0/2.0 two-way priced with margin: 1/1.9+1/1.9 = 1.0526...
-        assert overround(1.9, 1.9, 1e12) == pytest.approx(1 / 1.9 + 1 / 1.9 - 1.0)
 
     def test_shorter_price_implies_higher_probability(self) -> None:
         home, draw, away = implied_probabilities(1.5, 4.0, 7.0)
@@ -40,14 +34,6 @@ class TestEvAndKelly:
     def test_expected_value_sign(self) -> None:
         assert expected_value(0.6, 2.0) == pytest.approx(0.2)  # 0.6*2-1
         assert expected_value(0.4, 2.0) == pytest.approx(-0.2)
-
-    def test_kelly_zero_on_no_edge(self) -> None:
-        assert kelly_fraction(0.5, 2.0) == pytest.approx(0.0)  # fair coin, even money
-        assert kelly_fraction(0.4, 2.0) == 0.0  # negative edge floored at 0
-
-    def test_kelly_positive_on_edge(self) -> None:
-        # prob 0.6 at even money: f = (0.6*1 - 0.4)/1 = 0.2
-        assert kelly_fraction(0.6, 2.0) == pytest.approx(0.2)
 
 
 @dataclass(frozen=True)

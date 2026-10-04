@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
-from soccer.domain.bets import BetLedger, BetStatus
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
@@ -512,95 +511,6 @@ def update_availability(settings: Settings) -> str:
     )
 
 
-# TheSportsDB's own id for the English Premier League -- confirmed live via
-# eventsnextleague.php?id=4328 while building this feature (see plan/memory).
-_PL_THESPORTSDB_LEAGUE_ID = "4328"
-# How far either side of kickoff to bother checking for a confirmed lineup. Official
-# lineups are typically announced under two hours out; checking earlier or later than
-# this window is a harmless no-op (the endpoint just returns nothing), not an error.
-_LINEUP_LEAD_WINDOW = timedelta(hours=6)
-_LINEUP_TRAIL_WINDOW = timedelta(hours=2)
-
-
-def _parse_event_kickoff(event: dict[str, Any]) -> datetime | None:
-    """TheSportsDB's `strTimestamp` ('YYYY-MM-DDTHH:MM:SS', naive) as an aware UTC datetime."""
-    raw = event.get("strTimestamp")
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(raw))
-    except ValueError:
-        return None
-    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-
-
-def update_confirmed_lineups(settings: Settings) -> str:
-    """Pull today's confirmed starting XI + substitutes for imminent Premier League fixtures.
-
-    A same-day supplement to `update_availability`'s season-long FPL snapshot -- see
-    `domain.availability.confirmed_squad_gap`. TheSportsDB's free lineup endpoint returns
-    nothing until lineups are actually announced, so this is a harmless no-op far from
-    kickoff, not an error; no enable-flag needed (unlike FPL, TheSportsDB's live surface is
-    already used unconditionally elsewhere in this app).
-    """
-    settings.ensure_dirs()
-    raw = RawStore(settings.raw_dir)
-    with AnalyticsDB(settings.analytics_db) as adb:
-        registry = _canonical_registry(adb)
-
-    async def run() -> list[tuple[str, list[str]]]:
-        from soccer.dashboard.data import resolve_canonical_name
-        from soccer.sources.thesportsdb import TheSportsDB
-
-        now = datetime.now(UTC)
-        found: list[tuple[str, list[str]]] = []
-        async with TheSportsDB(raw) as sdb:
-            events = await sdb.next_league_events(_PL_THESPORTSDB_LEAGUE_ID)
-            for event in events:
-                kickoff = _parse_event_kickoff(event)
-                if kickoff is None or not (
-                    now - _LINEUP_TRAIL_WINDOW <= kickoff <= now + _LINEUP_LEAD_WINDOW
-                ):
-                    continue
-                event_id = event.get("idEvent")
-                if not event_id:
-                    continue
-                entries = await sdb.lookup_lineup(str(event_id))
-                by_team: dict[str, list[str]] = {}
-                for entry in entries:
-                    by_team.setdefault(entry.team, []).append(entry.player)
-                for team_name, players in by_team.items():
-                    _display, norm = resolve_canonical_name(team_name, registry)
-                    found.append((norm, players))
-        return found
-
-    results = asyncio.run(run())
-    if not results:
-        return (
-            "No confirmed lineups yet -- none of the upcoming Premier League fixtures "
-            "are close enough to kickoff."
-        )
-
-    from soccer.domain.availability import ConfirmedLineupStore
-
-    fetched_at = datetime.now(UTC).isoformat()
-    with LiveDB(settings.live_db) as db:
-        store = ConfirmedLineupStore(db)
-        for team_norm, players in results:
-            store.replace_team(team_norm, players, fetched_at)
-    names = ", ".join(sorted({team_norm for team_norm, _ in results}))
-    return f"Loaded confirmed lineups for: {names}."
-
-
-def remove_league(settings: Settings, division: str) -> str:
-    """Delete a league's results so it no longer appears in the dashboard."""
-    if not settings.analytics_db.exists():
-        return "Nothing to remove."
-    with AnalyticsDB(settings.analytics_db) as adb:
-        removed = adb.delete_division(division)
-    return f"Removed {division_name(division)} ({removed} matches)."
-
-
 def starter_setup(
     settings: Settings, *, on_progress: Callable[[int, int], None] | None = None
 ) -> str:
@@ -691,45 +601,3 @@ def load_all_events(
         if on_progress:
             on_progress(i, len(packs))
     return f"Loaded {len(packs)} player datasets — the marquee names are ready."
-
-
-def add_bet(
-    settings: Settings,
-    *,
-    competition: str,
-    home: str,
-    away: str,
-    match_date: str,
-    selection: str,
-    odds: float,
-    stake: float,
-    model_probability: float | None = None,
-    notes: str | None = None,
-) -> int:
-    """Log a bet to the personal ledger, pending until settled."""
-    settings.ensure_dirs()
-    with LiveDB(settings.live_db) as db:
-        return BetLedger(db).add(
-            competition=competition,
-            home=home,
-            away=away,
-            match_date=match_date,
-            selection=selection,
-            odds=odds,
-            stake=stake,
-            model_probability=model_probability,
-            notes=notes,
-        )
-
-
-def settle_bet(
-    settings: Settings, bet_id: int, status: BetStatus, *, payout: float | None = None
-) -> None:
-    """Record a logged bet's outcome. See `BetLedger.settle` for the default payout rules."""
-    with LiveDB(settings.live_db) as db:
-        BetLedger(db).settle(bet_id, status, payout=payout)
-
-
-def delete_bet(settings: Settings, bet_id: int) -> None:
-    with LiveDB(settings.live_db) as db:
-        BetLedger(db).delete(bet_id)

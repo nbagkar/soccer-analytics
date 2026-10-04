@@ -36,8 +36,8 @@ Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb eve
 analytics (real xG, shot data), and an MCP server that makes it all queryable in natural
 language. The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
 forecasts**, a **Season** oracle (Monte Carlo title/top-4/relegation odds), league
-Analytics, **Trends** (form), **Records** (streaks), a full **Forecast** market slate with
-a value/EV calculator, a **Match centre** (xG timeline, shot map, shot log), and a
+Analytics, **Trends** (form), **Records** (streaks), a full **Forecast** market slate, a
+**Match centre** (xG timeline, shot map, shot log), and a
 **Players** view — a full-event leaderboard filterable by competition and season, with
 per-player **percentile scouting fingerprints**. Forecasts fit on a rolling multi-season
 window and re-fit as results land. **353 passing tests.**
@@ -66,8 +66,8 @@ positive-EV picks at the closing 1X2 odds already in the football-data.co.uk fil
 (Pinnacle's close preferred). On 2024/25 Premier League the model beats the base-rate
 baseline but **loses to the closing line on log loss** (≈0.99 vs ≈0.97), and flat-stake
 yields swing either side of zero with the model and warmup — i.e. noise, not edge. The
-dashboard turns the same primitives into a what-if calculator: enter the odds you can
-actually get and see the model's edge, EV, and Kelly stake.
+dashboard's Scorecard shows the same comparison; it deliberately has no betting
+calculators or bet tracker, since the model has no demonstrated edge to bet on.
 
 ## Quickstart
 

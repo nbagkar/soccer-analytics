@@ -776,9 +776,10 @@ class TestAvailabilityAdjustedSlate:
         TestAnalyticsSnapshot()._seed_results(analytics)
         self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)  # all available
         # A fully fit pair is identical to the plain forecast, so there is nothing to compare.
-        assert availability_adjusted_slate(
-            analytics, live, "2526", "E0", "Arsenal", "Brentford"
-        ) is None
+        assert (
+            availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
+            is None
+        )
 
     def test_none_outside_the_premier_league(self, tmp_path) -> None:
         from soccer.dashboard.data import availability_adjusted_slate
@@ -788,9 +789,10 @@ class TestAvailabilityAdjustedSlate:
         TestAnalyticsSnapshot()._seed_results(analytics)
         self._seed_availability(live, "Brentford", self._BRENTFORD_FIT)
         # The availability feed is PL-only, so a non-E0 division never gets the nudge.
-        assert availability_adjusted_slate(
-            analytics, live, "2526", "SP1", "Arsenal", "Brentford"
-        ) is None
+        assert (
+            availability_adjusted_slate(analytics, live, "2526", "SP1", "Arsenal", "Brentford")
+            is None
+        )
 
     def test_matches_the_plain_slate_on_the_base_numbers(self, tmp_path) -> None:
         from soccer.dashboard.data import availability_adjusted_slate, forecast_slate
@@ -809,74 +811,6 @@ class TestAvailabilityAdjustedSlate:
         assert adj.raw.home_expected == pytest.approx(plain.home_expected)
         assert adj.raw.away_expected == pytest.approx(plain.away_expected)
 
-    def test_confirmed_lineup_catches_an_absence_fpl_missed(self, tmp_path) -> None:
-        from soccer.dashboard.data import availability_adjusted_slate
-        from soccer.domain.availability import (
-            AvailabilityStore,
-            ConfirmedLineupStore,
-            PlayerAvailability,
-            status_label,
-        )
-        from soccer.domain.names import normalize_name
-
-        analytics = tmp_path / "analytics.duckdb"
-        live = tmp_path / "live.sqlite"
-        TestAnalyticsSnapshot()._seed_results(analytics)
-
-        # FPL's season-long snapshot shows the whole Brentford squad "available" (it hasn't
-        # caught a late change), but season-to-date minutes mark Mbeumo a clear regular.
-        minutes_by_player = {
-            "Flekken": 2700, "Collins": 2600, "Pinnock": 2500,
-            "Janelt": 2400, "Norgaard": 2300, "Mbeumo": 2700, "Wissa": 2600,
-        }
-        squad = [
-            PlayerAvailability(
-                source="fpl",
-                team="Brentford",
-                team_norm=normalize_name("Brentford"),
-                player=name,
-                full_name=None,
-                status="a",
-                availability=status_label("a"),
-                chance=None,
-                news=None,
-                news_added=None,
-                fetched_at="2026-08-04T00:00:00+00:00",
-                element_type=4 if name in ("Mbeumo", "Wissa") else 2,
-                price=70,
-                minutes=minutes,
-            )
-            for name, minutes in minutes_by_player.items()
-        ]
-        with LiveDB(live) as db:
-            AvailabilityStore(db).replace_source("fpl", squad)
-            # Today's confirmed matchday squad -- announced close to kickoff -- doesn't
-            # include Mbeumo at all (a late, undisclosed absence FPL hasn't reflected yet).
-            confirmed = [p.player for p in squad if p.player != "Mbeumo"]
-            ConfirmedLineupStore(db).replace_team(
-                normalize_name("Brentford"), confirmed, "2026-08-04T12:00:00+00:00"
-            )
-
-        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
-        assert adj is not None
-        assert adj.confirmed_lineup_used
-        assert adj.away_adj.is_material  # FPL alone would have said "nobody flagged"
-        assert "Mbeumo" in adj.away_adj.missing
-
-    def test_no_confirmed_lineup_cached_falls_back_to_fpl_only(self, tmp_path) -> None:
-        from soccer.dashboard.data import availability_adjusted_slate
-
-        analytics = tmp_path / "analytics.duckdb"
-        live = tmp_path / "live.sqlite"
-        TestAnalyticsSnapshot()._seed_results(analytics)
-        squad = [
-            (n, "i" if n == "Mbeumo" else s, e, p, c) for (n, s, e, p, c) in self._BRENTFORD_FIT
-        ]
-        self._seed_availability(live, "Brentford", squad)  # no ConfirmedLineupStore data at all
-        adj = availability_adjusted_slate(analytics, live, "2526", "E0", "Arsenal", "Brentford")
-        assert adj is not None
-        assert not adj.confirmed_lineup_used
-
 
 class TestUnderlyingTable:
     def _seed_with_shots(self, path):
@@ -888,13 +822,29 @@ class TestUnderlyingTable:
 
         def mr(h, a, hg, ag, hst, ast, day):
             return MatchResult(
-                season="2526", division="E0", match_date=date(2026, 1, day),
-                home=h, away=a, home_norm=normalize_name(h), away_norm=normalize_name(a),
-                fthg=hg, ftag=ag, ftr="H" if hg > ag else "A" if ag > hg else "D",
-                hthg=None, htag=None, home_shots=None, away_shots=None,
-                home_shots_target=hst, away_shots_target=ast, home_corners=None,
-                away_corners=None, home_yellows=None, away_yellows=None, home_reds=None,
-                away_reds=None, referee=None,
+                season="2526",
+                division="E0",
+                match_date=date(2026, 1, day),
+                home=h,
+                away=a,
+                home_norm=normalize_name(h),
+                away_norm=normalize_name(a),
+                fthg=hg,
+                ftag=ag,
+                ftr="H" if hg > ag else "A" if ag > hg else "D",
+                hthg=None,
+                htag=None,
+                home_shots=None,
+                away_shots=None,
+                home_shots_target=hst,
+                away_shots_target=ast,
+                home_corners=None,
+                away_corners=None,
+                home_yellows=None,
+                away_yellows=None,
+                home_reds=None,
+                away_reds=None,
+                referee=None,
             )
 
         # A dominates chances (SoT 10/9/8) but converts poorly; B barely creates.
@@ -1307,13 +1257,33 @@ class TestPlayerSimilarity:
             adb.load_player_stats(
                 [
                     PlayerMatchStats(
-                        match_id=1, player="Solo", team="Club", position="Striker",
-                        minutes=900, passes=0, passes_completed=0, key_passes=0,
-                        assists=0, xa=0.0, progressive_passes=0, carries=0,
-                        progressive_carries=0, dribbles=0, dribbles_completed=0,
-                        tackles=0, tackles_won=0, interceptions=0, blocks=0,
-                        clearances=0, ball_recoveries=0, pressures=0, fouls=0,
-                        fouled=0, yellow_cards=0, red_cards=0, touches=0,
+                        match_id=1,
+                        player="Solo",
+                        team="Club",
+                        position="Striker",
+                        minutes=900,
+                        passes=0,
+                        passes_completed=0,
+                        key_passes=0,
+                        assists=0,
+                        xa=0.0,
+                        progressive_passes=0,
+                        carries=0,
+                        progressive_carries=0,
+                        dribbles=0,
+                        dribbles_completed=0,
+                        tackles=0,
+                        tackles_won=0,
+                        interceptions=0,
+                        blocks=0,
+                        clearances=0,
+                        ball_recoveries=0,
+                        pressures=0,
+                        fouls=0,
+                        fouled=0,
+                        yellow_cards=0,
+                        red_cards=0,
+                        touches=0,
                     )
                 ]
             )
@@ -1914,27 +1884,3 @@ class TestPreviousSeason:
 
         available = [("2526", "E0", 380), ("2425", "SP1", 380)]
         assert previous_season(available, "E0", "2526") is None
-
-
-class TestParseEventKickoff:
-    """The pure timestamp-parsing half of `update_confirmed_lineups`'s pre-kickoff window
-    check -- the network-fetch half isn't separately tested at the actions layer, matching
-    how `update_availability`'s live fetch also isn't (only its disabled-gate is, in
-    test_fpl.py); the adapter methods it calls are unit-tested in test_thesportsdb.py."""
-
-    def test_parses_a_real_timestamp_as_utc(self) -> None:
-        from soccer.dashboard.actions import _parse_event_kickoff
-
-        kickoff = _parse_event_kickoff({"strTimestamp": "2026-09-18T19:00:00"})
-        assert kickoff == datetime(2026, 9, 18, 19, 0, tzinfo=UTC)
-
-    def test_missing_timestamp_is_none(self) -> None:
-        from soccer.dashboard.actions import _parse_event_kickoff
-
-        assert _parse_event_kickoff({}) is None
-        assert _parse_event_kickoff({"strTimestamp": None}) is None
-
-    def test_malformed_timestamp_is_none_not_a_raise(self) -> None:
-        from soccer.dashboard.actions import _parse_event_kickoff
-
-        assert _parse_event_kickoff({"strTimestamp": "not-a-date"}) is None

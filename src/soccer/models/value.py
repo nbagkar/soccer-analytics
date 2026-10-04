@@ -10,9 +10,6 @@ money, and is the model even better calibrated than the vig-free market?
 The expected answer is humbling: the closing line is very hard to beat, so yields hover
 around the bookmaker margin and the market usually has the lower log loss. Surfacing that
 plainly is the point -- it stops the forecasts from being mistaken for a money printer.
-The same primitives (`implied_probabilities`, `expected_value`, `kelly_fraction`) power
-the dashboard's what-if calculator, where the user supplies the odds they can actually
-get.
 """
 
 from __future__ import annotations
@@ -38,22 +35,9 @@ def implied_probabilities(
     return (raw[0] / total, raw[1] / total, raw[2] / total)
 
 
-def overround(home_odds: float, draw_odds: float, away_odds: float) -> float:
-    """The bookmaker margin: how far the implied probabilities sum above 1 (e.g. 0.05)."""
-    return (1.0 / home_odds + 1.0 / draw_odds + 1.0 / away_odds) - 1.0
-
-
 def expected_value(prob: float, decimal_odds: float) -> float:
     """EV per 1 unit staked at these odds given the model probability: prob*odds - 1."""
     return prob * decimal_odds - 1.0
-
-
-def kelly_fraction(prob: float, decimal_odds: float) -> float:
-    """Kelly-optimal stake fraction of bankroll, floored at 0 (never bet a negative edge)."""
-    b = decimal_odds - 1.0
-    if b <= 0:
-        return 0.0
-    return max(0.0, (prob * b - (1.0 - prob)) / b)
 
 
 @dataclass(frozen=True)
