@@ -21,7 +21,12 @@ from soccer.domain.aliases import AliasStore, suggest_duplicates
 from soccer.domain.match_state import MatchStateStore
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.errors import SourceUnavailableError
-from soccer.sources.football_data_co_uk import FootballDataCoUk, division_name, season_label
+from soccer.sources.football_data_co_uk import (
+    FootballDataCoUk,
+    division_name,
+    season_label,
+    season_sort_key,
+)
 from soccer.sources.football_data_org import FootballDataOrg
 from soccer.sources.registry import SOURCES, Capability, SourceId, Trust, attributions, sources_for
 from soccer.sources.thesportsdb import ATTRIBUTION, LiveResult, TheSportsDB
@@ -523,7 +528,9 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
 
 @app.command("ingest-history")
 def ingest_history(
-    seasons: str = typer.Option("2526", help="Comma-separated seasons, e.g. 2526,2425."),
+    seasons: str | None = typer.Option(
+        None, help="Comma-separated seasons, e.g. 2627,2526 (default: the current season)."
+    ),
     divisions: str = typer.Option("E0", help="Comma-separated divisions, e.g. E0,E1,SP1."),
     new_leagues: str = typer.Option(
         "", help="Comma-separated 'new league' country codes, e.g. BRA,ARG,USA."
@@ -538,6 +545,10 @@ def ingest_history(
     """
     settings = get_settings()
     settings.ensure_dirs()
+    if not seasons:
+        from soccer.sources.football_data_co_uk import current_season_code
+
+        seasons = current_season_code(datetime.now(UTC).date())
     season_list = [s.strip() for s in seasons.split(",") if s.strip()]
     division_list = [d.strip() for d in divisions.split(",") if d.strip()]
     new_list = [c.strip().upper() for c in new_leagues.split(",") if c.strip()]
@@ -571,10 +582,13 @@ def ingest_history(
 
 @app.command()
 def table(
-    season: str = typer.Option("2526", help="Season, e.g. 2526 for 2025/26."),
+    season: str | None = typer.Option(
+        None, help="Season, e.g. 2526 for 2025/26 (default: latest loaded season)."
+    ),
     division: str = typer.Option("E0", help="Division, e.g. E0 for the Premier League."),
 ) -> None:
     """Show a league table computed from ingested historical results."""
+    season = _resolve_season(season, division)
     settings = get_settings()
     if not settings.analytics_db.exists():
         console.print(
@@ -622,11 +636,14 @@ def table(
 
 @app.command("power-rankings")
 def power_rankings(
-    season: str = typer.Option("2526", help="Season, e.g. 2526."),
+    season: str | None = typer.Option(
+        None, help="Season, e.g. 2526 (default: latest loaded season)."
+    ),
     division: str = typer.Option("E0", help="Division, e.g. E0."),
     top: int = typer.Option(0, help="Show only the top N (0 = all)."),
 ) -> None:
     """Elo power rankings computed from historical results."""
+    season = _resolve_season(season, division)
     from soccer.models.elo import power_ranking
 
     outcomes = _load_outcomes(season, division)
@@ -658,11 +675,14 @@ def power_rankings(
 def forecast(
     home: str = typer.Argument(..., help="Home team, e.g. Arsenal."),
     away: str = typer.Argument(..., help="Away team, e.g. Chelsea."),
-    season: str = typer.Option("2526", help="Season to fit the model on."),
+    season: str | None = typer.Option(
+        None, help="Season to fit the model on (default: latest loaded season)."
+    ),
     division: str = typer.Option("E0", help="Division to fit the model on."),
     mle: bool = typer.Option(False, "--mle", help="Use the Dixon-Coles MLE model."),
 ) -> None:
     """Forecast a match: outcome probabilities, expected goals, and likely scorelines."""
+    season = _resolve_season(season, division)
     from soccer.domain.names import normalize_name
     from soccer.models.dixon_coles import DixonColesModel
     from soccer.models.elo import EloConfig, compute_ratings, expected_score
@@ -714,7 +734,9 @@ def forecast(
 
 @app.command()
 def backtest(
-    season: str = typer.Option("2526", help="Season to backtest on."),
+    season: str | None = typer.Option(
+        None, help="Season to backtest on (default: latest complete season)."
+    ),
     division: str = typer.Option("E0", help="Division to backtest on."),
     min_history: int = typer.Option(60, help="Matches of warmup before the first forecast."),
     model: str = typer.Option("ratio", help="Forecast model: 'ratio' or 'dc' (Dixon-Coles MLE)."),
@@ -728,6 +750,7 @@ def backtest(
     ),
 ) -> None:
     """Walk-forward backtest of the forecast: log loss, Brier, and calibration."""
+    season = _resolve_season(season, division, complete=True)
     from soccer.models.backtest import backtest_dixon_coles, backtest_poisson
 
     outcomes = _load_outcomes(season, division)
@@ -807,7 +830,9 @@ def backtest(
 
 @app.command()
 def value(
-    season: str = typer.Option("2425", help="Season to evaluate."),
+    season: str | None = typer.Option(
+        None, help="Season to evaluate (default: latest complete season)."
+    ),
     division: str = typer.Option("E0", help="Division to evaluate."),
     model: str = typer.Option("dc", help="Forecast model: 'ratio' or 'dc' (Dixon-Coles MLE)."),
     edge: float = typer.Option(0.0, help="Minimum EV to place a bet (0 = any positive edge)."),
@@ -822,6 +847,7 @@ def value(
     whether the model's log loss beats the vig-free market's. There is no free source of
     odds for upcoming matches, so this is historical -- an honest edge test, not a tipster.
     """
+    season = _resolve_season(season, division, complete=True)
     from soccer.models.value import value_backtest
 
     settings = get_settings()
@@ -883,7 +909,9 @@ def value(
 
 @app.command()
 def simulate(
-    season: str = typer.Option("2526", help="Season to simulate."),
+    season: str | None = typer.Option(
+        None, help="Season to simulate (default: latest loaded season)."
+    ),
     division: str = typer.Option("E0", help="Division to simulate."),
     after: str | None = typer.Option(
         None,
@@ -895,6 +923,7 @@ def simulate(
     seed: int | None = typer.Option(None, help="Seed for reproducible runs."),
 ) -> None:
     """Monte Carlo league simulation: title, top-N and relegation probabilities."""
+    season = _resolve_season(season, division)
     from datetime import date as _date
 
     from soccer.models.poisson import fit_poisson
@@ -957,6 +986,35 @@ def _standings_from(played: list[ResultRow]) -> tuple[dict[str, int], dict[str, 
         goal_diff[o.home_norm] = goal_diff.get(o.home_norm, 0) + (o.fthg - o.ftag)
         goal_diff[o.away_norm] = goal_diff.get(o.away_norm, 0) + (o.ftag - o.fthg)
     return points, goal_diff
+
+
+def _resolve_season(season: str | None, division: str, *, complete: bool = False) -> str:
+    """An explicit season, else the division's latest loaded one -- never a hardcoded code.
+
+    Hardcoded defaults went stale every August (they still pointed at 2025/26 a month into
+    2026/27). `complete=True` picks the newest season that is essentially finished (at least
+    90% as many matches as the season before it), for evaluation commands: a few weeks into a new
+    season there is almost nothing past the walk-forward warmup to score. "Finished" is judged
+    against the previous season, not the fullest ever -- league sizes change (the Premier
+    League played 462 games a season with 22 clubs in the 1990s, 380 since).
+    """
+    if season:
+        return season
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print(
+            "[yellow]No analytics data yet.[/yellow] Run [bold]soccer ingest-history[/bold] first."
+        )
+        raise typer.Exit(code=1)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        counts = {s: n for s, d, n in adb.seasons_loaded() if d == division}
+    if not counts:
+        console.print(f"[yellow]No seasons loaded for {division}.[/yellow]")
+        raise typer.Exit(code=1)
+    ordered = sorted(counts, key=season_sort_key, reverse=True)
+    if complete and len(ordered) > 1 and counts[ordered[0]] < 0.9 * counts[ordered[1]]:
+        return ordered[1]  # the newest season is still in progress
+    return ordered[0]
 
 
 def _load_outcomes(season: str, division: str) -> list[ResultRow]:
@@ -1131,6 +1189,7 @@ def serve(
     from datetime import timedelta
 
     from soccer.ingest.scheduler import Job, JobResult, Scheduler
+
     settings = get_settings()
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
