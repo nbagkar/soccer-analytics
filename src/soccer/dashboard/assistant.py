@@ -199,44 +199,10 @@ _AMBIGUOUS_ALIASES = {
 # ("vs United", "is City") -- as opposed to a club-name word ("Sheffield United").
 _ALIAS_STOPWORDS = frozenset(
     {
-        "vs",
-        "v",
-        "versus",
-        "against",
-        "and",
-        "or",
-        "the",
-        "a",
-        "an",
-        "is",
-        "are",
-        "was",
-        "were",
-        "how",
-        "hows",
-        "will",
-        "for",
-        "about",
-        "of",
-        "to",
-        "beat",
-        "play",
-        "playing",
-        "between",
-        "with",
-        "predicted",
-        "score",
-        "on",
-        "at",
-        "this",
-        "that",
-        "do",
-        "does",
-        "did",
-        "who",
-        "whos",
-        "what",
-        "whats",
+        "vs", "v", "versus", "against", "and", "or", "the", "a", "an", "is", "are",
+        "was", "were", "how", "hows", "will", "for", "about", "of", "to", "beat",
+        "play", "playing", "between", "with", "predicted", "score", "on", "at",
+        "this", "that", "do", "does", "did", "who", "whos", "what", "whats",
     }
 )
 
@@ -664,10 +630,8 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         if live_db is not None and Path(live_db).exists()
         else None
     )
-    slate = (
-        adjusted.raw
-        if adjusted is not None
-        else forecast_slate(analytics_db, season, division, home, away)
+    slate = adjusted.raw if adjusted is not None else forecast_slate(
+        analytics_db, season, division, home, away
     )
     if slate is None:
         return None
