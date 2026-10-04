@@ -986,22 +986,6 @@ def _display_names(outcomes: list[ResultRow]) -> dict[str, str]:
     return names
 
 
-@app.command()
-def mcp() -> None:
-    """Run the MCP server (stdio), exposing the platform to LLM clients."""
-    from importlib.util import find_spec
-
-    if find_spec("mcp") is None:
-        console.print(
-            "[yellow]The MCP SDK is not installed.[/yellow] Install the extra:\n"
-            "  pip install -e '.[mcp]'"
-        )
-        raise typer.Exit(code=1)
-    from soccer.mcp.server import run
-
-    run()
-
-
 @app.command("ingest-events")
 def ingest_events(
     match: int = typer.Option(0, help="A single StatsBomb match_id."),

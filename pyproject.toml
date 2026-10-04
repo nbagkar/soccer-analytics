@@ -34,7 +34,6 @@ dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4", "pandas>=2.0"]
 # this extra therefore constrains numpy for the whole environment and may need an older
 # scipy; resolve when StatsBomb/SPADL work actually begins.
 analytics = ["socceraction>=1.5", "kloppy>=3.15", "numpy<2.0.0"]
-mcp = ["mcp>=1.0"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

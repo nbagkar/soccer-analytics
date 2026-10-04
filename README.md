@@ -32,9 +32,8 @@ Working end-to-end today: source adapters → immutable raw snapshots → canoni
 entity/match resolution with a source crosswalk → SQLite live state → curated aliases →
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
 league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match forecasting,
-Monte Carlo league simulations, walk-forward forecast backtesting, StatsBomb event
-analytics (real xG, shot data), and an MCP server that makes it all queryable in natural
-language. The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
+Monte Carlo league simulations, walk-forward forecast backtesting, and StatsBomb event
+analytics (real xG, shot data). The read-only Streamlit dashboard spans a Live Centre, upcoming **Fixtures with
 forecasts**, a **Season** oracle (Monte Carlo title/top-4/relegation odds), league
 Analytics, **Trends** (form), **Records** (streaks), a full **Forecast** market slate, a
 **Match centre** (xG timeline, shot map, shot log), and a
@@ -109,7 +108,6 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer serve` | Run ingestion unattended on a cadence (live, fixtures, current-season history auto-refresh, housekeeping) |
-| `soccer mcp` | Run the MCP server (stdio) — the platform as LLM tools + prompts |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |
 | `soccer aliases` | List curated aliases |
