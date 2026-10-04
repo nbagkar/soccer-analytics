@@ -1,0 +1,13 @@
+[Unit]
+Description=Run soccer serve --once a few times a day
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 18:00:00
+OnCalendar=*-*-* 00:00:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
