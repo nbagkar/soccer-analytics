@@ -1,0 +1,41 @@
+# Mistake-proofing: every push and PR must pass lint, formatting, strict typing and the full
+# test suite before it counts as done. Free on GitHub-hosted runners; no secrets needed --
+# tests never touch the network (sources are mocked) or the local data/ directory.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dashboard,dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Format
+        run: ruff format --check src tests
+
+      - name: Types
+        run: mypy src
+
+      - name: Tests
+        run: pytest -q
