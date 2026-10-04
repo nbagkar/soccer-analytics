@@ -1715,6 +1715,19 @@ class TestAppSmoke:
             # Switch the Players tab to the per-player profile view (percentile fingerprint).
             at.segmented_control[0].set_value("Player profile").run()
             assert not at.exception, f"Analysis players profile raised: {at.exception}"
+
+            # The walk above was logged to the local usage table: one event per page visit
+            # (not per rerun), and each assistant question tagged with the intent it hit.
+            with LiveDB(tmp_path / "live.sqlite") as db:
+                events = db.connection.execute(
+                    "SELECT kind, name FROM usage_event ORDER BY id"
+                ).fetchall()
+            pages = [e["name"] for e in events if e["kind"] == "page"]
+            asks = [e["name"] for e in events if e["kind"] == "ask"]
+            assert pages[0] == "Home"
+            assert {"Live Centre", "Assistant", "Predictor", "Analysis"} <= set(pages)
+            assert pages.count("Analysis") == 1  # the profile toggle rerun isn't a new visit
+            assert asks == ["standings", "team"]
         finally:
             config._settings = None
 

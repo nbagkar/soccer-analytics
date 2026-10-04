@@ -70,6 +70,8 @@ from soccer.dashboard.data import (
     underlying_table,
     upcoming_season_briefing,
 )
+from soccer.dashboard.nav import NAV
+from soccer.domain import usage
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.models.evaluation import (
     BlendPoint,
@@ -190,20 +192,24 @@ def _render_home(settings: Settings) -> None:
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
         if st.button("Refresh live scores", icon=":material/bolt:", width="stretch"):
+            usage.track(settings, usage.ACTION, "refresh_scores")
             with st.spinner("Fetching the latest scores…"):
                 st.toast(actions.refresh_scores(settings), icon="✅")
             _go("Home")
         if st.button("Update fixtures", icon=":material/event:", width="stretch"):
+            usage.track(settings, usage.ACTION, "update_fixtures")
             with st.spinner("Fetching upcoming fixtures…"):
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
             _cached_upcoming_season_briefing.clear()  # re-project on the new fixtures
             _go("Home")
         if st.button("Update squads", icon=":material/groups:", width="stretch"):
+            usage.track(settings, usage.ACTION, "update_squads")
             with st.spinner("Fetching club squads…"):
                 st.toast(actions.update_squads(settings), icon="✅")
             _go("Home")
         if st.button("Update injuries", icon=":material/personal_injury:", width="stretch"):
+            usage.track(settings, usage.ACTION, "update_availability")
             with st.spinner("Fetching team news…"):
                 st.toast(actions.update_availability(settings), icon="✅")
             _go("Home")
@@ -224,6 +230,7 @@ def _render_data_manager(settings: Settings) -> None:
     with st.expander("Add a league (results & forecasts)", icon=":material/add_circle:"):
         choice = st.selectbox("Which league?", list(actions.LEAGUE_CHOICES))
         if st.button("Download recent seasons", key="add_league"):
+            usage.track(settings, usage.ACTION, "add_league_history")
             with st.spinner(f"Downloading {choice}…"):
                 st.success(actions.add_league_history(settings, actions.LEAGUE_CHOICES[choice]))
         st.caption(
@@ -231,6 +238,7 @@ def _render_data_manager(settings: Settings) -> None:
             f"(~{actions.FULL_HISTORY_SEASONS} seasons). Richer tables, forecasts and records."
         )
         if st.button("Load full history (all leagues)", key="add_full_history"):
+            usage.track(settings, usage.ACTION, "load_full_history")
             bar = st.progress(0.0, "Starting…")
 
             def on_progress(d: int, t: int) -> None:
@@ -244,6 +252,7 @@ def _render_data_manager(settings: Settings) -> None:
             "head-to-head and records. Needs a free football-data.org token."
         )
         if st.button("Load Champions League", key="add_ucl"):
+            usage.track(settings, usage.ACTION, "load_champions_league")
             with st.spinner("Fetching Champions League results…"):
                 st.success(actions.load_champions_league(settings))
 
@@ -253,6 +262,7 @@ def _render_data_manager(settings: Settings) -> None:
             "required. Loading everything takes a few minutes."
         )
         if st.button("Load all player data", key="add_all_events"):
+            usage.track(settings, usage.ACTION, "load_all_events")
             bar = st.progress(0.0, "Starting…")
 
             def on_progress(d: int, t: int) -> None:
@@ -263,6 +273,7 @@ def _render_data_manager(settings: Settings) -> None:
             st.success(msg)
         pack = st.selectbox("Or a single dataset", list(actions.EVENT_PACKS))
         if st.button("Load this one", key="add_events"):
+            usage.track(settings, usage.ACTION, "load_event_pack")
             comp_id, season_id, _n = actions.EVENT_PACKS[pack]
             bar = st.progress(0.0, "Starting…")
 
@@ -344,6 +355,14 @@ def _render_assistant(settings: Settings) -> None:
                 st.session_state.get("_chat_context"),
             )
         st.session_state._chat_context = reply.context
+        # Question text only for unanswered ones -- that's the unmet demand worth reading.
+        intent = reply.intent or "unknown"
+        usage.track(
+            settings,
+            usage.ASK,
+            intent,
+            prompt if intent == usage.FALLBACK_INTENT else None,
+        )
         st.session_state.chat.append(
             {
                 "role": "assistant",
@@ -2153,27 +2172,11 @@ def _confidence_cell(p: float) -> str:
     return f"<b style='color:{color};font-variant-numeric:tabular-nums'>{p:.0%}</b>"
 
 
-# Per-page identity: a Material Symbol icon and a one-line description, for a consistent
-# header on every page and cleaner navigation.
-# Navigation: (routing key, sidebar label, icon, one-line description). The routing keys
-# stay stable so the page dispatch is untouched; only the plain-English labels and the
-# captions the user reads change. Ordered as a journey: start -> this season -> explore.
-_NAV = [
-    ("Home", "Home", ":material/home:", "Set up and quick actions"),
-    ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
-    ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
-    ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
-    ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
-    ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
-    ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
-    ("Analysis", "Analysis", ":material/analytics:", "Match xG and player scouting"),
-    ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
-]
-_NAV_LABELS = [label for _k, label, _i, _c in _NAV]
-_NAV_CAPTIONS = [caption for _k, _l, _i, caption in _NAV]
-_KEY_BY_LABEL = {label: key for key, label, _i, _c in _NAV}
-_LABEL_BY_KEY = {key: label for key, label, _i, _c in _NAV}
-_HEADER = {key: (icon, label, caption) for key, label, icon, caption in _NAV}
+_NAV_LABELS = [label for _k, label, _i, _c in NAV]
+_NAV_CAPTIONS = [caption for _k, _l, _i, caption in NAV]
+_KEY_BY_LABEL = {label: key for key, label, _i, _c in NAV}
+_LABEL_BY_KEY = {key: label for key, label, _i, _c in NAV}
+_HEADER = {key: (icon, label, caption) for key, label, icon, caption in NAV}
 
 
 def _page_header(page: str) -> None:
@@ -2366,6 +2369,10 @@ def main() -> None:
             key="nav",
         )
     page = _KEY_BY_LABEL[selected]
+    # One event per visit, not per rerun -- every widget click reruns the whole script.
+    if st.session_state.get("_tracked_page") != page:
+        st.session_state._tracked_page = page
+        usage.track(settings, usage.PAGE, page)
 
     _page_header(page)
 

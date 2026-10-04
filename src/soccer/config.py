@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     """Off by default: Premier League terms bar 'creating a database'. Enabling this
     is a decision the operator makes knowingly. See registry caveats."""
 
+    # --- Usage tracking --------------------------------------------------
+    usage_tracking: bool = True
+    """Log page views, actions and assistant intents to the local live DB (see
+    domain/usage.py). Local only -- nothing is sent anywhere. Set false to disable."""
+
     # --- Politeness --------------------------------------------------------
     # Deliberately below each provider's published ceiling. football-data.org's real
     # limit is 10/min; we budget 8 to leave headroom for retries without tripping it.

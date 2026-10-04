@@ -1300,5 +1300,78 @@ def players(
     console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
 
 
+# Below this many days of history, "never used" means "not used yet", not "unwanted".
+_USAGE_MIN_DAYS = 14
+
+
+@app.command()
+def usage(
+    days: int = typer.Option(30, min=1, help="Look-back window in days."),
+    questions: int = typer.Option(15, min=0, help="Unanswered questions to list."),
+) -> None:
+    """What actually gets used: pages, data actions and assistant intents, from the local
+    usage log -- plus what never does, and the questions the assistant couldn't answer."""
+    from soccer.dashboard.assistant import intent_names
+    from soccer.dashboard.nav import NAV
+    from soccer.domain.usage import ACTION, ASK, PAGE, UsageCount, UsageLog
+
+    settings = get_settings()
+    if not settings.usage_tracking:
+        console.print("[yellow]Usage tracking is off[/yellow] (SOCCER_USAGE_TRACKING=false).")
+    if not settings.live_db.exists():
+        console.print("[yellow]No usage recorded yet.[/yellow] Open the dashboard to start.")
+        raise typer.Exit(code=1)
+
+    now = datetime.now(UTC)
+    with LiveDB(settings.live_db) as db:
+        summary = UsageLog(db).summary(now - timedelta(days=days))
+
+    if summary.tracking_since is None:
+        console.print("[yellow]No usage recorded yet.[/yellow] Open the dashboard to start.")
+        return
+    history_days = (now - summary.tracking_since).days
+    console.print(
+        f"Usage over the last [bold]{days}[/bold] days "
+        f"[dim](tracking since {summary.tracking_since:%Y-%m-%d}, {history_days} days ago)[/dim]"
+    )
+    if history_days < _USAGE_MIN_DAYS:
+        console.print(
+            f"[yellow]Only {history_days} days of history[/yellow] -- too early to call "
+            "anything unused. Treat the 'never used' lists as provisional."
+        )
+
+    def ago(when: datetime) -> str:
+        d = (now - when).days
+        return "today" if d == 0 else f"{d}d ago"
+
+    def show(title: str, unit: str, rows: list[UsageCount], label: dict[str, str]) -> None:
+        table = Table(title=title, title_justify="left", header_style="bold")
+        table.add_column("Name")
+        table.add_column(unit, justify="right")
+        table.add_column("Last used")
+        for c in rows:
+            table.add_row(label.get(c.name, c.name), str(c.count), ago(c.last_at))
+        console.print(table if rows else f"[bold]{title}[/bold]  [dim]nothing yet[/dim]")
+
+    page_labels = {key: lbl for key, lbl, _i, _c in NAV}
+    show("Pages", "Visits", summary.for_kind(PAGE), page_labels)
+    unused_pages = summary.unused(PAGE, page_labels)
+    if unused_pages:
+        names = ", ".join(page_labels[k] for k in unused_pages)
+        console.print(f"[red]Never visited:[/red] {names}")
+
+    show("Data actions", "Runs", summary.for_kind(ACTION), {})
+
+    show("Assistant questions by intent", "Asked", summary.for_kind(ASK), {})
+    unused_intents = summary.unused(ASK, [n for n in intent_names() if n != "fallback"])
+    if unused_intents:
+        console.print(f"[red]Never asked:[/red] {', '.join(unused_intents)}")
+
+    if questions and summary.unanswered:
+        console.print("[bold]Questions the assistant couldn't answer[/bold] (newest first)")
+        for when, text in summary.unanswered[:questions]:
+            console.print(f"  [dim]{when:%Y-%m-%d}[/dim]  {text}")
+
+
 if __name__ == "__main__":
     app()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,9 @@ class Reply:
     render it and it survives session-state round-trips."""
     context: ConversationContext | None = None
     """The conversation state after this turn, for the page to feed into the next question."""
+    intent: str | None = None
+    """Which intent answered ("forecast", "standings", ..., or "fallback") -- for the local
+    usage log (domain/usage.py), so unused intents and unmet questions are visible."""
 
 
 # Plain-language league names/nicknames -> football-data.co.uk division codes (results
@@ -240,11 +244,14 @@ def answer(
     """
     q = _norm(question)
     if not q:
-        return _help()
+        reply = _help()
+        reply.intent = "help"
+        return reply
     if not Path(analytics_db).exists():
         return Reply(
             "I don't have any data loaded yet. Head to the **Home** page to download "
-            "some — no terminal needed."
+            "some — no terminal needed.",
+            intent="no_data",
         )
     q = _augment_with_context(q, context)
     reply = _route(q, analytics_db, live_db)
@@ -252,9 +259,9 @@ def answer(
     return reply
 
 
-def _route(q: str, analytics_db: Path, live_db: Path | None) -> Reply:
-    """Try each intent in priority order; the first that claims the question answers it."""
-    for handler in (
+def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None], ...]:
+    """Every intent handler, in routing priority order."""
+    return (
         _intent_help,
         _intent_compare,
         _intent_league_compare,
@@ -279,11 +286,24 @@ def _route(q: str, analytics_db: Path, live_db: Path | None) -> Reply:
         _intent_standings,
         _intent_fixtures,
         _intent_team,
-    ):
+    )
+
+
+def intent_names() -> list[str]:
+    """Every intent `Reply.intent` can carry for an answered question, plus the fallback."""
+    return [h.__name__.removeprefix("_intent_") for h in _intent_handlers()] + ["fallback"]
+
+
+def _route(q: str, analytics_db: Path, live_db: Path | None) -> Reply:
+    """Try each intent in priority order; the first that claims the question answers it."""
+    for handler in _intent_handlers():
         reply = handler(q, analytics_db, live_db)
         if reply is not None:
+            reply.intent = handler.__name__.removeprefix("_intent_")
             return reply
-    return _fallback(q, analytics_db)
+    reply = _fallback(q, analytics_db)
+    reply.intent = "fallback"
+    return reply
 
 
 # --- conversation context ----------------------------------------------------

@@ -59,6 +59,11 @@ player-data pack), and a built-in **Assistant** answers plain-English questions
 ("who's top of the Premier League?", "Arsenal vs Chelsea?", "how many goals did Messi
 score?") entirely offline — rule-based, no LLM, nothing leaves the machine.
 
+The dashboard keeps a local usage log (page visits, data actions, which kind of question
+the assistant answered, and the text of questions it couldn't). `soccer usage` reports what
+gets used and what never does, so features are kept or cut on evidence. It never leaves the
+machine; set `SOCCER_USAGE_TRACKING=false` to turn it off.
+
 On betting value: there is no free source of odds for *upcoming* matches, so rather than
 fake a live edge, `soccer value` measures a real one against history — betting the model's
 positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
@@ -114,6 +119,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer rebuild` | Re-derive all state from raw snapshots (applies aliases retroactively) |
 | `soccer prune` | Delete old live-feed snapshots |
 | `soccer init` | Create data directories |
+| `soccer usage` | What actually gets used: pages, data actions, assistant intents, unanswered questions |
 
 ## Share the dashboard (free, public)
 
