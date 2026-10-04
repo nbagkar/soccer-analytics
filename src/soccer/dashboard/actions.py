@@ -15,11 +15,13 @@ from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
+from soccer.domain.freshness import FIXTURES, RESULTS, RefreshLog
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
     FootballDataCoUk,
     MatchResult,
+    current_season_code,
     division_name,
 )
 from soccer.storage.analytics_db import AnalyticsDB, SquadMember
@@ -191,7 +193,67 @@ def update_fixtures(settings: Settings) -> str:
                 )
         return str(summary)
 
-    return asyncio.run(run())
+    return _logged(settings, FIXTURES, lambda: asyncio.run(run()))
+
+
+def _logged(settings: Settings, job: str, run: Callable[[], str]) -> str:
+    """Run a refresh job and stamp `refresh_log` with its outcome, so staleness is visible.
+
+    A failure is recorded and re-raised -- the caller still sees the error, and the
+    dashboard can say "last refresh failed" rather than just "stale".
+    """
+    try:
+        message = run()
+    except Exception as exc:
+        with LiveDB(settings.live_db) as db:
+            RefreshLog(db).mark(job, ok=False, message=f"{type(exc).__name__}: {exc}")
+        raise
+    with LiveDB(settings.live_db) as db:
+        RefreshLog(db).mark(job, ok=True, message=message)
+    return message
+
+
+def refresh_results(settings: Settings) -> str:
+    """Refresh the current season for every already-loaded league.
+
+    Re-fetching the current-season file keeps it fresh as matches are played, and the
+    moment the *new* season's file appears (a 404 until then) it is loaded, so the
+    latest season and the forecasts advance on their own. Only leagues already in the
+    store are touched -- this keeps what you have current, it does not decide scope.
+    Shared by `soccer serve` and the dashboard (Home button + auto-refresh on open).
+    """
+    if not settings.analytics_db.exists():
+        return "skipped (no analytics DB yet)"
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+
+    def run() -> str:
+        with AnalyticsDB(settings.analytics_db) as adb:
+            divisions = sorted({d for _s, d, _n in adb.seasons_loaded()})
+        if not divisions:
+            return "skipped (no leagues loaded)"
+        season = current_season_code(datetime.now(UTC).date())
+        european = [d for d in divisions if d not in NEW_LEAGUE_CODES]
+        countries = [d for d in divisions if d in NEW_LEAGUE_CODES]
+        slices, total = 0, 0
+        with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
+            for division in european:
+                results = source.fetch_division(season, division)
+                if results:
+                    adb.load_results(results)
+                    slices += 1
+                    total += len(results)
+            for code in countries:
+                results = source.fetch_new_league(code)
+                if results:
+                    adb.load_results(results)
+                    slices += 1
+                    total += len(results)
+        if not slices:
+            return f"no new results (European season {season} not started, no in-season extras)"
+        return f"refreshed {total} results across {slices} league slice(s) (season {season})"
+
+    return _logged(settings, RESULTS, run)
 
 
 def _recent_seasons(n: int = 3) -> list[str]:

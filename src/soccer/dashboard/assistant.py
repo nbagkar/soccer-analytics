@@ -717,6 +717,10 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             news.append(result_line)
             news.append(xg_line)
             text += "\n" + "\n".join(news)
+    with AnalyticsDB(analytics_db) as adb:
+        through = adb.latest_result_date(division)
+    if through is not None:
+        text += f"\n\n_Based on results through {through.day} {through:%b %Y}._"
     return Reply(
         text,
         suggestions=[

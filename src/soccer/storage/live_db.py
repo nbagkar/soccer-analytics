@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS usage_event (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_kind_at ON usage_event (kind, at);
+
+-- When each refresh job last ran (domain/freshness.py), so the dashboard can tell "no new
+-- matches" apart from "nobody checked" and refresh -- or warn -- when data goes stale.
+-- One row per job, overwritten each run. Added in v10.
+CREATE TABLE IF NOT EXISTS refresh_log (
+    job     TEXT PRIMARY KEY,   -- results | fixtures
+    ran_at  TEXT NOT NULL,
+    ok      INTEGER NOT NULL,
+    message TEXT
+);
 """
 
 

@@ -17,6 +17,7 @@ from typing import Any, cast
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
+from soccer.domain.freshness import Freshness, freshness
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -172,6 +173,16 @@ def _latency_label(latency_seconds: int | None) -> tuple[str, bool]:
     if latency_seconds < 86_400:
         return f"delayed (~{latency_seconds // 3600}h)", False
     return f"delayed (~{latency_seconds // 86_400}d)", False
+
+
+def data_freshness(settings: Settings) -> Freshness:
+    """How current the results are and when they were last checked (see domain/freshness)."""
+    through = None
+    if settings.analytics_db.exists():
+        with AnalyticsDB(settings.analytics_db) as adb:
+            through = adb.latest_result_date()
+    with LiveDB(settings.live_db) as db:
+        return freshness(db, through)
 
 
 def health_snapshot(settings: Settings, db: LiveDB) -> HealthSnapshot:

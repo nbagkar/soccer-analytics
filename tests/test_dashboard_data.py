@@ -1618,8 +1618,10 @@ class TestAppSmoke:
 
         import soccer.config as config
 
-        # Point the app at a small throwaway database.
+        # Point the app at a small throwaway database, and keep it offline: auto-refresh
+        # would otherwise fetch live results the moment the seeded store looks stale.
         monkeypatch.setenv("SOCCER_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("SOCCER_AUTO_REFRESH", "false")
         config._settings = None
         try:
             build = LiveDB(tmp_path / "live.sqlite")

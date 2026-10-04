@@ -234,6 +234,7 @@ class TestRouting:
     def test_forecast_keeps_question_order(self, tmp_path) -> None:
         reply = answer("Chelsea vs Arsenal who wins?", _seed(tmp_path))
         assert reply.text.startswith("**Chelsea vs Arsenal")  # order preserved
+        assert "Based on results through" in reply.text  # says how current the data is
         assert reply.chart and reply.chart["kind"] == "result_bar"
         assert len(reply.chart["data"]) == 3  # home / draw / away
 

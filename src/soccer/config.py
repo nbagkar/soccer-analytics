@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     """Log page views, actions and assistant intents to the local live DB (see
     domain/usage.py). Local only -- nothing is sent anywhere. Set false to disable."""
 
+    auto_refresh: bool = True
+    """Refresh results and fixtures in the background when the dashboard opens on data more
+    than a day old (see dashboard/autorefresh.py). Needs network; set false to stay manual."""
+
     # --- Politeness --------------------------------------------------------
     # Deliberately below each provider's published ceiling. football-data.org's real
     # limit is 10/min; we budget 8 to leave headroom for retries without tripping it.

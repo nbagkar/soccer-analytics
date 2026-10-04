@@ -831,6 +831,16 @@ class AnalyticsDB:
         seasons = [r[0] for r in rows]
         return max(seasons, key=season_sort_key) if seasons else None
 
+    def latest_result_date(self, division: str | None = None) -> date | None:
+        """The newest match date loaded -- for one division, or across the whole store."""
+        if division is None:
+            row = self._con.execute("SELECT MAX(match_date) FROM results").fetchone()
+        else:
+            row = self._con.execute(
+                "SELECT MAX(match_date) FROM results WHERE division = ?", [division]
+            ).fetchone()
+        return row[0] if row else None
+
     def outcomes_for(self, season: str, division: str) -> list[ResultRow]:
         """Results for one (season, division) in date order, for the models to fit on."""
         rows = self._con.execute(

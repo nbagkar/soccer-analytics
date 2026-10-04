@@ -196,6 +196,11 @@ def _render_home(settings: Settings) -> None:
             with st.spinner("Fetching the latest scores…"):
                 st.toast(actions.refresh_scores(settings), icon="✅")
             _go("Home")
+        if st.button("Update results", icon=":material/scoreboard:", width="stretch"):
+            usage.track(settings, usage.ACTION, "refresh_results")
+            with st.spinner("Fetching the latest results for every loaded league…"):
+                st.toast(actions.refresh_results(settings), icon="✅")
+            _go("Home")
         if st.button("Update fixtures", icon=":material/event:", width="stretch"):
             usage.track(settings, usage.ACTION, "update_fixtures")
             with st.spinner("Fetching upcoming fixtures…"):
@@ -2179,6 +2184,34 @@ _LABEL_BY_KEY = {key: label for key, label, _i, _c in NAV}
 _HEADER = {key: (icon, label, caption) for key, label, icon, caption in NAV}
 
 
+def _render_freshness(settings: Settings, page: str) -> None:
+    """Make stale data impossible to miss: refresh it in the background when the store
+    opens more than a day old, and say so -- or warn plainly when it couldn't."""
+    from soccer.dashboard import autorefresh
+    from soccer.dashboard.data import data_freshness
+
+    if not settings.analytics_db.exists():
+        return
+    autorefresh.start_if_stale(settings)
+    fresh = data_freshness(settings)
+    d = fresh.results_through
+    through = f"{d.day} {d:%b %Y}" if d else "none loaded"
+    if autorefresh.is_running():
+        st.caption(
+            f":material/sync: Updating results and fixtures in the background (latest result: "
+            f"{through}) — new data shows up on your next click."
+        )
+    elif fresh.is_stale:
+        detail = f" The last attempt failed: {fresh.last_error}" if fresh.last_error else ""
+        st.warning(
+            f"Results last checked **{fresh.checked_label}** — latest result is **{through}**, "
+            f"so forecasts and tables may be behind. Use **Home → Update results**.{detail}",
+            icon=":material/schedule:",
+        )
+    elif page in ("Home", "Predictor"):
+        st.caption(f"Results through **{through}** · checked {fresh.checked_label}")
+
+
 def _page_header(page: str) -> None:
     icon, label, blurb = _HEADER.get(page, (":material/dashboard:", page, ""))
     st.header(f"{icon} {label}", anchor=False)
@@ -2375,6 +2408,7 @@ def main() -> None:
         usage.track(settings, usage.PAGE, page)
 
     _page_header(page)
+    _render_freshness(settings, page)
 
     if page == "Home":
         _render_home(settings)
@@ -2402,7 +2436,7 @@ def main() -> None:
             upcoming_fixtures = _cached_fixture_forecasts(
                 str(settings.live_db),
                 str(settings.analytics_db),
-                _db_version(settings.analytics_db),
+                max(_db_version(settings.analytics_db), _db_version(settings.live_db)),
                 5000,
             )
             _render_fixtures(upcoming_fixtures)
@@ -2484,7 +2518,7 @@ def main() -> None:
                 result = _cached_upcoming_season_briefing(
                     str(settings.live_db),
                     str(settings.analytics_db),
-                    _db_version(settings.analytics_db),
+                    max(_db_version(settings.analytics_db), _db_version(settings.live_db)),
                     division,
                 )
                 if result is not None:

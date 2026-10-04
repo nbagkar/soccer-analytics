@@ -1131,11 +1131,6 @@ def serve(
     from datetime import timedelta
 
     from soccer.ingest.scheduler import Job, JobResult, Scheduler
-    from soccer.sources.football_data_co_uk import (
-        NEW_LEAGUE_CODES,
-        current_season_code,
-    )
-
     settings = get_settings()
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
@@ -1173,40 +1168,11 @@ def serve(
         return asyncio.run(run_it())
 
     def history_job() -> str:
-        """Refresh the current season for every already-loaded league.
+        """Refresh the current season for every already-loaded league (see
+        `dashboard.actions.refresh_results`, shared with the dashboard's auto-refresh)."""
+        from soccer.dashboard.actions import refresh_results
 
-        Re-fetching the current-season file keeps it fresh as matches are played, and the
-        moment the *new* season's file appears (a 404 until then) it is loaded, so the
-        latest season and the forecasts advance on their own. Only leagues already in the
-        store are touched -- serve keeps what you have current, it does not decide scope.
-        """
-        if not settings.analytics_db.exists():
-            return "skipped (no analytics DB yet)"
-        with AnalyticsDB(settings.analytics_db) as adb:
-            divisions = sorted({d for _s, d, _n in adb.seasons_loaded()})
-        if not divisions:
-            return "skipped (no leagues loaded)"
-
-        season = current_season_code(datetime.now(UTC).date())
-        european = [d for d in divisions if d not in NEW_LEAGUE_CODES]
-        countries = [d for d in divisions if d in NEW_LEAGUE_CODES]
-        slices, total = 0, 0
-        with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
-            for division in european:
-                results = source.fetch_division(season, division)
-                if results:
-                    adb.load_results(results)
-                    slices += 1
-                    total += len(results)
-            for code in countries:
-                results = source.fetch_new_league(code)
-                if results:
-                    adb.load_results(results)
-                    slices += 1
-                    total += len(results)
-        if not slices:
-            return f"no new results (European season {season} not started, no in-season extras)"
-        return f"refreshed {total} results across {slices} league slice(s) (season {season})"
+        return refresh_results(settings)
 
     def prune_job() -> str:
         removed = raw.prune(SourceId.THESPORTSDB, "livescore", keep_days=7)

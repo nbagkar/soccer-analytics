@@ -64,6 +64,11 @@ the assistant answered, and the text of questions it couldn't). `soccer usage` r
 gets used and what never does, so features are kept or cut on evidence. It never leaves the
 machine; set `SOCCER_USAGE_TRACKING=false` to turn it off.
 
+Data stays current without the terminal: when the dashboard opens on results that haven't
+been checked in a day, it refreshes them (and stale fixtures) in the background, and every
+page warns plainly if data is stale or a refresh failed. **Home → Update results** does
+the same on demand; `soccer serve` uses the same refresh.
+
 On betting value: there is no free source of odds for *upcoming* matches, so rather than
 fake a live edge, `soccer value` measures a real one against history — betting the model's
 positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
