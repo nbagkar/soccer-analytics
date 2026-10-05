@@ -136,19 +136,8 @@ CREATE TABLE IF NOT EXISTS player_availability (
 CREATE INDEX IF NOT EXISTS idx_availability_team
     ON player_availability (team_norm);
 
--- Local usage log (domain/usage.py): which pages, actions and assistant intents are
--- actually used, so feature cuts rest on evidence rather than guesses. Never leaves the
--- machine. `detail` holds the question text only for assistant questions that fell
--- through to the fallback -- the unmet demand worth reading. Added in v9.
-CREATE TABLE IF NOT EXISTS usage_event (
-    id     INTEGER PRIMARY KEY,
-    at     TEXT NOT NULL,
-    kind   TEXT NOT NULL,       -- page | action | ask
-    name   TEXT NOT NULL,       -- page key, action name, or assistant intent
-    detail TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_kind_at ON usage_event (kind, at);
+-- (v9 added a usage_event table here; the usage log now lives in its own file -- see
+-- domain/usage.py -- and any copy left in an existing live.sqlite is unused.)
 
 -- When each refresh job last ran (domain/freshness.py), so the dashboard can tell "no new
 -- matches" apart from "nobody checked" and refresh -- or warn -- when data goes stale.

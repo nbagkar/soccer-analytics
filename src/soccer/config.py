@@ -74,6 +74,12 @@ class Settings(BaseSettings):
         return self.data_dir / "live.sqlite"
 
     @property
+    def usage_db(self) -> Path:
+        """The local usage log -- kept out of live.sqlite so that logging a page view never
+        changes the live store's mtime, which keys the dashboard's data caches."""
+        return self.data_dir / "usage.sqlite"
+
+    @property
     def analytics_db(self) -> Path:
         return self.data_dir / "analytics.duckdb"
 

@@ -1774,6 +1774,7 @@ class FixtureForecast:
     slate: MarketSlate | None  # None when no model covers the matchup
 
 
+@_cached_until_data_changes()
 def fixture_forecasts(
     live_db: Path, analytics_db: Path, *, limit: int = 60
 ) -> list[FixtureForecast]:

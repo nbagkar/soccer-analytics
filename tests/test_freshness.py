@@ -177,6 +177,7 @@ class TestRefreshResults:
 def fresh_autorefresh(monkeypatch):
     """Reset the module's process-wide state so tests don't leak into each other."""
     monkeypatch.setattr(autorefresh, "_last_attempt", None)
+    monkeypatch.setattr(autorefresh, "_warmed", True)  # no stray warm-up threads in tests
     autorefresh._running.clear()
     yield
     autorefresh._running.clear()
@@ -391,3 +392,34 @@ class TestLiveAutoRefresh:
         self._fake_scores(monkeypatch, calls)
         assert not autorefresh.refresh_live_if_stale(_settings(tmp_path, auto_refresh=False))
         assert calls == []
+
+
+class TestWarmCaches:
+    def test_warm_up_fills_the_cache_the_predictions_page_hits(self, tmp_path) -> None:
+        from soccer.dashboard.data import fixture_forecasts, forecast_report
+
+        settings = _settings(tmp_path)
+        seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea", "Fulham"])
+        LiveDB(settings.live_db).close()
+        autorefresh.warm_caches(settings)
+        # Same arguments as app._cached_fixture_forecasts / _cached_forecast_report use:
+        first = fixture_forecasts(settings.live_db, settings.analytics_db, limit=5000)
+        assert fixture_forecasts(settings.live_db, settings.analytics_db, limit=5000) is first
+        report = forecast_report(settings.analytics_db, "E0", n_seasons=6)
+        assert forecast_report(settings.analytics_db, "E0", n_seasons=6) is report
+
+    def test_fresh_start_warms_once_in_the_background(
+        self, tmp_path, monkeypatch, fresh_autorefresh
+    ) -> None:
+        settings = _settings(tmp_path)
+        seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea"])
+        with LiveDB(settings.live_db) as db:
+            RefreshLog(db).mark(RESULTS, ok=True, message="fresh")
+        warmed = threading.Event()
+        monkeypatch.setattr(autorefresh, "_warmed", False)
+        monkeypatch.setattr(autorefresh, "warm_caches", lambda _s: warmed.set())
+        assert not autorefresh.start_if_stale(settings)  # nothing stale to refresh...
+        assert warmed.wait(5)  # ...but the cold caches still get warmed
+        warmed.clear()
+        autorefresh.start_if_stale(settings)
+        assert not warmed.wait(0.3)  # only once per process

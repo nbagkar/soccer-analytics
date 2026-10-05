@@ -18,9 +18,9 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from soccer.config import Settings
-from soccer.storage.live_db import LiveDB
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,48 @@ class UsageSummary:
         return [name for name in known if name not in seen]
 
 
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS usage_event (
+    id     INTEGER PRIMARY KEY,
+    at     TEXT NOT NULL,
+    kind   TEXT NOT NULL,       -- page | action | ask
+    name   TEXT NOT NULL,       -- page key, action name, or assistant intent
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_kind_at ON usage_event (kind, at);
+"""
+
+
+class UsageDB:
+    """Its own small SQLite file (`Settings.usage_db`), separate from the live store.
+
+    It lived in live.sqlite at first, and every logged page view changed that file's mtime --
+    which keys the dashboard's fixture/season caches -- so ordinary browsing kept throwing
+    away 3-10s of cached forecasts. Data caches must move only when data does.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(path))
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        return self._conn
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> UsageDB:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
 class UsageLog:
-    def __init__(self, db: LiveDB) -> None:
+    def __init__(self, db: UsageDB) -> None:
         self._conn = db.connection
 
     def record(
@@ -103,8 +143,7 @@ def track(settings: Settings, kind: str, name: str, detail: str | None = None) -
     if not settings.usage_tracking:
         return
     try:
-        settings.ensure_dirs()
-        with LiveDB(settings.live_db) as db:
+        with UsageDB(settings.usage_db) as db:
             UsageLog(db).record(kind, name, detail)
     except (sqlite3.Error, OSError) as exc:
         logger.warning("usage tracking failed for %s/%s: %s", kind, name, exc)

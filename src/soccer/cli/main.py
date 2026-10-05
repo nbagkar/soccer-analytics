@@ -1385,17 +1385,17 @@ def usage(
     usage log -- plus what never does, and the questions the assistant couldn't answer."""
     from soccer.dashboard.assistant import intent_names
     from soccer.dashboard.nav import NAV
-    from soccer.domain.usage import ACTION, ASK, PAGE, UsageCount, UsageLog
+    from soccer.domain.usage import ACTION, ASK, PAGE, UsageCount, UsageDB, UsageLog
 
     settings = get_settings()
     if not settings.usage_tracking:
         console.print("[yellow]Usage tracking is off[/yellow] (SOCCER_USAGE_TRACKING=false).")
-    if not settings.live_db.exists():
+    if not settings.usage_db.exists():
         console.print("[yellow]No usage recorded yet.[/yellow] Open the dashboard to start.")
         raise typer.Exit(code=1)
 
     now = datetime.now(UTC)
-    with LiveDB(settings.live_db) as db:
+    with UsageDB(settings.usage_db) as db:
         summary = UsageLog(db).summary(now - timedelta(days=days))
 
     if summary.tracking_since is None:

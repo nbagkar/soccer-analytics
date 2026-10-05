@@ -32,6 +32,7 @@ RETRY_AFTER_SECONDS = 30 * 60
 # back-off can stretch a run to many minutes): stop advertising it, and let a new one start.
 GIVE_UP_AFTER_SECONDS = 20 * 60
 _last_attempt: float | None = None
+_warmed = False  # caches pre-computed once per process; refreshes re-warm on their own
 
 
 def is_running() -> bool:
@@ -76,6 +77,37 @@ def _run(settings: Settings) -> None:
                 logger.exception("auto-refresh %s failed", name)
     finally:
         _running.clear()
+    warm_caches(settings)
+
+
+def warm_caches(settings: Settings) -> None:
+    """Compute the Predictions page's heaviest reads before anyone opens it.
+
+    Its first visit after a refresh cost ~12s (fixture forecasts ~3s, the season projection
+    ~1s, the scorecard's walk-forward ~8s). These are memoized on the data's mtime
+    (data._cached_until_data_changes) and called here with exactly the arguments the page
+    uses, so the page's own first call is a cache hit. Premier League only -- the page's
+    default league -- to keep the background work bounded.
+    """
+    from soccer.dashboard.data import (
+        fixture_forecasts,
+        forecast_report,
+        upcoming_season_briefing,
+    )
+
+    live, analytics = settings.live_db, settings.analytics_db
+    if not (live.exists() and analytics.exists()):
+        return
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("fixtures", lambda: fixture_forecasts(live, analytics, limit=5000)),
+        ("season", lambda: upcoming_season_briefing(live, analytics, "E0")),
+        ("scorecard", lambda: forecast_report(analytics, "E0", n_seasons=6)),
+    ]
+    for name, step in steps:
+        try:
+            step()
+        except Exception:  # a cold cache is only slower, never wrong
+            logger.exception("cache warm-up %s failed", name)
 
 
 # Live scores are refreshed inline (one cheap request) when someone actually looks at them;
@@ -108,12 +140,20 @@ def start_if_stale(settings: Settings) -> bool:
     """Start a background refresh if any feed is stale and none is running. True if started."""
     if not settings.auto_refresh or not settings.analytics_db.exists():
         return False
-    global _last_attempt
+    global _last_attempt, _warmed
     with _lock:
         recent = (
             _last_attempt is not None and time.monotonic() - _last_attempt < RETRY_AFTER_SECONDS
         )
-        if is_running() or recent or not _jobs(settings):
+        if is_running() or recent:
+            return False
+        if not _jobs(settings):
+            # Nothing stale -- but a freshly started dashboard still has cold caches.
+            if not _warmed:
+                _warmed = True
+                threading.Thread(
+                    target=warm_caches, args=(settings,), name="soccer-warm", daemon=True
+                ).start()
             return False
         _running.set()
         _last_attempt = time.monotonic()

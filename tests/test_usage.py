@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from soccer.config import Settings
 from soccer.dashboard.assistant import answer, intent_names
-from soccer.domain.usage import ACTION, ASK, FALLBACK_INTENT, PAGE, UsageLog, track
+from soccer.domain.usage import ACTION, ASK, FALLBACK_INTENT, PAGE, UsageDB, UsageLog, track
 from soccer.storage.live_db import LiveDB
 from tests.test_dashboard_data import seed_results
 
@@ -17,7 +17,7 @@ NOW = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
 
 
 def _log(tmp_path) -> UsageLog:
-    return UsageLog(LiveDB(tmp_path / "live.sqlite"))
+    return UsageLog(UsageDB(tmp_path / "usage.sqlite"))
 
 
 class TestUsageLog:
@@ -62,22 +62,32 @@ class TestUsageLog:
 
 
 class TestTrack:
+    def test_logging_a_page_view_leaves_the_live_store_untouched(self, tmp_path) -> None:
+        # The live store's mtime keys the dashboard's data caches; a page view must not move
+        # it, or browsing throws away seconds of cached forecasts on every click.
+        settings = Settings(data_dir=tmp_path, _env_file=None)
+        LiveDB(settings.live_db).close()
+        before = settings.live_db.stat().st_mtime_ns
+        track(settings, PAGE, "Home")
+        assert settings.live_db.stat().st_mtime_ns == before
+        assert settings.usage_db.exists()
+
     def test_records_when_enabled(self, tmp_path) -> None:
         settings = Settings(data_dir=tmp_path, _env_file=None)
         track(settings, ACTION, "refresh_scores")
-        with LiveDB(settings.live_db) as db:
+        with UsageDB(settings.usage_db) as db:
             rows = db.connection.execute("SELECT kind, name FROM usage_event").fetchall()
         assert [(r["kind"], r["name"]) for r in rows] == [(ACTION, "refresh_scores")]
 
     def test_disabled_writes_nothing(self, tmp_path) -> None:
         settings = Settings(data_dir=tmp_path, usage_tracking=False, _env_file=None)
         track(settings, PAGE, "Home")
-        assert not settings.live_db.exists()
+        assert not settings.usage_db.exists()
 
     def test_storage_failure_never_raises(self, tmp_path) -> None:
-        # live_db path is a directory -> sqlite cannot open it; the page must not break.
+        # usage_db path is a directory -> sqlite cannot open it; the page must not break.
         settings = Settings(data_dir=tmp_path, _env_file=None)
-        settings.live_db.mkdir(parents=True)
+        settings.usage_db.mkdir(parents=True)
         track(settings, PAGE, "Home")
 
 

@@ -1758,8 +1758,10 @@ class TestAppSmoke:
 
             # The walk above was logged to the local usage table: one event per page visit
             # (not per rerun), and each assistant question tagged with the intent it hit.
-            with LiveDB(tmp_path / "live.sqlite") as db:
-                events = db.connection.execute(
+            from soccer.domain.usage import UsageDB
+
+            with UsageDB(tmp_path / "usage.sqlite") as udb:
+                events = udb.connection.execute(
                     "SELECT kind, name FROM usage_event ORDER BY id"
                 ).fetchall()
             pages = [e["name"] for e in events if e["kind"] == "page"]
