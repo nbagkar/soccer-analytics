@@ -39,7 +39,9 @@ analytics (real xG, shot data). The read-only Streamlit dashboard has:
 
 - **Ask a question** — the built-in assistant (below), at parity with the pages
 - **Live scores** — what's in play now, else the last week's results
-- **Predictions** — upcoming fixtures with forecasts; any **Matchup** (market slate,
+- **Predictions** — upcoming fixtures with forecasts (Champions League ties via an
+  experimental cross-league model: domestic ratings plus league strengths fitted on past
+  cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest); any **Matchup** (market slate,
   correct-score grid, team-news adjustment, attribution); the **Season** projection
   (Monte Carlo title / top-four / relegation odds); and the **Scorecard** — model vs the
   bookmaker's closing line, with calibration

@@ -24,6 +24,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 from soccer.config import Settings, get_settings
 from soccer.dashboard.data import (
+    CUP_MODEL_NOTE,
     AdjustedForecast,
     AnalyticsSnapshot,
     FixtureForecast,
@@ -2089,8 +2090,8 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     forecastable = [f for f in fixtures if f.slate is not None]
     uncovered = [f for f in fixtures if f.slate is None]
     st.caption(
-        f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast from last "
-        "season's Dixon-Coles model. Predictions are a preseason projection, directional."
+        f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast from each league's "
+        "model (shots-on-target Poisson over recent seasons). Directional, not precise."
     )
     if not forecastable:
         st.info(
@@ -2125,7 +2126,12 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         fav = "Draw" if draw_p == pick_p else f.home if home_p == pick_p else f.away
         cells = [
             f.kickoff_utc.strftime("%m-%d %H:%M"),
-            f'<span style="color:#8b8b8b">{_esc(f.competition)}</span>',
+            f'<span style="color:#8b8b8b">{_esc(f.competition)}</span>'
+            + (
+                ' <span title="Experimental cross-league forecast">ᵉˣᵖ</span>'
+                if f.experimental
+                else ""
+            ),
             f"{_esc(f.home)} v {_esc(f.away)}",
             f'<span style="font-variant-numeric:tabular-nums">'
             f"{s.home_expected:.1f}-{s.away_expected:.1f}</span>",
@@ -2152,6 +2158,8 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         "Confidence = the probability the model gave its favourite; ~33% is a coin flip, "
         "anything near that is barely a lean."
     )
+    if any(f.experimental for f in forecastable):
+        st.caption(f"ᵉˣᵖ {CUP_MODEL_NOTE}")
     _render_uncovered_fixtures(uncovered)
 
 

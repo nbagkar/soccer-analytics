@@ -1816,8 +1816,13 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             }
         )
     scope = f" in the **{competition}**" if competition else ""
+    note = ""
+    if any(f.experimental for f in fixtures[:8]):
+        from soccer.dashboard.data import CUP_MODEL_NOTE
+
+        note = f"\n\n_{CUP_MODEL_NOTE}_"
     return Reply(
-        f"**{len(fixtures)} upcoming matches**{scope} with forecasts. The next few:",
+        f"**{len(fixtures)} upcoming matches**{scope} with forecasts. The next few:{note}",
         table=rows,
         suggestions=["Who will win the league?", "Who is in form?"],
     )

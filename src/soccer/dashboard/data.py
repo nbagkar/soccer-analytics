@@ -27,7 +27,7 @@ from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
-from soccer.models.poisson import PoissonModel, fit_poisson_shots
+from soccer.models.poisson import DEFAULT_RHO, PoissonModel, fit_poisson_shots
 from soccer.models.simulation import TeamProjection, simulate_season
 from soccer.models.value import ValueReport
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
@@ -1683,6 +1683,12 @@ COMPETITION_TO_DIVISION = {
 # ("Athletic Club" vs "Ath Bilbao"). Keyed and valued by normalized name; only entries
 # that hit a real team in the loaded model actually apply, so a stale one is inert.
 _FDCOUK_ALIASES_RAW = {
+    # Cup-tie clubs whose names normalization mangles ("ø" is dropped, so "FC København"
+    # becomes "k benhavn") or that differ outright from the domestic file's spelling.
+    "FC København": "FC Copenhagen",
+    "FK Bodø/Glimt": "Bodo/Glimt",
+    "FC Red Bull Salzburg": "Salzburg",
+    "SK Sturm Graz": "Sturm Graz",
     # Spain (SP1)
     "Athletic Club": "Ath Bilbao",
     "Club Atlético de Madrid": "Ath Madrid",
@@ -1772,6 +1778,87 @@ class FixtureForecast:
     home: str
     away: str
     slate: MarketSlate | None  # None when no model covers the matchup
+    experimental: bool = False
+    """A cross-league cup forecast (models/crossleague.py) -- measured, but on few matches."""
+
+
+# Cup competitions forecast by the cross-league model, and its measured standing so every
+# surface can state it. Walk-forward over the 2024/25 and 2025/26 Champions League (270
+# matches with both clubs rated; ratings from the previous domestic season, league strengths
+# from earlier cup seasons only): log loss 0.979 vs 1.015 for base rates (+3.5% +/- 2.0%,
+# 1 s.e.), vs 1.035 for domestic ratings with no league adjustment. Worse than base rates in
+# 2024/25 (95 training matches), clearly better in 2025/26 (225) -- it improves with history.
+CUP_COMPETITIONS = {"UEFA Champions League": "UCL"}
+CUP_RIDGE = 8.0  # best of 0.5-256 in that walk-forward; 8-16 was a plateau
+CUP_MODEL_NOTE = (
+    "Experimental cross-league forecast: domestic ratings plus fitted league strengths. "
+    "Backtested at +3.5% (± 2%) skill over base rates on 270 Champions League matches."
+)
+
+
+def _club_ratings(adb: AnalyticsDB, start_year: int | None = None) -> dict[str, Any]:
+    """{club norm: ClubRating} from each domestic league's production fit.
+
+    `start_year=None` uses each league's latest season (for live forecasts); a year uses the
+    league's season starting then (for leakage-free training on past cup seasons).
+    """
+    from soccer.models.crossleague import ClubRating
+    from soccer.sources.football_data_co_uk import CUP_DIVISIONS, season_sort_key
+
+    loaded = adb.seasons_loaded()
+    out: dict[str, Any] = {}
+    for division in sorted({d for _s, d, _n in loaded if d not in CUP_DIVISIONS}):
+        seasons = [s for s, d, _n in loaded if d == division]
+        if start_year is None:
+            season: str | None = max(seasons, key=season_sort_key)
+        else:
+            season = next((s for s in seasons if season_sort_key(s) == start_year), None)
+        if season is None:
+            continue
+        outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+        if len(outcomes) < 50:
+            continue
+        model = fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        )
+        for team, strength in model.strengths.items():
+            out.setdefault(team, ClubRating(division, strength.attack, strength.defence))
+    return out
+
+
+def _cup_norm(norm: str) -> str:
+    aliased = FDCOUK_ALIASES.get(norm)
+    return normalize_name(aliased) if aliased else norm
+
+
+@_cached_until_data_changes()
+def cup_model(analytics_db: Path, division: str = "UCL") -> tuple[Any, dict[str, Any]] | None:
+    """(CrossLeagueModel, current club ratings) for a cup, or None without enough history.
+
+    Trained on every loaded season of the cup, each match rated from the PREVIOUS domestic
+    season (as in the backtest); live forecasts then use the current ratings.
+    """
+    from soccer.models.crossleague import CupMatch, fit_cross_league
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    if not Path(analytics_db).exists():
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        seasons = [s for s, d, _n in adb.seasons_loaded() if d == division]
+        matches: list[CupMatch] = []
+        for season in seasons:
+            ratings = _club_ratings(adb, season_sort_key(season) - 1)
+            for o in adb.outcomes_for(season, division):
+                h, a = ratings.get(_cup_norm(o.home_norm)), ratings.get(_cup_norm(o.away_norm))
+                if h and a:
+                    matches.append(CupMatch(h, a, o.fthg, o.ftag))
+        current = _club_ratings(adb)
+    if len(matches) < 100:
+        return None
+    return fit_cross_league(matches, ridge=CUP_RIDGE), current
 
 
 @_cached_until_data_changes()
@@ -1840,11 +1927,30 @@ def fixture_forecasts(
             models[division] = model
         return models[division]
 
+    def cup_resolve(name: str, ratings: dict[str, Any]) -> str | None:
+        n = _cup_norm(normalize_name(name))
+        if n in ratings:
+            return n
+        tokens = set(n.split())
+        subset = [t for t in ratings if set(t.split()) < tokens or tokens < set(t.split())]
+        return subset[0] if len(subset) == 1 else None
+
     out: list[FixtureForecast] = []
     for v in ups:
         slate = None
         home, away = v.home, v.away
         division = COMPETITION_TO_DIVISION.get(v.competition)
+        cup = CUP_COMPETITIONS.get(v.competition)
+        if cup:
+            fitted = cup_model(Path(analytics_db), cup)
+            if fitted is not None:
+                cup_fit, ratings = fitted
+                hn, an = cup_resolve(v.home, ratings), cup_resolve(v.away, ratings)
+                if hn and an:
+                    lam, mu = cup_fit.expected_goals(ratings[hn], ratings[an])
+                    slate = compute_markets(home, away, lam, mu, DEFAULT_RHO)
+            out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate, True))
+            continue
         if division:
             model = model_for(division)
             if model:
