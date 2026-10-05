@@ -38,4 +38,11 @@ jobs:
         run: mypy src
 
       - name: Tests
-        run: pytest -q
+        # Failing test names are re-emitted as annotations, so a red run says *what* broke
+        # on the public run page -- the raw log needs a GitHub login to read.
+        run: |
+          set -o pipefail
+          pytest -q -rf --tb=short | tee pytest.log || {
+            grep -E '^(FAILED|ERROR) ' pytest.log | sed 's/^/::error title=pytest::/'
+            exit 1
+          }
