@@ -324,6 +324,7 @@ def analytics_snapshot(
             alpha=FORECAST_ALPHA,
             shrinkage=FORECAST_SHRINKAGE,
             time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            market_weight=FORECAST_MARKET_WEIGHT,
         ),
         fixtures,
         teams=list(names),
@@ -567,6 +568,7 @@ def season_briefing(
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        market_weight=FORECAST_MARKET_WEIGHT,
     )
 
     match_counts: dict[str, int] = {}
@@ -657,6 +659,7 @@ def upcoming_season_briefing(
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        market_weight=FORECAST_MARKET_WEIGHT,
     )
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
     match_counts: dict[str, int] = {}
@@ -726,7 +729,7 @@ FORECAST_ALPHA = 0.25
 # promoted team early in the season) is regularised rather than taking an extreme value from
 # one result. Measured: k=3 slightly improves overall log loss AND rescues promoted teams'
 # early games (E0 that slice 1.33 -> 0.90, near the market's 0.86).
-FORECAST_SHRINKAGE = 3.0
+FORECAST_SHRINKAGE = 0.5  # was 3.0 before market-implied ratings; see FORECAST_MARKET_WEIGHT
 # Time-decay for the shots-blend model specifically -- NOT the same finding as
 # FORECAST_HALF_LIFE_DAYS above (that was the older goals-only DC model). Re-measured after
 # the shots blend shipped: walk-forward across 5 leagues, half-life in {90,180,250,365,500}d.
@@ -734,7 +737,19 @@ FORECAST_SHRINKAGE = 3.0
 # -0.22% at 250d, Serie A -0.10% at 500d, Ligue 1 -0.20% at 250d); only La Liga disagrees, and
 # by a smaller margin (+0.21% at 250d) than the gains elsewhere. 250 days sits in every
 # league's good range. See forecast-model-quality memory for the full sweep.
-FORECAST_TIME_DECAY_DAYS = 250
+FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
+# Market-implied ratings: each PLAYED match's closing 1X2 is inverted into the market's
+# expected goals and used as the rating input (fit_poisson_shots market_weight; never an
+# upcoming match's odds). Walk-forward vs the vig-free closing line, refit per matchday,
+# 2026-10-05 -- log-loss gap to the market:
+#   tuned on E0/SP1/D1/I1/F1 (4 seasons, 5,469 matches):     +0.0249 -> +0.0142
+#   untuned E1/SP2/D2/I2/F2/N1/P1/B1/SC0 (10,021 matches):   +0.0194 -> +0.0127
+#   untuned BRA/USA/ARG/MEX (6,559 matches):                  +0.0220 -> +0.0164
+#   thin-history slice (a team with <6 games; promoted sides): +0.0269 -> +0.0126
+# Every one of 18 leagues improved. Settings: weight 1.0, half-life 120d, shrinkage 0.5 --
+# shrinkage 0 scored the same overall but worse on the thin slice (+0.0210), and faster
+# decay (60d, 30d) was clearly worse. The model still trails the closing line.
+FORECAST_MARKET_WEIGHT = 1.0
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
@@ -792,6 +807,7 @@ def _expected_for(
             alpha=FORECAST_ALPHA,
             shrinkage=FORECAST_SHRINKAGE,
             time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            market_weight=FORECAST_MARKET_WEIGHT,
         )
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
@@ -988,6 +1004,7 @@ def forecast_explanation(
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        market_weight=FORECAST_MARKET_WEIGHT,
     )
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
@@ -1172,6 +1189,7 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
             alpha=FORECAST_ALPHA,
             shrinkage=FORECAST_SHRINKAGE,
             time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            market_weight=FORECAST_MARKET_WEIGHT,
         )
 
     strength = model.strengths.get(norm)
@@ -1415,6 +1433,7 @@ def forecast_report(
         alpha=FORECAST_ALPHA,
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        market_weight=FORECAST_MARKET_WEIGHT,
         min_history=60,
     )
 
@@ -1790,6 +1809,14 @@ class FixtureForecast:
 # 2024/25 (95 training matches), clearly better in 2025/26 (225) -- it improves with history.
 CUP_COMPETITIONS = {"UEFA Champions League": "UCL"}
 CUP_RIDGE = 8.0  # best of 0.5-256 in that walk-forward; 8-16 was a plateau
+# The domestic ratings the cup model was validated on (goals + shots blend). Pinned rather
+# than following FORECAST_*: re-measured on the market-implied domestic ratings, the cup
+# model got WORSE (0.979 -> 0.993 log loss, skill +3.5% -> +2.1% +/- 2.3%) -- market-implied
+# strengths are relative to each league's own market, which suits within-league forecasts
+# but not cross-league comparison.
+CUP_RATING_ALPHA = 0.25
+CUP_RATING_SHRINKAGE = 3.0
+CUP_RATING_DECAY_DAYS = 250
 CUP_MODEL_NOTE = (
     "Experimental cross-league forecast: domestic ratings plus fitted league strengths. "
     "Backtested at +3.5% (± 2%) skill over base rates on 270 Champions League matches."
@@ -1820,9 +1847,9 @@ def _club_ratings(adb: AnalyticsDB, start_year: int | None = None) -> dict[str, 
             continue
         model = fit_poisson_shots(
             outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            alpha=CUP_RATING_ALPHA,
+            shrinkage=CUP_RATING_SHRINKAGE,
+            time_decay=_decay(CUP_RATING_DECAY_DAYS),
         )
         for team, strength in model.strengths.items():
             out.setdefault(team, ClubRating(division, strength.attack, strength.defence))
@@ -1920,6 +1947,7 @@ def fixture_forecasts(
                         alpha=FORECAST_ALPHA,
                         shrinkage=FORECAST_SHRINKAGE,
                         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+                        market_weight=FORECAST_MARKET_WEIGHT,
                     )
                     model_names[division] = {o.home_norm: o.home for o in outcomes} | {
                         o.away_norm: o.away for o in outcomes

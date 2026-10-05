@@ -15,10 +15,11 @@ results supports well.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 DEFAULT_RHO = -0.13  # typical Dixon-Coles low-score correlation
 MAX_GOALS = 10  # scoreline grid ceiling; P(>10 goals) is negligible
@@ -208,6 +209,101 @@ def fit_poisson(outcomes: Sequence[Outcome], *, rho: float = DEFAULT_RHO) -> Poi
     )
 
 
+_GOALS = None  # lazily-built numpy helpers for the fast 1X2 inversion below
+
+
+def _fast_outcome_probs(lam: float, mu: float, rho: float) -> tuple[float, float]:
+    """(P home win, P away win) on the same Dixon-Coles grid as `score_grid`, in numpy.
+
+    `score_grid` builds a Python dict cell by cell -- fine for one forecast, but inverting
+    every past match's odds through it cost ~10ms a solve (35s to forecast all fixtures).
+    """
+    import numpy as np
+
+    global _GOALS
+    if _GOALS is None:
+        k = np.arange(MAX_GOALS + 1)
+        log_fact = np.array([math.lgamma(i + 1) for i in k])
+        _GOALS = (k, log_fact, np.subtract.outer(k, k))
+    k, log_fact, diff = _GOALS
+    px = np.exp(k * math.log(lam) - lam - log_fact)
+    py = np.exp(k * math.log(mu) - mu - log_fact)
+    grid = np.outer(px, py)
+    grid[0, 0] *= 1.0 - lam * mu * rho
+    grid[0, 1] *= 1.0 + lam * rho
+    grid[1, 0] *= 1.0 + mu * rho
+    grid[1, 1] *= 1.0 - rho
+    np.maximum(grid, 0.0, out=grid)
+    total = grid.sum()
+    return float(grid[diff > 0].sum() / total), float(grid[diff < 0].sum() / total)
+
+
+@functools.lru_cache(maxsize=65536)
+def implied_goal_rates(
+    p_home: float, p_away: float, rho: float = DEFAULT_RHO
+) -> tuple[float, float]:
+    """(lambda, mu) whose Dixon-Coles score grid reproduces these home/away win probabilities.
+
+    Inverts a match's vig-free 1X2 into the market's implied expected goals: two equations,
+    two unknowns, solved by Newton's method on log-rates (so both stay positive) with a
+    finite-difference Jacobian. Cached: inputs are rounded by the caller, so many matches
+    share a price.
+    """
+
+    def residual(x0: float, x1: float) -> tuple[float, float]:
+        f = _fast_outcome_probs(math.exp(x0), math.exp(x1), rho)
+        return f[0] - p_home, f[1] - p_away
+
+    x0, x1 = math.log(1.5), math.log(1.1)
+    r = residual(x0, x1)
+    h = 1e-6
+    for _ in range(50):
+        size = abs(r[0]) + abs(r[1])
+        if size < 1e-8:
+            return math.exp(x0), math.exp(x1)
+        ra, rb = residual(x0 + h, x1), residual(x0, x1 + h)
+        j00, j10 = (ra[0] - r[0]) / h, (ra[1] - r[1]) / h
+        j01, j11 = (rb[0] - r[0]) / h, (rb[1] - r[1]) / h
+        det = j00 * j11 - j01 * j10
+        if abs(det) < 1e-14:
+            break
+        d0 = (r[0] * j11 - r[1] * j01) / det
+        d1 = (j00 * r[1] - j10 * r[0]) / det
+        step = 1.0  # backtrack so each step actually shrinks the residual
+        while step > 1e-4:
+            n0 = min(max(x0 - step * d0, -3.0), 2.0)
+            n1 = min(max(x1 - step * d1, -3.0), 2.0)
+            nr = residual(n0, n1)
+            if abs(nr[0]) + abs(nr[1]) < size:
+                x0, x1, r = n0, n1, nr
+                break
+            step /= 2
+        else:
+            break
+    # No exact solution (an extreme price -- a ~85% favourite with an ~11% draw has no
+    # matching grid) or Newton stalled: take the closest fit from the plain starting point.
+    # Restarting from wherever Newton wandered once produced a 7-20 "expected score", which
+    # then skewed every later rating fit for those clubs.
+    from scipy.optimize import least_squares
+
+    def vector_residual(x: Any) -> list[float]:
+        return list(residual(float(x[0]), float(x[1])))
+
+    start = [math.log(1.5), math.log(1.1)]
+    fit = least_squares(vector_residual, start, bounds=([-3, -3], [2, 2]))
+    return math.exp(fit.x[0]), math.exp(fit.x[1])
+
+
+def market_expected_goals(o: object) -> tuple[float, float] | None:
+    """A played match's market-implied expected goals from its closing 1X2, else None."""
+    odds = [getattr(o, f"close_{k}_odds", None) for k in ("home", "draw", "away")]
+    if any(x is None or x <= 1.0 for x in odds):
+        return None
+    inv = [1.0 / x for x in odds]  # type: ignore[operator]
+    total = sum(inv)
+    return implied_goal_rates(round(inv[0] / total, 3), round(inv[2] / total, 3))
+
+
 def fit_poisson_shots(
     outcomes: Sequence[Outcome],
     *,
@@ -216,6 +312,7 @@ def fit_poisson_shots(
     shrinkage: float = 0.0,
     home_shrinkage: float = 0.0,
     time_decay: float = 0.0,
+    market_weight: float = 0.0,
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 
@@ -240,6 +337,13 @@ def fit_poisson_shots(
     ACTUAL home opponents (so a tough home slate isn't mistaken for a weak home boost),
     then shrink that ratio toward 1.0 (no team effect) by this many pseudo home-games --
     same mechanic as `shrinkage`, applied to home advantage instead of attack/defence.
+
+    ``market_weight`` (0-1, 0 = off) mixes in each played match's market-implied expected
+    goals (its closing 1X2 inverted through the score model -- `market_expected_goals`):
+    pseudo-goals become ``(1-w)*blend + w*market``. The closing line prices a match far more
+    precisely than its goals or shots do, so ratings built from past prices are much less
+    noisy; only odds of matches already played are used, never an upcoming match's. A match
+    without odds keeps the goals/shots blend.
 
     ``time_decay`` (xi per day, 0 = off) down-weights older matches by
     ``exp(-xi * age_days)``, age measured from the most recent match in `outcomes` -- same
@@ -281,6 +385,11 @@ def fit_poisson_shots(
             a_val = alpha * o.ftag + (1 - alpha) * ast * conv
         else:  # no shot data for this match -> trust the scoreline
             h_val, a_val = float(o.fthg), float(o.ftag)
+        if market_weight:
+            implied = market_expected_goals(o)
+            if implied is not None:
+                h_val = (1 - market_weight) * h_val + market_weight * implied[0]
+                a_val = (1 - market_weight) * a_val + market_weight * implied[1]
         for team, gf, ga in ((o.home_norm, h_val, a_val), (o.away_norm, a_val, h_val)):
             scored[team] = scored.get(team, 0.0) + w * gf
             conceded[team] = conceded.get(team, 0.0) + w * ga

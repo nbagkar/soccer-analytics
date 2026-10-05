@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import polars as pl
@@ -460,6 +461,29 @@ class ResultRow:
     away_shots_target: int | None = None
     home_xg: float | None = None
     away_xg: float | None = None
+    # Closing 1X2 odds of this (already played) match -- the market's view of the two
+    # teams, which `fit_poisson_shots(market_weight=...)` turns into implied expected goals.
+    close_home_odds: float | None = None
+    close_draw_odds: float | None = None
+    close_away_odds: float | None = None
+
+
+def _result_row(r: tuple[Any, ...]) -> ResultRow:
+    """A ResultRow from (9 core columns + 3 closing-odds columns); xG stays None."""
+    return ResultRow(
+        match_date=r[0],
+        home=r[1],
+        away=r[2],
+        home_norm=r[3],
+        away_norm=r[4],
+        fthg=r[5],
+        ftag=r[6],
+        home_shots_target=r[7],
+        away_shots_target=r[8],
+        close_home_odds=r[9],
+        close_draw_odds=r[10],
+        close_away_odds=r[11],
+    )
 
 
 @dataclass(frozen=True)
@@ -843,11 +867,12 @@ class AnalyticsDB:
         """Results for one (season, division) in date order, for the models to fit on."""
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
-            "home_shots_target, away_shots_target "
+            "home_shots_target, away_shots_target, close_home_odds, close_draw_odds, "
+            "close_away_odds "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()
-        return [ResultRow(*r) for r in rows]
+        return [_result_row(r) for r in rows]
 
     def head_to_head(
         self, a_norm: str, b_norm: str, *, limit: int = 200
@@ -890,12 +915,13 @@ class AnalyticsDB:
         placeholders = ",".join("?" * len(seasons))
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
-            "home_shots_target, away_shots_target "
+            "home_shots_target, away_shots_target, close_home_odds, close_draw_odds, "
+            "close_away_odds "
             f"FROM results WHERE division=? AND season IN ({placeholders}) "
             "ORDER BY match_date, home",
             [division, *seasons],
         ).fetchall()
-        return [ResultRow(*r) for r in rows]
+        return [_result_row(r) for r in rows]
 
     def outcomes_with_odds(self, season: str, division: str) -> list[OddsRow]:
         """Results for one (season, division) carrying closing 1X2 odds, date order.

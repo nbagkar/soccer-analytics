@@ -180,6 +180,7 @@ def evaluate_forecasts(
     alpha: float = 0.5,
     shrinkage: float = 0.0,
     time_decay: float = 0.0,
+    market_weight: float = 0.0,
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
@@ -202,7 +203,11 @@ def evaluate_forecasts(
     def fit(played: list[OddsRow]) -> object:
         if model == "shots":
             return fit_poisson_shots(
-                played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay
+                played,
+                alpha=alpha,
+                shrinkage=shrinkage,
+                time_decay=time_decay,
+                market_weight=market_weight,
             )
         if model == "xg":
             return fit_poisson_xg(played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay)

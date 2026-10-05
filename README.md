@@ -63,6 +63,13 @@ weighting of recent form nudges it ahead. The real levers are more data and bett
 features (xG), not a fancier fitting method — a finding worth more than a hidden
 disappointment.
 
+The biggest single gain since came from the market itself. Team ratings now use each
+*played* match's closing odds, inverted into the market's implied expected goals (no odds
+for upcoming matches are needed or used). Walk-forward against the closing line, that closed
+about a third of the model's log-loss gap — +0.0194 → +0.0127 on 10,021 matches across nine
+leagues it was never tuned on, with all 18 leagues tested improving. The model still trails
+the closing line; it is a better-informed forecaster, not a source of betting edge.
+
 This realizes the original 12-week plan's full scope. Remaining ideas are optional
 extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 
