@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 
@@ -33,6 +34,10 @@ class RateLimiter:
     _server_remaining: int | None = field(default=None, repr=False)
     _server_reset_at: float | None = field(default=None, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # Injectable so tests can exercise real back-off durations (a 60s 429 penalty) on a
+    # fake clock instead of actually waiting.
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
 
     @property
     def effective_limit(self) -> int:
@@ -65,31 +70,31 @@ class RateLimiter:
         """Block until a request may be made."""
         while True:
             async with self._lock:
-                now = time.monotonic()
+                now = self.clock()
                 wait = self._wait_seconds(now)
                 if wait <= 0:
                     self._timestamps.append(now)
                     if self._server_remaining is not None:
                         self._server_remaining -= 1
                     return
-            await asyncio.sleep(min(wait, 60.0))
+            await self.sleep(min(wait, 60.0))
 
     def observe(self, *, remaining: int | None, reset_seconds: int | None) -> None:
         """Sync with the server's accounting from a response header."""
         if remaining is not None:
             self._server_remaining = remaining
         if reset_seconds is not None:
-            self._server_reset_at = time.monotonic() + reset_seconds
+            self._server_reset_at = self.clock() + reset_seconds
 
     def penalize(self, retry_after_seconds: float) -> None:
         """Apply a server-instructed backoff after a 429."""
         self._server_remaining = 0
-        self._server_reset_at = time.monotonic() + retry_after_seconds
+        self._server_reset_at = self.clock() + retry_after_seconds
 
     @property
     def remaining(self) -> int:
         """Best estimate of requests still available this minute."""
         if self._server_remaining is not None:
             return max(0, self._server_remaining)
-        self._prune(time.monotonic())
+        self._prune(self.clock())
         return max(0, self.effective_limit - len(self._timestamps))

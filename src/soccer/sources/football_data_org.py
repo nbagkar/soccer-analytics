@@ -19,7 +19,6 @@ Two behaviours matter more than the endpoint coverage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -93,10 +92,11 @@ class FootballDataOrg:
         timeout: float = 20.0,
         max_retries: int = 3,
         client: httpx.AsyncClient | None = None,
+        limiter: RateLimiter | None = None,
     ) -> None:
         self._token = token
         self._raw = raw_store
-        self._limiter = RateLimiter(limit_per_minute=rate_limit_per_minute)
+        self._limiter = limiter or RateLimiter(limit_per_minute=rate_limit_per_minute)
         self._max_retries = max_retries
         self._client = client or httpx.AsyncClient(
             base_url=BASE_URL,
@@ -136,7 +136,7 @@ class FootballDataOrg:
             except httpx.HTTPError as exc:
                 last_error = exc
                 logger.warning("%s request failed (attempt %d): %s", path, attempt + 1, exc)
-                await asyncio.sleep(self._backoff(attempt))
+                await self._limiter.sleep(self._backoff(attempt))
                 continue
 
             self._sync_budget(response)
@@ -166,7 +166,7 @@ class FootballDataOrg:
                     request=response.request,
                     response=response,
                 )
-                await asyncio.sleep(self._backoff(attempt))
+                await self._limiter.sleep(self._backoff(attempt))
                 continue
 
             response.raise_for_status()

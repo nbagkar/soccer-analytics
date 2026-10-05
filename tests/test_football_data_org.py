@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from soccer.ingest.ratelimit import RateLimiter
 from soccer.sources.football_data_org import (
     FREE_COMPETITIONS,
     PARTIAL_COMPETITIONS,
@@ -29,6 +30,19 @@ def store(tmp_path: Path) -> RawStore:
     return RawStore(tmp_path / "raw")
 
 
+def fake_time_limiter(limit_per_minute: int = 10) -> RateLimiter:
+    """A limiter on a fake clock: every wait (pacing, 429 penalty, retry back-off) is
+    honoured logically but returns at once, so failure-path tests don't sleep for real."""
+    clock = {"now": 1000.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    return RateLimiter(
+        limit_per_minute=limit_per_minute, clock=lambda: clock["now"], sleep=fake_sleep
+    )
+
+
 def make_adapter(
     store: RawStore, handler: httpx.MockTransport, **kwargs: object
 ) -> FootballDataOrg:
@@ -37,6 +51,7 @@ def make_adapter(
         transport=handler,
         headers={"X-Auth-Token": "test"},
     )
+    kwargs.setdefault("limiter", fake_time_limiter())
     return FootballDataOrg("test", store, client=client, **kwargs)  # type: ignore[arg-type]
 
 
@@ -136,8 +151,17 @@ class TestRateLimitHandling:
         assert not result.is_stale
 
     async def test_429_with_http_date_retry_after_does_not_crash(self, store: RawStore) -> None:
-        # Retry-After may be an HTTP-date rather than seconds; must not raise on float().
+        # Retry-After may be an HTTP-date rather than seconds; must not raise on float(), and
+        # falls back to a 60s penalty -- honoured on a fake clock, so the test doesn't wait it.
         attempts = {"n": 0}
+        clock = {"now": 1000.0}
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds
+
+        limiter = RateLimiter(limit_per_minute=10, clock=lambda: clock["now"], sleep=fake_sleep)
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts["n"] += 1
@@ -147,11 +171,12 @@ class TestRateLimitHandling:
                 )
             return httpx.Response(200, json={"matches": [{"id": 1}]})
 
-        async with make_adapter(store, httpx.MockTransport(handler)) as adapter:
+        async with make_adapter(store, httpx.MockTransport(handler), limiter=limiter) as adapter:
             result = await adapter.matches(date_from=date(2026, 7, 31))
 
         assert attempts["n"] == 2
         assert result.payload == {"matches": [{"id": 1}]}
+        assert sum(slept) == pytest.approx(60.0)  # waited out the fallback penalty
 
 
 class TestFailureHandling:
