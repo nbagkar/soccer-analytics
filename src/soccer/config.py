@@ -6,6 +6,7 @@ Precedence: environment variables > .env file > defaults. Every path is derived 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -97,10 +98,19 @@ class Settings(BaseSettings):
 
 _settings: Settings | None = None
 
+# Absolute path of the .env to read, for processes started outside the project directory --
+# `soccer dashboard` runs Streamlit from the package dir (so its theme loads), where a
+# relative ".env" silently doesn't exist: no token, FPL off, and every refresh needing them
+# quietly skipped.
+ENV_FILE_VAR = "SOCCER_ENV_FILE"
+
 
 def get_settings() -> Settings:
     """Process-wide settings, loaded once."""
     global _settings
     if _settings is None:
-        _settings = Settings()
+        env_file = os.environ.get(ENV_FILE_VAR)
+        # `_env_file` is pydantic-settings' documented init override; mypy (without the
+        # pydantic plugin) can't see it on the generated __init__.
+        _settings = Settings(_env_file=env_file) if env_file else Settings()  # type: ignore[call-arg]
     return _settings

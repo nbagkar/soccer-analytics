@@ -1,4 +1,5 @@
-"""Refresh results and fixtures in the background when the dashboard opens on stale data.
+"""Refresh stale data in the background when the dashboard opens: results, fixtures, injury
+news and squads, each only when it is stale.
 
 Just-in-time instead of push-a-button: nothing refreshed current-season results unless
 `soccer serve` happened to be running, so forecasts silently aged. Opening the dashboard is
@@ -44,13 +45,25 @@ def is_running() -> bool:
 
 
 def _jobs(settings: Settings) -> list[tuple[str, Callable[[Settings], str]]]:
-    """Results always (football-data.co.uk, unmetered); fixtures only when they are stale too,
-    since football-data.org's free tier is rate-limited and fixtures change slowly."""
+    """Only the feeds that are actually stale, and only those this install can fetch.
+
+    Results and injuries go stale in a day (matches are played; team news moves daily), squads
+    in a week. Fixtures and squads share football-data.org's rate-limited free tier, so they
+    are skipped when fresh rather than re-pulled alongside every results refresh.
+    """
     from soccer.dashboard import actions
 
-    jobs: list[tuple[str, Callable[[Settings], str]]] = [("results", actions.refresh_results)]
-    if settings.football_data_org_token and data_freshness(settings).fixtures_stale:
+    fresh = data_freshness(settings)
+    token = settings.football_data_org_token
+    jobs: list[tuple[str, Callable[[Settings], str]]] = []
+    if fresh.is_stale:
+        jobs.append(("results", actions.refresh_results))
+    if token and fresh.fixtures_stale:
         jobs.append(("fixtures", actions.update_fixtures))
+    if settings.enable_fpl and fresh.injuries_stale:
+        jobs.append(("injuries", actions.update_availability))
+    if token and fresh.squads_stale:
+        jobs.append(("squads", actions.update_squads))
     return jobs
 
 
@@ -66,7 +79,7 @@ def _run(settings: Settings) -> None:
 
 
 def start_if_stale(settings: Settings) -> bool:
-    """Start a background refresh if results are stale and none is running. True if started."""
+    """Start a background refresh if any feed is stale and none is running. True if started."""
     if not settings.auto_refresh or not settings.analytics_db.exists():
         return False
     global _last_attempt
@@ -74,7 +87,7 @@ def start_if_stale(settings: Settings) -> bool:
         recent = (
             _last_attempt is not None and time.monotonic() - _last_attempt < RETRY_AFTER_SECONDS
         )
-        if is_running() or recent or not data_freshness(settings).is_stale:
+        if is_running() or recent or not _jobs(settings):
             return False
         _running.set()
         _last_attempt = time.monotonic()

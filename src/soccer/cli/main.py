@@ -507,6 +507,12 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
     import os
 
     env = {**os.environ, "SOCCER_DATA_DIR": str(get_settings().data_dir)}
+    # Same for .env: relative to the project, it would not be found from the dashboard's dir.
+    from soccer.config import ENV_FILE_VAR
+
+    env_file = Path(".env").resolve()
+    if env_file.is_file():
+        env[ENV_FILE_VAR] = str(env_file)
     # files() returns a Traversable, which (unlike Path) doesn't guarantee `.parent` -- true
     # in general for a zipped/namespace package, but this one is always a real file on disk.
     app_path_on_disk = Path(str(app_path))

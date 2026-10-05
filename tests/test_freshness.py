@@ -24,6 +24,29 @@ def _settings(tmp_path, **overrides) -> Settings:
     return Settings(data_dir=tmp_path, _env_file=None, **overrides)
 
 
+def _store_injuries(db: LiveDB, *, fetched: datetime) -> None:
+    from soccer.domain.availability import AvailabilityStore, PlayerAvailability
+
+    AvailabilityStore(db).replace_source(
+        "fpl",
+        [
+            PlayerAvailability(
+                source="fpl",
+                team="Arsenal",
+                team_norm="arsenal",
+                player="Saka",
+                full_name="Bukayo Saka",
+                status="i",
+                availability="Injured",
+                chance=0,
+                news="Hamstring",
+                news_added=None,
+                fetched_at=fetched.isoformat(),
+            )
+        ],
+    )
+
+
 class TestRefreshLog:
     def test_mark_overwrites_the_jobs_single_row(self, tmp_path) -> None:
         log = RefreshLog(LiveDB(tmp_path / "live.sqlite"))
@@ -40,7 +63,7 @@ class TestRefreshLog:
 
     def test_rejects_unknown_job(self, tmp_path) -> None:
         with pytest.raises(ValueError, match="unknown refresh job"):
-            RefreshLog(LiveDB(tmp_path / "live.sqlite")).mark("squads", ok=True)
+            RefreshLog(LiveDB(tmp_path / "live.sqlite")).mark("lineups", ok=True)
 
 
 class TestStaleness:
@@ -67,6 +90,25 @@ class TestStaleness:
     def test_failed_refresh_stays_stale_and_reports_the_error(self, tmp_path) -> None:
         f = self._fresh(tmp_path, timedelta(minutes=5), ok=False)
         assert f.is_stale and f.last_error == "m"
+
+
+class TestInjuryAndSquadStaleness:
+    def test_injury_news_age_comes_from_the_data_itself(self, tmp_path) -> None:
+        db = LiveDB(tmp_path / "live.sqlite")
+        _store_injuries(db, fetched=NOW - timedelta(days=11))
+        f = freshness(db, None, now=NOW)
+        assert f.injuries_as_of == NOW - timedelta(days=11) and f.injuries_stale
+
+    def test_recent_injury_news_is_fresh(self, tmp_path) -> None:
+        db = LiveDB(tmp_path / "live.sqlite")
+        _store_injuries(db, fetched=NOW - timedelta(hours=2))
+        assert not freshness(db, None, now=NOW).injuries_stale
+
+    def test_squads_go_stale_after_a_week_not_a_day(self, tmp_path) -> None:
+        db = LiveDB(tmp_path / "live.sqlite")
+        assert not freshness(db, None, squads_as_of=date(2026, 9, 30), now=NOW).squads_stale
+        assert freshness(db, None, squads_as_of=date(2026, 9, 23), now=NOW).squads_stale
+        assert freshness(db, None, now=NOW).squads_stale  # never fetched
 
 
 class TestLoggedRefresh:
@@ -147,8 +189,8 @@ class TestAutoRefresh:
         def fake_job(s: Settings) -> str:
             return actions._logged(s, RESULTS, lambda: "fake refresh")
 
-        def fake_jobs(_s):
-            return [("results", fake_job)]
+        def fake_jobs(s: Settings):
+            return [("results", fake_job)] if data_freshness(s).is_stale else []
 
         def run_then_signal(s):
             try:
@@ -199,12 +241,19 @@ class TestAutoRefresh:
 
 
 class TestAutoRefreshJobs:
-    def test_fixtures_only_when_they_are_stale_too(self, tmp_path) -> None:
-        settings = _settings(tmp_path, football_data_org_token="test-token")
-        assert [n for n, _ in autorefresh._jobs(settings)] == ["results", "fixtures"]
+    def test_only_stale_feeds_are_refreshed(self, tmp_path) -> None:
+        settings = _settings(tmp_path, football_data_org_token="test-token", enable_fpl=True)
+        names = [n for n, _ in autorefresh._jobs(settings)]
+        assert names == ["results", "fixtures", "injuries", "squads"]  # nothing fetched yet
         with LiveDB(settings.live_db) as db:
             RefreshLog(db).mark(FIXTURES, ok=True, message="recent")
-        assert [n for n, _ in autorefresh._jobs(settings)] == ["results"]
+            RefreshLog(db).mark(RESULTS, ok=True, message="recent")
+            _store_injuries(db, fetched=datetime.now(UTC))
+        assert [n for n, _ in autorefresh._jobs(settings)] == ["squads"]
+
+    def test_injuries_need_fpl_enabled(self, tmp_path) -> None:
+        settings = _settings(tmp_path, enable_fpl=False)
+        assert "injuries" not in [n for n, _ in autorefresh._jobs(settings)]
 
     def test_no_token_means_results_only(self, tmp_path) -> None:
         settings = _settings(tmp_path, football_data_org_token=None)
@@ -217,3 +266,59 @@ class TestAutoRefreshJobs:
         started = time.monotonic() - autorefresh.GIVE_UP_AFTER_SECONDS - 1
         monkeypatch.setattr(autorefresh, "_last_attempt", started)
         assert not autorefresh.is_running()
+
+
+class TestDashboardSettings:
+    """The dashboard runs from the package dir; it must still read the project's .env."""
+
+    def test_env_file_var_is_honoured_from_any_directory(self, tmp_path, monkeypatch) -> None:
+        import soccer.config as config
+
+        env = tmp_path / "project" / ".env"
+        env.parent.mkdir()
+        env.write_text("SOCCER_FOOTBALL_DATA_ORG_TOKEN=abc\nSOCCER_ENABLE_FPL=true\n")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.delenv("SOCCER_FOOTBALL_DATA_ORG_TOKEN", raising=False)
+        monkeypatch.delenv("SOCCER_ENABLE_FPL", raising=False)
+        monkeypatch.setenv(config.ENV_FILE_VAR, str(env))
+        monkeypatch.setattr(config, "_settings", None)
+        settings = config.get_settings()
+        monkeypatch.setattr(config, "_settings", None)
+        assert settings.football_data_org_token == "abc" and settings.enable_fpl
+
+    def test_dashboard_command_passes_the_env_file(self, tmp_path, monkeypatch) -> None:
+        import subprocess
+
+        from typer.testing import CliRunner
+
+        import soccer.config as config
+        from soccer.cli.main import app
+
+        (tmp_path / ".env").write_text("SOCCER_LOG_LEVEL=INFO\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(config, "_settings", None)
+        seen: dict[str, str] = {}
+
+        def fake_run(cmd, *, cwd, env, check):
+            seen.update(env)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = CliRunner().invoke(app, ["dashboard"])
+        monkeypatch.setattr(config, "_settings", None)
+        assert result.exit_code == 0, result.output
+        assert seen[config.ENV_FILE_VAR] == str((tmp_path / ".env").resolve())
+
+
+class TestHeadlineLeagueDate:
+    def test_premier_league_date_is_reported_separately(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea"])
+        seed_results(
+            settings.analytics_db, division="USA", teams=["LA Galaxy", "Seattle"], season="2026"
+        )
+        fresh = data_freshness(settings)
+        assert fresh.headline_through is not None and fresh.results_through is not None
+        assert fresh.headline_through <= fresh.results_through

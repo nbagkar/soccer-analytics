@@ -19,9 +19,13 @@ from soccer.storage.live_db import LiveDB
 
 RESULTS = "results"
 FIXTURES = "fixtures"
-JOBS = (RESULTS, FIXTURES)
+INJURIES = "injuries"
+SQUADS = "squads"
+JOBS = (RESULTS, FIXTURES, INJURIES, SQUADS)
 
 STALE_AFTER = timedelta(hours=24)
+# Rosters change at transfer windows, not daily -- a weekly re-pull is plenty.
+SQUADS_STALE_AFTER = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -73,8 +77,17 @@ class Freshness:
     fixtures_checked_at: datetime | None
     """Last *successful* fixtures refresh; None if never recorded."""
     last_error: str | None
-    """The most recent failed refresh's message, if the latest run of either job failed."""
+    """The most recent failed refresh's message, if the latest run of any job failed."""
     now: datetime
+    injuries_as_of: datetime | None = None
+    """When the stored injury news was fetched from its source (the data's own timestamp,
+    so a cache fallback still reads as old). None if none is stored."""
+    squads_as_of: date | None = None
+    """When the stored squads were fetched. None if none are stored."""
+    headline_through: date | None = None
+    """The newest Premier League result. Shown beside the store-wide date when it lags, so
+    a busy MLS/Brazil calendar can't make the headline league look more current than it is
+    (football-data.co.uk publishes the European files on its own, sometimes slower, cadence)."""
 
     @property
     def is_stale(self) -> bool:
@@ -87,19 +100,39 @@ class Freshness:
         return checked is None or self.now - checked > STALE_AFTER
 
     @property
+    def injuries_stale(self) -> bool:
+        return self.injuries_as_of is None or self.now - self.injuries_as_of > STALE_AFTER
+
+    @property
+    def squads_stale(self) -> bool:
+        if self.squads_as_of is None:
+            return True
+        return self.now.date() - self.squads_as_of > SQUADS_STALE_AFTER
+
+    @property
     def checked_label(self) -> str:
-        if self.results_checked_at is None:
-            return "never"
-        hours = (self.now - self.results_checked_at).total_seconds() / 3600
-        if hours < 1:
-            return "just now"
-        if hours < 48:
-            return f"{int(hours)}h ago"
-        return f"{int(hours // 24)} days ago"
+        return age_label(self.results_checked_at, self.now)
+
+
+def age_label(when: datetime | None, now: datetime) -> str:
+    """'just now' / '5h ago' / '3 days ago' / 'never' -- for staleness captions."""
+    if when is None:
+        return "never"
+    hours = (now - when).total_seconds() / 3600
+    if hours < 1:
+        return "just now"
+    if hours < 48:
+        return f"{int(hours)}h ago"
+    return f"{int(hours // 24)} days ago"
 
 
 def freshness(
-    live_db: LiveDB, results_through: date | None, *, now: datetime | None = None
+    live_db: LiveDB,
+    results_through: date | None,
+    *,
+    squads_as_of: date | None = None,
+    headline_through: date | None = None,
+    now: datetime | None = None,
 ) -> Freshness:
     log = RefreshLog(live_db)
     errors = [r.message for r in (log.last(j) for j in JOBS) if r is not None and not r.ok]
@@ -108,5 +141,15 @@ def freshness(
         results_checked_at=log.last_success(RESULTS),
         fixtures_checked_at=log.last_success(FIXTURES),
         last_error=errors[0] if errors else None,
+        injuries_as_of=injuries_as_of(live_db),
+        squads_as_of=squads_as_of,
+        headline_through=headline_through,
         now=now or datetime.now(UTC),
     )
+
+
+def injuries_as_of(live_db: LiveDB) -> datetime | None:
+    row = live_db.connection.execute(
+        "SELECT MAX(fetched_at) AS t FROM player_availability"
+    ).fetchone()
+    return datetime.fromisoformat(row["t"]) if row and row["t"] else None

@@ -711,8 +711,8 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         )
         if visibly_moved:
             news = [
-                "\n**Adjusted for team news** — a heuristic prior on today's injuries and "
-                "suspensions, not a backtested edge:"
+                f"\n**Adjusted for team news** ({adjusted.news_label}) — a heuristic prior on "
+                "injuries and suspensions, not a backtested edge:"
             ]
             if adjusted.home_adj.is_material:
                 news.append(f"- {home} without {format_missing(adjusted.home_adj)}")

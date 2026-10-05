@@ -72,6 +72,7 @@ from soccer.dashboard.data import (
 )
 from soccer.dashboard.nav import NAV
 from soccer.domain import usage
+from soccer.domain.freshness import age_label
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.models.evaluation import (
     BlendPoint,
@@ -1373,7 +1374,7 @@ def _render_forecast_adjustment(adj: AdjustedForecast) -> None:
     raw = {m.name: m.probability for m in adj.raw.result}
     new = {m.name: m.probability for m in adj.adjusted.result}
     home, away = adj.raw.home, adj.raw.away
-    st.markdown("**Adjusted for team news**")
+    st.markdown(f"**Adjusted for team news** ({adj.news_label})")
     outs = []
     if adj.home_adj.is_material:
         outs.append(f"**{home}** without {format_missing(adj.home_adj)}")
@@ -2194,22 +2195,36 @@ def _render_freshness(settings: Settings, page: str) -> None:
         return
     autorefresh.start_if_stale(settings)
     fresh = data_freshness(settings)
-    d = fresh.results_through
+    d, pl = fresh.results_through, fresh.headline_through
     through = f"{d.day} {d:%b %Y}" if d else "none loaded"
+    # Leagues publish on different cadences: name the PL's own date when it lags the store.
+    if d and pl and (d - pl).days > 2:
+        through += f" (Premier League: {pl.day} {pl:%b})"
+    news = fresh.injuries_as_of
+    news_date = f"{news.day} {news:%b}" if news else "never fetched"
+    news_stale = settings.enable_fpl and fresh.injuries_stale
     if autorefresh.is_running():
         st.caption(
-            f":material/sync: Updating results and fixtures in the background (latest result: "
-            f"{through}) — new data shows up on your next click."
+            f":material/sync: Updating stale data in the background (latest result: {through}) "
+            "— new data shows up on your next click."
         )
-    elif fresh.is_stale:
+    elif fresh.is_stale or news_stale:
+        problems = []
+        if fresh.is_stale:
+            problems.append(
+                f"results last checked **{fresh.checked_label}** (latest result **{through}**)"
+            )
+        if news_stale:
+            problems.append(f"injury news is from **{news_date}**")
         detail = f" The last attempt failed: {fresh.last_error}" if fresh.last_error else ""
         st.warning(
-            f"Results last checked **{fresh.checked_label}** — latest result is **{through}**, "
-            f"so forecasts and tables may be behind. Use **Home → Update results**.{detail}",
+            f"Data may be behind: {' and '.join(problems)}. Forecasts and tables use what's "
+            f"loaded — refresh from **Home → Keep it current**.{detail}",
             icon=":material/schedule:",
         )
     elif page in ("Home", "Predictor"):
-        st.caption(f"Results through **{through}** · checked {fresh.checked_label}")
+        extra = f" · injury news {age_label(news, fresh.now)}" if settings.enable_fpl else ""
+        st.caption(f"Results through **{through}** · checked {fresh.checked_label}{extra}")
 
 
 def _page_header(page: str) -> None:

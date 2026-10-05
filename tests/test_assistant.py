@@ -661,6 +661,7 @@ class TestForecastTeamNews:
         _seed_priced_squad(live, "Brentford", self._BRENTFORD)
         reply = answer("Arsenal vs Brentford who wins?", analytics, live)
         assert "Adjusted for team news" in reply.text
+        assert "news as of" in reply.text  # stale news can't pass as today's
         assert "Mbeumo" in reply.text  # names the absence driving it
         assert "→" in reply.text  # raw -> adjusted, shown side by side
         assert "not a backtested edge" in reply.text  # honest labelling

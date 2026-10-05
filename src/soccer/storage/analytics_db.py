@@ -1297,6 +1297,11 @@ class AnalyticsDB:
         members.sort(key=lambda m: (_position_rank(m.position), m.player))
         return members
 
+    def squads_fetched(self) -> date | None:
+        """When the stored squads were last fetched (the newest competition's fetch date)."""
+        row = self._con.execute("SELECT MAX(fetched_at) FROM squads").fetchone()
+        return date.fromisoformat(str(row[0])[:10]) if row and row[0] else None
+
     def squad_count(self) -> int:
         """Distinct players across all loaded squads -- for the doctor/home summary."""
         row = self._con.execute("SELECT COUNT(DISTINCT player_norm) FROM squads").fetchone()

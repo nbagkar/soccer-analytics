@@ -17,7 +17,7 @@ from typing import Any, cast
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
-from soccer.domain.freshness import Freshness, freshness
+from soccer.domain.freshness import Freshness, freshness, injuries_as_of
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -177,12 +177,14 @@ def _latency_label(latency_seconds: int | None) -> tuple[str, bool]:
 
 def data_freshness(settings: Settings) -> Freshness:
     """How current the results are and when they were last checked (see domain/freshness)."""
-    through = None
+    through, squads, headline = None, None, None
     if settings.analytics_db.exists():
         with AnalyticsDB(settings.analytics_db) as adb:
             through = adb.latest_result_date()
+            squads = adb.squads_fetched()
+            headline = adb.latest_result_date("E0")
     with LiveDB(settings.live_db) as db:
-        return freshness(db, through)
+        return freshness(db, through, squads_as_of=squads, headline_through=headline)
 
 
 def health_snapshot(settings: Settings, db: LiveDB) -> HealthSnapshot:
@@ -789,6 +791,14 @@ class AdjustedForecast:
     adjusted: MarketSlate
     home_adj: AvailabilityAdjustment
     away_adj: AvailabilityAdjustment
+    news_as_of: datetime | None = None
+    """When the injury news behind the nudge was fetched -- shown so stale news can't pass
+    as today's."""
+
+    @property
+    def news_label(self) -> str:
+        d = self.news_as_of
+        return f"news as of {d.day} {d:%b}" if d else "news date unknown"
 
     @property
     def is_material(self) -> bool:
@@ -832,6 +842,7 @@ def availability_adjusted_slate(
         store = AvailabilityStore(db)
         home_adj = team_adjustment(store.for_team(home_norm))
         away_adj = team_adjustment(store.for_team(away_norm))
+        news_as_of = injuries_as_of(db)
     if not (home_adj.is_material or away_adj.is_material):
         return None  # nobody flagged -> identical to the plain forecast; nothing to show
 
@@ -844,7 +855,9 @@ def availability_adjusted_slate(
     adj_lam = lam * home_adj.attack_factor * away_adj.leak_factor
     adj_mu = mu * away_adj.attack_factor * home_adj.leak_factor
     adjusted = compute_markets(home_disp, away_disp, adj_lam, adj_mu, rho)
-    return AdjustedForecast(raw=raw, adjusted=adjusted, home_adj=home_adj, away_adj=away_adj)
+    return AdjustedForecast(
+        raw=raw, adjusted=adjusted, home_adj=home_adj, away_adj=away_adj, news_as_of=news_as_of
+    )
 
 
 def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:

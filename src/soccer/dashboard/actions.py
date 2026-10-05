@@ -15,7 +15,7 @@ from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
-from soccer.domain.freshness import FIXTURES, RESULTS, RefreshLog
+from soccer.domain.freshness import FIXTURES, INJURIES, RESULTS, SQUADS, RefreshLog
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
@@ -205,12 +205,16 @@ def _logged(settings: Settings, job: str, run: Callable[[], str]) -> str:
     try:
         message = run()
     except Exception as exc:
-        with LiveDB(settings.live_db) as db:
-            RefreshLog(db).mark(job, ok=False, message=f"{type(exc).__name__}: {exc}")
+        _mark(settings, job, ok=False, message=f"{type(exc).__name__}: {exc}")
         raise
-    with LiveDB(settings.live_db) as db:
-        RefreshLog(db).mark(job, ok=True, message=message)
+    _mark(settings, job, ok=True, message=message)
     return message
+
+
+def _mark(settings: Settings, job: str, *, ok: bool, message: str) -> None:
+    settings.ensure_dirs()
+    with LiveDB(settings.live_db) as db:
+        RefreshLog(db).mark(job, ok=ok, message=message)
 
 
 def refresh_results(settings: Settings) -> str:
@@ -514,13 +518,19 @@ def update_squads(
                     on_progress(i, len(SQUAD_COMPETITIONS))
         return members
 
-    members = asyncio.run(run())
-    if not members:
-        return "No squads were reachable on the free tier."
-    with AnalyticsDB(settings.analytics_db) as adb:
-        adb.load_squads(members)
-    clubs = len({m.team_norm for m in members})
-    return f"Loaded {len(members)} players across {clubs} clubs."
+    def fetch_and_load() -> str:
+        members = asyncio.run(run())
+        if not members:
+            raise RuntimeError("No squads were reachable on the free tier.")
+        with AnalyticsDB(settings.analytics_db) as adb:
+            adb.load_squads(members)
+        clubs = len({m.team_norm for m in members})
+        return f"Loaded {len(members)} players across {clubs} clubs."
+
+    try:
+        return _logged(settings, SQUADS, fetch_and_load)
+    except RuntimeError as exc:
+        return str(exc)
 
 
 def update_availability(settings: Settings) -> str:
@@ -561,16 +571,25 @@ def update_availability(settings: Settings) -> str:
     from soccer.domain.availability import FLAGGED_STATUSES, AvailabilityStore
     from soccer.sources.registry import SourceId
 
-    records, is_stale = asyncio.run(run())
+    try:
+        records, is_stale = asyncio.run(run())
+    except Exception as exc:
+        _mark(settings, INJURIES, ok=False, message=f"{type(exc).__name__}: {exc}")
+        raise
     if not records:
+        _mark(settings, INJURIES, ok=False, message="FPL returned no players.")
         return "FPL returned no players."
     with LiveDB(settings.live_db) as db:
         AvailabilityStore(db).replace_source(SourceId.FPL.value, records)
     flagged = sum(1 for r in records if r.status in FLAGGED_STATUSES)
     stale = " (served from cache — the live fetch failed)" if is_stale else ""
-    return (
+    message = (
         f"Loaded availability for {len(records)} players — {flagged} flagged as team news{stale}."
     )
+    # A cache fallback keeps the old news (and its old fetch time), so record it as a failure:
+    # the dashboard then says "last refresh failed" instead of looking quietly current.
+    _mark(settings, INJURIES, ok=not is_stale, message=message)
+    return message
 
 
 def starter_setup(
