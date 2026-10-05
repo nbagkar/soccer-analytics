@@ -140,6 +140,15 @@ class TestLeagueNames:
             "0001",
             "2526",
         ]
+
+    def test_autumn_spring_spans_sort_chronologically(self) -> None:
+        # Austria/Denmark/Poland/... use "2026/2027". These all scored 0, so "latest season"
+        # picked an arbitrary one (Austria's table showed 2012/13 in 2026).
+        spans = ["2012/2013", "2021/2022", "2026/2027", "2016/2017"]
+        assert max(spans, key=season_sort_key) == "2026/2027"
+        assert season_sort_key("2026/2027") == 2026
+        # Mixed formats in one league (Argentina switched from spans to calendar years).
+        assert season_sort_key("2019/2020") < season_sort_key("2021")
         assert season_sort_key("2026") == 2026  # calendar-year (extra-country) code
 
     def test_calendar_year_season_kept(self) -> None:

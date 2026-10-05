@@ -110,14 +110,20 @@ def season_sort_key(season: str) -> int:
     """Chronological sort key (the season's start year) for a football-data.co.uk code.
 
     European codes are consecutive two-year halves ("9900" -> 1999, "2526" -> 2025); the
-    extra-country files use a calendar year ("2026" -> 2026). Ordering the raw strings is
-    WRONG once pre-2000 data is present -- "9900" sorts after "2526" lexically -- so any
-    max/sort over season codes must go through this instead.
+    extra-country files use a calendar year ("2026" -> 2026) or, for autumn-spring leagues
+    (Austria, Denmark, Poland, ...), a full span ("2026/2027" -> 2026). Ordering the raw
+    strings is WRONG once pre-2000 data is present -- "9900" sorts after "2526" lexically --
+    so any max/sort over season codes must go through this instead.
     """
     if len(season) == 4 and season.isdigit():
         first, second = int(season[:2]), int(season[2:])
         if (first + 1) % 100 == second:
             return (1900 if first >= 90 else 2000) + first
+    # "2026/2027" used to fall through to int() and score 0 -- every such season tied, so
+    # "latest season" for those leagues was arbitrary (Austria's table showed 2012/13).
+    span = season.split("/")
+    if len(span) == 2 and all(p.isdigit() and len(p) == 4 for p in span):
+        return int(span[0])
     try:
         return int(season)  # calendar-year code (or best effort for anything odd)
     except ValueError:
