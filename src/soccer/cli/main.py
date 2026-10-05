@@ -140,10 +140,52 @@ def doctor() -> None:
             "SOCCER_FOOTBALL_DATA_ORG_TOKEN."
         )
 
+    if settings.analytics_db.exists():
+        from soccer.storage.integrity import ERROR, run_checks
+
+        with AnalyticsDB(settings.analytics_db) as adb:
+            findings = run_checks(adb)
+        errors = sum(f.level == ERROR for f in findings)
+        warnings = len(findings) - errors
+        style = "red" if errors else "yellow" if warnings else "green"
+        console.print(
+            f"\n[bold]Data checks[/bold]  [{style}]{errors} error(s), {warnings} warning(s)"
+            f"[/{style}]" + ("  -- details: [bold]soccer check[/bold]" if findings else "")
+        )
+
     console.print("\n[bold]Attribution required[/bold]")
     for line in attributions():
         console.print(f"  {line}")
     console.print()
+
+
+@app.command()
+def check() -> None:
+    """Self-check the loaded data: season ordering, duplicates, split club names, and more.
+
+    Exits non-zero on any error, so it can gate a script or scheduled job.
+    """
+    from soccer.storage.integrity import ERROR, run_checks
+
+    settings = get_settings()
+    if not settings.analytics_db.exists():
+        console.print("[yellow]No analytics data yet.[/yellow] Nothing to check.")
+        raise typer.Exit(code=1)
+    with AnalyticsDB(settings.analytics_db) as adb:
+        findings = run_checks(adb)
+    if not findings:
+        console.print("[green]All data checks passed.[/green]")
+        return
+    table = Table(header_style="bold")
+    table.add_column("Level")
+    table.add_column("Check")
+    table.add_column("Detail")
+    for f in findings:
+        level = Text(f.level, style="red" if f.level == ERROR else "yellow")
+        table.add_row(level, f.check, f.detail)
+    console.print(table)
+    if any(f.level == ERROR for f in findings):
+        raise typer.Exit(code=1)
 
 
 @app.command()
