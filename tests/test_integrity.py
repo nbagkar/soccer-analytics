@@ -70,7 +70,10 @@ def test_catches_the_season_ordering_bug(tmp_path, monkeypatch) -> None:
             ]
         )
     assert _checks(path) == []  # fixed key: fine
-    monkeypatch.setattr(integrity, "season_sort_key", lambda s: (s.isdigit() and int(s)) or 0)
+    # The old key scored every "YYYY/YYYY" season 0, so "latest" was whichever row the
+    # database returned first -- arbitrary, so replaying it literally made this test flaky
+    # (3 failures in 10 runs). Force a definitely-wrong order instead: oldest sorts as latest.
+    monkeypatch.setattr(integrity, "season_sort_key", lambda s: -int(s.split("/")[0]))
     found = _checks(path)
     assert [(f.level, f.check) for f in found] == [(ERROR, "season order")]
 
