@@ -322,3 +322,26 @@ class TestHeadlineLeagueDate:
         fresh = data_freshness(settings)
         assert fresh.headline_through is not None and fresh.results_through is not None
         assert fresh.headline_through <= fresh.results_through
+
+
+class TestCachedUntilDataChanges:
+    def test_repeat_calls_hit_the_cache_until_the_file_changes(self, tmp_path) -> None:
+        import os
+
+        from soccer.dashboard.data import _cached_until_data_changes
+
+        db = tmp_path / "store.db"
+        db.write_text("v1")
+        calls: list[int] = []
+
+        @_cached_until_data_changes()
+        def expensive(path, division: str) -> int:
+            calls.append(1)
+            return len(calls)
+
+        assert expensive(db, "E0") == 1
+        assert expensive(db, "E0") == 1  # cached
+        assert expensive(db, "SP1") == 2  # different args -> own entry
+        stat = db.stat()
+        os.utime(db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # a refresh wrote it
+        assert expensive(db, "E0") == 3

@@ -9,10 +9,13 @@ job). A view that cannot be filled by the data we actually have is simply not pr
 
 from __future__ import annotations
 
+import functools
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ParamSpec, TypeVar, cast
 
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
@@ -126,6 +129,48 @@ def live_snapshot(
         shown = [v for v in shown if v.competition == competition]
 
     return LiveSnapshot(kpis=kpis, matches=shown, competition_counts=competition_counts, mode=mode)
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _cached_until_data_changes(maxsize: int = 32) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Memoize an expensive read until any database file it was given changes.
+
+    The pages cache through Streamlit (keyed on the DB's mtime); the assistant calls these
+    same functions directly and was recomputing a walk-forward evaluation (~7s) or a Monte
+    Carlo season (~2s) on every question. The key adds the mtime of every Path argument,
+    so a data refresh invalidates it exactly as it does the pages' caches.
+    """
+
+    def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        cache: OrderedDict[tuple[Any, ...], _R] = OrderedDict()
+
+        def mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        @functools.wraps(fn)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            values = [*args, *kwargs.values()]
+            stamps = tuple(mtime(v) for v in values if isinstance(v, Path))
+            key = (tuple(str(a) for a in args), tuple(sorted(kwargs.items())), stamps)
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            if len(cache) > maxsize:
+                cache.popitem(last=False)
+            return result
+
+        wrapper.cache_clear = cache.clear  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorate
 
 
 def _last_updated(db: LiveDB) -> datetime | None:
@@ -479,6 +524,7 @@ def _stabilize_thin_samples(
     return promoted
 
 
+@_cached_until_data_changes()
 def season_briefing(
     analytics_db: Path,
     season: str,
@@ -563,6 +609,7 @@ def _next_season_code(code: str) -> str:
 IN_PROGRESS_WINDOW_DAYS = 270
 
 
+@_cached_until_data_changes()
 def upcoming_season_briefing(
     live_db: Path,
     analytics_db: Path,
@@ -1337,6 +1384,7 @@ def market_edge(
         return None
 
 
+@_cached_until_data_changes()
 def forecast_report(
     analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "shots"
 ) -> ForecastReport | None:
