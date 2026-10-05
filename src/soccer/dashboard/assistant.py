@@ -215,6 +215,16 @@ _ALIAS_STOPWORDS = frozenset(
 
 _STOP = {"fc", "afc", "cf", "real", "the", "de", "city", "united", "town", "club"}
 
+# Ordinary question words that are also surnames ("best young players" -> Ashley Young).
+# They match a player only when the player's full name is typed, never as a bare surname.
+_COMMON_WORDS = frozenset(
+    {
+        "young", "youngest", "older", "oldest", "rising", "stars", "talent", "future",
+        "world", "great", "greatest", "goals", "scorer", "player", "players", "season",
+        "league", "striker", "match", "games", "table", "early", "little", "about",
+    }
+)  # fmt: skip
+
 
 def _norm(text: str) -> str:
     """Light normalization for both questions and names: lowercase, fold accents, drop
@@ -547,7 +557,9 @@ def _resolve_player(
     for player, mins in adb.player_minutes():
         name = _norm(player)
         tokens = [
-            t for t in name.split() if len(t) >= 5 and t not in _STOP and t not in team_tokens
+            t
+            for t in name.split()
+            if len(t) >= 5 and t not in _STOP and t not in _COMMON_WORDS and t not in team_tokens
         ]
         if (name in q or any(t in q_words for t in tokens)) and mins > best_mins:
             best, best_mins = player, mins
@@ -571,14 +583,25 @@ def _resolve_players(
         pos = q.find(name) if name in q else -1
         if pos == -1:
             for t in name.split():
-                if len(t) >= 5 and t not in _STOP and t not in team_tokens and t in q_words:
+                if (
+                    len(t) >= 5
+                    and t not in _STOP
+                    and t not in _COMMON_WORDS
+                    and t not in team_tokens
+                    and t in q_words
+                ):
                     p = q.find(t)
                     if p != -1 and (pos == -1 or p < pos):
                         pos = p
         if pos != -1:
             found[player] = (pos, mins)
-    ordered = sorted(found.items(), key=lambda kv: (kv[1][0], -kv[1][1]))
-    return [player for player, _ in ordered[:limit]]
+    # One player per mention: "salah" names Mohamed Salah (most minutes), not also Ibrahim
+    # Salah -- otherwise one name could fill both sides of a comparison.
+    per_mention: dict[int, tuple[str, int]] = {}
+    for player, (pos, mins) in found.items():
+        if pos not in per_mention or mins > per_mention[pos][1]:
+            per_mention[pos] = (player, mins)
+    return [per_mention[pos][0] for pos in sorted(per_mention)[:limit]]
 
 
 # --- intents -----------------------------------------------------------------
@@ -954,6 +977,8 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
         order = "contributions"
     else:
         order = "goals"
+    if re.search(r"this season|current season|so far this (season|year)|right now", q):
+        return _current_season_scoring(q, analytics_db)
     with AnalyticsDB(analytics_db) as adb:
         if adb.player_stats_count() == 0:
             return Reply(
@@ -993,22 +1018,47 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
             f"**Top scorers{scope}** — {lead.player} leads with "
             f"**{lead.goals} goals** (xG {lead.xg:.1f})."
         )
-    # "Top scorers" reads as "right now" to most people, but the free player-level data
-    # (StatsBomb) is a fixed historical archive with no current-season coverage -- this is
-    # always pooled across every loaded season, all-time, never just the current one. Spell
-    # that out explicitly (not just a trailing caption) whenever the question asked for
-    # "this season" specifically, since that qualifier silently cannot be honoured.
-    if re.search(r"this season|current season|so far this (season|year)|right now", q):
-        caveat = (
-            " Note: free player-level data doesn't cover the current season, so this can't be "
-            "narrowed to it — shown across every loaded historical season instead."
-        )
-    else:
-        caveat = " All-time across every loaded season, not just the current one."
+    # The free player-level data (StatsBomb) is a fixed historical archive, so this is always
+    # pooled across every loaded season. "This season" questions never reach here -- see
+    # _current_season_scoring.
+    caveat = " All-time across every loaded historical season, not the current one."
     return Reply(
         headline + caveat,
         table=rows,
         suggestions=[f"Tell me about {lead.player}", "Who is the best playmaker?"],
+    )
+
+
+def _current_season_scoring(q: str, analytics_db: Path) -> Reply | None:
+    """'Most goals this season': say plainly that per-player data can't answer it, then answer
+    what the results can -- the highest-scoring teams this season. Leading with an all-time
+    archive leader (and a caveat after) read as a confident wrong answer."""
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+        table = adb.league_table(season, division)
+    if not table:
+        return None
+    ranked = sorted(table, key=lambda r: (-r.goals_for, r.played))
+    rows = [
+        {
+            "Team": r.team,
+            "P": r.played,
+            "Goals": r.goals_for,
+            "Per game": round(r.goals_for / max(r.played, 1), 2),
+        }
+        for r in ranked[:8]
+    ]
+    top = ranked[0]
+    return Reply(
+        "I can't name this season's top **player** scorers — the free player-level data "
+        "(StatsBomb) is a historical archive with no current-season coverage. What I can "
+        f"tell you: the highest-scoring **team** in {division_name(division)} "
+        f"{season_label(season)} is **{top.team}** with **{top.goals_for}** in {top.played}.",
+        table=rows,
+        suggestions=["All-time top scorers", f"{division_name(division)} table"],
     )
 
 
@@ -1068,6 +1118,15 @@ def _intent_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         names = _resolve_players(q, adb, _team_tokens(adb), limit=2)
         maybe_profiles = [adb.player_profile(n) for n in names]
     profiles = [p for p in maybe_profiles if p is not None]
+    if len(profiles) == 1:
+        missing = _unresolved_name(q, profiles[0].player)
+        if missing:
+            return Reply(
+                f"I have **{profiles[0].player}**, but no player matching **{missing}** in the "
+                "loaded data — player stats come from StatsBomb's free historical archive, "
+                "which covers selected competitions and seasons only.",
+                suggestions=[f"Tell me about {profiles[0].player}", "Top scorers"],
+            )
     if len(profiles) < 2:
         return None
     a, b = profiles[0], profiles[1]
@@ -1089,6 +1148,45 @@ def _intent_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         table=rows,
         suggestions=[f"Tell me about {a.player}", f"Tell me about {b.player}"],
     )
+
+
+_COMPARE_FILLER = frozenset(
+    [
+        "compare",
+        "compared",
+        "comparison",
+        "to",
+        "and",
+        "with",
+        "vs",
+        "versus",
+        "v",
+        "or",
+        "better",
+        "than",
+        "who",
+        "is",
+        "whos",
+        "was",
+        "between",
+        "stats",
+        "statistics",
+        "the",
+        "a",
+        "me",
+        "show",
+        "player",
+        "players",
+    ]
+)
+
+
+def _unresolved_name(q: str, found: str) -> str:
+    """The words of a comparison left once filler and the resolved player's name are removed --
+    i.e. the other name the user typed that matched nobody ("" if nothing is left)."""
+    known = set(_norm(found).split())
+    rest = [w for w in q.split() if w not in _COMPARE_FILLER and w not in known]
+    return " ".join(rest).title()
 
 
 def _intent_model(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
@@ -1315,7 +1413,15 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
                 suggestions=["Who are the favourites?", f"How is {name}'s form?"],
             )
 
-    projs = sorted(briefing.projections, key=lambda p: -p.title_pct)[:6]
+    # Rank and headline by what was actually asked -- a relegation question answered with the
+    # title favourites is a confident wrong answer, worse than none.
+    if re.search(r"relegat|go(ing)? down|drop(ped)? down|bottom (three|3)|the drop", q):
+        focus, label = "relegation_pct", "relegation"
+    elif re.search(r"top (four|4)|champions league (places|spots)", q):
+        focus, label = "top_pct", "a top-four finish"
+    else:
+        focus, label = "title_pct", "the title"
+    projs = sorted(briefing.projections, key=lambda p: -getattr(p, focus))[:6]
     rows = [
         {
             "Team": names.get(p.team, p.team),
@@ -1325,11 +1431,12 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
         }
         for p in projs
     ]
-    fav = projs[0]
+    lead = ", ".join(
+        f"**{names.get(p.team, p.team)}** ({getattr(p, focus):.0%})" for p in projs[:3]
+    )
     return Reply(
-        f"**{division_name(division)} {season_label(briefing.season)} projection** — "
-        f"{names.get(fav.team, fav.team)} are favourites at **{fav.title_pct:.0%}** to win it. "
-        "A pre-season model off recent strengths, blind to transfers.",
+        f"**{division_name(division)} {season_label(briefing.season)} projection** — most likely "
+        f"for {label}: {lead}. A Monte-Carlo sim off recent strengths, blind to transfers.",
         table=rows,
         suggestions=["Who is in form?", "Show upcoming fixtures"],
     )
@@ -1479,11 +1586,16 @@ def _intent_live(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
         for m in snap.matches[:12]
     ]
     if snap.mode == "live":
-        head = f"**{snap.kpis.in_play} match(es) in play** right now:"
+        head = f"**{snap.kpis.in_play} match(es) in play**:"
     else:
         head = "Nothing is live right now — here are **full-time results from the last 7 days**:"
+    aging = (
+        " Scores this old may have moved on — **Home → Refresh live scores** for the latest."
+        if snap.kpis.is_aging
+        else ""
+    )
     return Reply(
-        f"{head} (last refreshed {snap.kpis.freshness_label}).",
+        f"{head} (last refreshed {snap.kpis.freshness_label}).{aging}",
         table=rows,
         suggestions=["Show upcoming fixtures", "Who is top of the Premier League?"],
     )
@@ -1626,13 +1738,29 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     with AnalyticsDB(analytics_db) as adb:
         index = _team_index(adb, _loaded_divisions(adb))
     named = _resolve_teams(q, index)
-    # A named club's next match can be weeks out, past the first slice by kickoff, so pull a
-    # wide window when filtering to a club (its next game is always near the front); stay
-    # cheap for the league-wide view. Slates are computed per fixture, so keep this bounded.
-    limit = 500 if named else 60
-    fixtures = [
-        f for f in fixture_forecasts(live_db, analytics_db, limit=limit) if f.slate is not None
-    ]
+    competition = _fixture_competition(q)
+    # A named club's (or competition's) next match can be weeks out, past the first slice by
+    # kickoff, so pull a wide window when filtering; stay cheap for the all-competitions view.
+    # Slates are computed per fixture, so keep this bounded.
+    limit = 500 if named or competition else 60
+    every = fixture_forecasts(live_db, analytics_db, limit=limit)
+    if competition:
+        every = [f for f in every if f.competition == competition]
+    fixtures = [f for f in every if f.slate is not None]
+    if competition and not fixtures:
+        if not every:
+            return Reply(f"No upcoming **{competition}** fixtures are loaded.")
+        # Loaded but unforecastable (no league model covers a cross-league cup): still list
+        # them -- "none loaded" would be false.
+        listed: list[dict[str, Any]] = [
+            {"Date": f.kickoff_utc.strftime("%b %d"), "Match": f"{f.home} v {f.away}"}
+            for f in every[:10]
+        ]
+        return Reply(
+            f"**{len(every)} upcoming {competition} matches.** No forecasts for these — the "
+            "model is fitted per domestic league, and cup ties mix clubs across leagues.",
+            table=listed,
+        )
     if not fixtures:
         return Reply("No upcoming fixtures with a forecast yet — try **Home → Update fixtures**.")
 
@@ -1687,11 +1815,42 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
                 "Away %": round(100 * res[2]),
             }
         )
+    scope = f" in the **{competition}**" if competition else ""
     return Reply(
-        f"**{len(fixtures)} upcoming matches** with forecasts. The next few:",
+        f"**{len(fixtures)} upcoming matches**{scope} with forecasts. The next few:",
         table=rows,
         suggestions=["Who will win the league?", "Who is in form?"],
     )
+
+
+# Question phrases -> the competition names football-data.org gives fixtures. Longest phrase
+# wins, and "serie a" is Italy's: Brazil's top flight needs "brazil"/"brasileirao".
+_FIXTURE_COMPETITIONS = {
+    "champions league": "UEFA Champions League",
+    "ucl": "UEFA Champions League",
+    "premier league": "Premier League",
+    "prem": "Premier League",
+    "epl": "Premier League",
+    "championship": "Championship",
+    "la liga": "Primera Division",
+    "laliga": "Primera Division",
+    "bundesliga": "Bundesliga",
+    "serie a": "Serie A",
+    "ligue 1": "Ligue 1",
+    "eredivisie": "Eredivisie",
+    "primeira liga": "Primeira Liga",
+    "portuguese league": "Primeira Liga",
+    "brasileirao": "Campeonato Brasileiro Série A",
+    "brazil": "Campeonato Brasileiro Série A",
+    "libertadores": "Copa Libertadores",
+}
+
+
+def _fixture_competition(q: str) -> str | None:
+    for phrase in sorted(_FIXTURE_COMPETITIONS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(phrase)}\b", q):
+            return _FIXTURE_COMPETITIONS[phrase]
+    return None
 
 
 def _intent_h2h(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:

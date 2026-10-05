@@ -8,6 +8,7 @@ store so the checks are deterministic.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 
 from soccer.dashboard.assistant import answer
 from tests.test_dashboard_data import seed_player_events, seed_results
@@ -284,12 +285,16 @@ class TestRouting:
         assert "goals" in reply.text.lower()
         assert "all-time" in reply.text.lower()  # scoped honestly, not implied "right now"
 
-    def test_top_scorers_this_season_gets_an_explicit_caveat(self, tmp_path) -> None:
-        # The free player-level archive has no current-season coverage -- "this season"
-        # cannot be honoured, so the answer must say so rather than silently ignoring it.
-        reply = answer("top scorers this season", _seed(tmp_path))
-        assert reply.table is not None
-        assert "doesn't cover the current season" in reply.text
+    def test_top_scorers_this_season_leads_with_the_limit_not_an_archive_leader(
+        self, tmp_path
+    ) -> None:
+        # The free player-level archive has no current-season coverage. Leading with an
+        # all-time leader ("Messi leads with 508") answered a different question; instead say
+        # so first, then answer what results can: the highest-scoring teams this season.
+        reply = answer("who scored the most goals this season", _seed(tmp_path))
+        assert reply.text.startswith("I can't name this season's top **player** scorers")
+        assert "Messi" not in reply.text
+        assert reply.table and reply.table[0]["Team"] == "Arsenal"  # most goals in the seed
 
     def test_best_player_by_involvement(self, tmp_path) -> None:
         # "best player" (no "scorer"/"goals") must still reach the leaderboard, ranked by
@@ -833,3 +838,114 @@ class TestCoverageGaps:
         assert reply.intent == "live"
         assert "in play" in reply.text
         assert reply.table and reply.table[0]["Match"] == "Arsenal FC v Chelsea FC"
+
+
+def _seed_named_players(tmp_path, players: list[tuple[str, int]]):
+    """Player-stat rows for the given (name, minutes) -- for name-resolution tests."""
+    from soccer.sources.statsbomb import PlayerMatchStats
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    zero = dict.fromkeys(
+        [
+            "passes",
+            "passes_completed",
+            "key_passes",
+            "assists",
+            "progressive_passes",
+            "carries",
+            "progressive_carries",
+            "dribbles",
+            "dribbles_completed",
+            "tackles",
+            "tackles_won",
+            "interceptions",
+            "blocks",
+            "clearances",
+            "ball_recoveries",
+            "pressures",
+            "fouls",
+            "fouled",
+            "yellow_cards",
+            "red_cards",
+            "touches",
+        ],
+        0,
+    )
+    path = _seed(tmp_path)
+    with AnalyticsDB(path) as adb:
+        adb.load_player_stats(
+            [
+                PlayerMatchStats(
+                    match_id=900 + i,
+                    player=name,
+                    team="Club",
+                    position="Right Wing",
+                    minutes=mins,
+                    xa=0.0,
+                    **zero,
+                )
+                for i, (name, mins) in enumerate(players)
+            ]
+        )
+    return path
+
+
+class TestConfidentWrongAnswers:
+    """A probe found answers that were confidently wrong -- worse than no answer at all."""
+
+    def test_relegation_question_ranks_by_relegation(self, tmp_path) -> None:
+        reply = answer("who is going to get relegated", _seed(tmp_path))
+        assert reply.intent == "title_odds"
+        assert "most likely for relegation" in reply.text
+        assert reply.table
+        pcts = [r["Relegation %"] for r in reply.table]
+        assert pcts == sorted(pcts, reverse=True)
+
+    def test_top_four_question_ranks_by_top_four(self, tmp_path) -> None:
+        reply = answer("who will finish top four", _seed(tmp_path))
+        assert "top-four finish" in reply.text
+
+    def test_one_surname_cannot_fill_both_sides_of_a_comparison(self, tmp_path) -> None:
+        # "salah" matched Mohamed AND Ibrahim Salah, so "compare haaland and salah" compared
+        # two Salahs. Now: one player per name, and the unknown name is called out.
+        path = _seed_named_players(tmp_path, [("Mohamed Salah", 3000), ("Ibrahim Salah", 90)])
+        reply = answer("compare haaland and salah", path)
+        assert reply.intent == "compare"
+        assert "**Mohamed Salah**" in reply.text and "Haaland" in reply.text
+        assert "Ibrahim" not in reply.text
+
+    def test_common_words_are_not_surnames(self, tmp_path) -> None:
+        path = _seed_named_players(tmp_path, [("Ashley Young", 3000)])
+        assert "Ashley Young" not in answer("best young players", path).text
+        # ...but the full name still finds him.
+        assert "Ashley Young" in answer("tell me about ashley young", path).text
+
+    def test_champions_league_fixtures_are_filtered_and_listed(self, tmp_path) -> None:
+        from soccer.domain.match_state import MatchStatus
+        from soccer.storage.live_db import LiveDB
+        from tests.test_dashboard_data import add_match
+
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as db:
+            add_match(
+                db,
+                match_id="cl1",
+                home="Lens",
+                away="Sporting",
+                competition="UEFA Champions League",
+                status=MatchStatus.NOT_STARTED,
+                observed_at=datetime.now(UTC) + timedelta(days=3),
+            )
+            add_match(
+                db,
+                match_id="pl1",
+                home="Arsenal",
+                away="Chelsea",
+                competition="Premier League",
+                status=MatchStatus.NOT_STARTED,
+                observed_at=datetime.now(UTC) + timedelta(days=2),
+            )
+        reply = answer("champions league fixtures", _seed(tmp_path), live)
+        assert reply.intent == "fixtures"
+        assert "UEFA Champions League" in reply.text
+        assert reply.table and [r["Match"] for r in reply.table] == ["Lens v Sporting"]
