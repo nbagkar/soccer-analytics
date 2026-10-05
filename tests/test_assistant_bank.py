@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from tests.assistant_bank import DEV, HOLDOUT, build_store, report, score
 
-# Baseline 2026-10-05, before any fix: DEV 21/45, HOLDOUT 5/20.
-DEV_FLOOR = 21
-HOLDOUT_FLOOR = 5
+# 2026-10-05 baseline before any fix: DEV 21/45, HOLDOUT 6/20 (re-scored once the scorer
+# began reading reply tables; 5/20 text-only). After the first category fixes (club stats,
+# time words, derbies/aliases, team compare, scoring, improvement): DEV 45/45, HOLDOUT 18/20.
+DEV_FLOOR = 45
+HOLDOUT_FLOOR = 18
 
 
 def test_question_bank_score_never_drops(tmp_path) -> None:

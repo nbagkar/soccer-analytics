@@ -17,6 +17,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -189,7 +190,44 @@ _TEAM_ALIASES = {
     "toffees": "everton",
     "hammers": "west ham",
     "psg": "paris sg",
+    # Everyday short names for clubs whose stored name is longer.
+    "bayern": "bayern munich",
+    "barca": "barcelona",
+    "atletico": "ath madrid",
+    "juve": "juventus",
+    "inter milan": "inter",
+    "ac milan": "milan",
 }
+
+# Named derbies -> their two clubs, joined with "and" (not "vs", which would read as a forecast
+# request). Without this, "derby" matched Derby County: "the next north london derby" answered
+# with Derby's fixtures.
+_DERBIES = {
+    "north london derby": "arsenal and tottenham",
+    "manchester derby": "man city and man united",
+    "merseyside derby": "liverpool and everton",
+    "north west derby": "liverpool and man united",
+    "tyne wear derby": "newcastle and sunderland",
+    "old firm": "celtic and rangers",
+    "el clasico": "real madrid and barcelona",
+    "madrid derby": "real madrid and ath madrid",
+    "der klassiker": "bayern munich and dortmund",
+    "de klassieker": "ajax and feyenoord",
+    "derby della madonnina": "inter and milan",
+    "milan derby": "inter and milan",
+}
+
+
+def _expand_derbies(q: str) -> str:
+    for phrase in sorted(_DERBIES, key=len, reverse=True):
+        q = re.sub(rf"\b(the )?{phrase}\b", _DERBIES[phrase], q)
+    return q
+
+
+# Season qualifiers: a question scoped to a past season is about that season's record, not
+# "the last few games".
+_SEASON_QUALIFIER = re.compile(r"\blast season\b|\b(?:19|20)\d{2}\b|\b\d{2} \d{2}\b")
+
 
 # Bare "United"/"City" colloquially mean the Manchester clubs -- but they're also the tail of
 # a dozen other clubs (Sheffield/Leeds/Newcastle United, Leicester/Norwich City). Resolving
@@ -266,6 +304,7 @@ def answer(
             "some — no terminal needed.",
             intent="no_data",
         )
+    q = _expand_derbies(q)
     q = _augment_with_context(q, context)
     reply = _route(q, analytics_db, live_db)
     reply.context = _capture_context(q, analytics_db, context)
@@ -277,6 +316,7 @@ def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None]
     return (
         _intent_help,
         _intent_compare,
+        _intent_team_compare,
         _intent_league_compare,
         _intent_season_compare,
         _intent_h2h,
@@ -292,11 +332,13 @@ def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None]
         _intent_match_log,
         _intent_availability,
         _intent_squad,
+        _intent_scoring,
         _intent_top_scorers,
         _intent_player,
         _intent_title_odds,
         _intent_underlying,
         _intent_records,
+        _intent_improvement,
         _intent_defence,
         _intent_form,
         _intent_standings,
@@ -650,6 +692,10 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     for display, division, season in teams:
         by_div.setdefault(division, []).append((display, season))
     pair = next(((d, t) for d, t in by_div.items() if len(t) >= 2), None)
+    if pair is None and len(teams) >= 2:
+        return _cross_league_forecast(teams[0], teams[1], analytics_db)
+    if pair is None and re.search(r"\b(winner|win the|title|champions?)\b", q):
+        return None  # "predict the bundesliga winner" is a title question, not a match
     if pair is None:
         # A clear match-forecast ask ("match forecasts", "predict Arsenal") but not two
         # teams -> guide, rather than falling through to a blank "I'm not sure".
@@ -979,7 +1025,32 @@ def _intent_top_scorers(q: str, analytics_db: Path, live_db: Path | None) -> Rep
         order = "goals"
     if re.search(r"this season|current season|so far this (season|year)|right now", q):
         return _current_season_scoring(q, analytics_db)
+    club = _named_club(q, analytics_db)
     with AnalyticsDB(analytics_db) as adb:
+        if club is not None:
+            # "Top scorer for Arsenal": only that club's players -- never the archive's
+            # overall leader under a club's name.
+            token = _norm(club).split()[0]
+            mine = [
+                p
+                for p in adb.player_profiles(limit=200, min_minutes=1, order="goals")
+                if token in _norm(p.team)
+            ]
+            if not mine:
+                return Reply(
+                    f"I have no player data for **{club}** — player stats come from "
+                    "StatsBomb's free historical archive (selected competitions and seasons), "
+                    "not the current season."
+                )
+            lead = mine[0]
+            return Reply(
+                f"**{club}'s top scorer** in the loaded historical archive: **{lead.player}** "
+                f"with **{lead.goals}** goals ({lead.team}). Not the current season.",
+                table=[
+                    {"Player": p.player, "Team": p.team, "Goals": p.goals, "Assists": p.assists}
+                    for p in mine[:8]
+                ],
+            )
         if adb.player_stats_count() == 0:
             return Reply(
                 "I don't have per-player data loaded yet. Go to "
@@ -1099,6 +1170,8 @@ def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | 
         f"- {profile.key_passes} key passes · {profile.pass_pct:.0f}% passing · "
         f"{profile.progressive_passes + profile.progressive_carries} progressive actions\n"
         f"- Defending: {profile.tackles} tackles, {profile.interceptions} interceptions"
+        "\n\n_Player stats come from StatsBomb's free historical archive (selected "
+        "competitions and seasons), not the current season._"
     )
     return Reply(text, suggestions=["Top scorers", "Who is the best playmaker?"])
 
@@ -1277,6 +1350,11 @@ def _intent_honours(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
 
 
 def _intent_team(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    venue = re.search(r"\b(home|away)\b", q)
+    if venue and re.search(r"\b(record|form|results?)\b", q):
+        reply = _venue_record(q, venue.group(1), analytics_db)
+        if reply is not None:
+            return reply
     kw = re.search(
         r"tell me about|how (are|is|good|s)\b|hows\b|what about|whats up with|profile of"
         r"|overview|report on|scout|any good|doing|season so far|rate\b|breakdown|dossier",
@@ -1363,10 +1441,12 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
         r"win the (league|title|season)|winning the (league|title|season)"
         r"|chances? (of|to) win|chance to win|odds (of|to) win|likely to win"
         r"|who will win|who wins|\btitle\b|champions?\b(?! league)|relegat|top four|top 4"
-        r"|finish|title race|win it\b",
+        r"|finish|title race|win it\b|winner|going down",
         q,
     ):
         return None
+    if re.search(r"relegation zone|drop zone|bottom (three|3)", q):
+        return None  # the table as it stands -> standings
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
         if not loaded:
@@ -1445,6 +1525,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
 def _intent_records(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(r"\b(unbeaten|streak|biggest win|highest scoring|records?|thrash)\b", q):
         return None
+    if re.search(r"\b(home|away)\b", q) and _names_a_team(q, analytics_db):
+        return None  # "Man City's home record" -> the team intent
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
         division, season = _league_and_season(q, adb, loaded)
@@ -1509,7 +1591,8 @@ def _intent_form(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
 def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
         r"\b(table|standings?|top of|leading|who is top|whos top|position|rank|where are"
-        r"|who won|who lifted|who topped|winners?)\b",
+        r"|who won|who lifted|who topped|winners?|points|goal difference|gd|sit"
+        r"|relegation zone|drop zone|bottom (three|3)|how did \w+( \w+)? do)\b",
         q,
     ):
         return None
@@ -1523,7 +1606,24 @@ def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply
     if not table:
         return None
     named = _resolve_teams(q, index)
-    if named and re.search(r"\b(where|position|rank)\b", q):
+    if not named and re.search(r"relegation zone|drop zone|bottom (three|3)", q):
+        bottom = table[-3:]
+        return Reply(
+            f"**{division_name(division)} {season_label(season)} relegation zone:** "
+            + ", ".join(f"**{r.team}** ({r.points} pts)" for r in bottom)
+            + ". That's the table as it stands; ask *who is going down?* for projected odds.",
+            table=[
+                {
+                    "#": r.position,
+                    "Team": r.team,
+                    "P": r.played,
+                    "GD": r.goal_difference,
+                    "Pts": r.points,
+                }
+                for r in bottom
+            ],
+        )
+    if named and re.search(r"\b(where|position|rank|sit|points|goal difference|gd|how did)\b", q):
         display = named[0][0]
         row = next((r for r in table if _norm(r.team) == _norm(display)), None)
         if row:
@@ -1605,10 +1705,23 @@ def _intent_recent_results(q: str, analytics_db: Path, live_db: Path | None) -> 
     """The latest results -- a named club's last few games, else the league's latest round."""
     if not re.search(
         r"\b(last (game|match|result|fixture)s?|latest results?|recent results?|what happened"
-        r"|how did \w+( \w+)? (get on|do)|did \w+( \w+)? (win|lose|draw))\b",
+        r"|how did \w+( \w+)? (get on|do)|did \w+( \w+)? (win|lose|draw)"
+        r"|last time|played \w+( \w+)? last|result of the last|last (\w+ ){1,2}(game|match))\b",
         q,
     ):
         return None
+    if _SEASON_QUALIFIER.search(q):
+        return None  # "how did X do last season" -> that season's record (standings)
+    meeting = _last_meeting(q, analytics_db)
+    if meeting is not None:
+        return meeting
+    reply = _latest_results(q, analytics_db)
+    if reply is not None and re.search(r"\bscored?\b|\bscorers?\b", q):
+        reply.text += "\n\n_I don't have goalscorers for league results — only the score._"
+    return reply
+
+
+def _latest_results(q: str, analytics_db: Path) -> Reply | None:
     with AnalyticsDB(analytics_db) as adb:
         loaded = _loaded_divisions(adb)
         named = _resolve_teams(q, _team_index(adb, loaded))
@@ -1666,7 +1779,8 @@ def _intent_defence(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
     """Best (or worst) defence: goals conceded per game, plus clean sheets."""
     if not re.search(
         r"\b((best|meanest|tightest|strongest|worst|leakiest|weakest) (defen[cs]es?|defensive)"
-        r"|clean sheets?|conceded (the )?(fewest|least|most)|(fewest|most) goals conceded)\b",
+        r"|clean sheets?|conceded (the )?(fewest|least|most)|(fewest|most) goals conceded"
+        r"|concedes? (the )?(most|fewest|least)|leakiest)\b",
         q,
     ):
         return None
@@ -1679,53 +1793,322 @@ def _intent_defence(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
         outcomes = adb.outcomes_for(season, division)
     if not table:
         return None
-    clean: dict[str, int] = {}
-    for o in outcomes:
-        if o.ftag == 0:
-            clean[_norm(o.home)] = clean.get(_norm(o.home), 0) + 1
-        if o.fthg == 0:
-            clean[_norm(o.away)] = clean.get(_norm(o.away), 0) + 1
+    venue_m = re.search(r"\b(home|away)\b", q)
+    venue = venue_m.group(1) if venue_m else None
+    stats = _team_stats(outcomes, venue)
     worst = bool(
-        re.search(r"\b(worst|leakiest|weakest|most goals conceded|conceded (the )?most)\b", q)
+        re.search(
+            r"\b(worst|leakiest|weakest|most goals conceded|concedes? (the )?most"
+            r"|conceded (the )?most)\b",
+            q,
+        )
     )
     by_clean = "clean sheet" in q
 
-    def key(r: Any) -> tuple[float, ...]:
-        per_game = r.goals_against / max(r.played, 1)
-        cs = clean.get(_norm(r.team), 0)
+    def key(team: str) -> tuple[float, ...]:
+        st = stats[team]
+        per_game = st["against"] / max(st["played"], 1)
         if by_clean:
-            return (-cs, per_game)
-        return (-per_game, cs) if worst else (per_game, -cs)
+            return (-st["clean"], per_game)
+        return (-per_game, st["clean"]) if worst else (per_game, -st["clean"])
 
-    ranked = sorted(table, key=key)
+    names = {_norm(r.team): r.team for r in table}
+    ranked = sorted(stats, key=key)
+    rows = [
+        {
+            "Team": names.get(t, stats[t]["name"]),
+            "P": stats[t]["played"],
+            "Conceded": stats[t]["against"],
+            "Per game": round(stats[t]["against"] / max(stats[t]["played"], 1), 2),
+            "Clean sheets": stats[t]["clean"],
+        }
+        for t in ranked[:8]
+    ]
+    top = rows[0]
+    where = f" at {venue}" if venue else ""
+    league = f"{division_name(division)} {season_label(season)}"
+    if by_clean:
+        claim = f"the most clean sheets{where} in {league}: **{top['Clean sheets']}**"
+    else:
+        quality = "leakiest" if worst else "best"
+        claim = f"the {quality} defence{where} in {league}: **{top['Per game']}** conceded a game"
+    return Reply(
+        f"**{top['Team']}** have {claim} ({top['Conceded']} in {top['P']}, "
+        f"{top['Clean sheets']} clean sheets).",
+        table=rows,
+        suggestions=[f"{division_name(division)} table", "Which teams are overperforming?"],
+    )
+
+
+def _team_stats(outcomes: list[Any], venue: str | None = None) -> dict[str, dict[str, Any]]:
+    """Per-team played/for/against/clean sheets/points, optionally home- or away-only."""
+    stats: dict[str, dict[str, Any]] = {}
+    for o in outcomes:
+        for side in ("home", "away"):
+            if venue and side != venue:
+                continue
+            team = o.home if side == "home" else o.away
+            gf, ga = (o.fthg, o.ftag) if side == "home" else (o.ftag, o.fthg)
+            st = stats.setdefault(
+                _norm(team),
+                {
+                    "name": team,
+                    "played": 0,
+                    "for": 0,
+                    "against": 0,
+                    "clean": 0,
+                    "w": 0,
+                    "d": 0,
+                    "l": 0,
+                },
+            )
+            st["played"] += 1
+            st["for"] += gf
+            st["against"] += ga
+            st["clean"] += ga == 0
+            st["w" if gf > ga else "d" if gf == ga else "l"] += 1
+    return stats
+
+
+def _named_club(q: str, analytics_db: Path) -> str | None:
+    with AnalyticsDB(analytics_db) as adb:
+        named = _resolve_teams(q, _team_index(adb, _loaded_divisions(adb)))
+    return named[0][0] if named else None
+
+
+def _names_a_team(q: str, analytics_db: Path) -> bool:
+    with AnalyticsDB(analytics_db) as adb:
+        return bool(_resolve_teams(q, _team_index(adb, _loaded_divisions(adb))))
+
+
+def _venue_record(q: str, venue: str, analytics_db: Path) -> Reply | None:
+    """A club's home or away record this season (or the season asked about)."""
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        named = _resolve_teams(q, _team_index(adb, loaded))
+        if not named:
+            return None
+        display, division, season = named[0]
+        seasons = [s for s, d, _n in adb.seasons_loaded() if d == division]
+        season = _resolve_season(q, seasons) or season
+        outcomes = adb.outcomes_for(season, division)
+    st = _team_stats(outcomes, venue).get(_norm(display))
+    if st is None:
+        return None
+    pts = 3 * st["w"] + st["d"]
+    return Reply(
+        f"**{display}'s {venue} record** — {division_name(division)} {season_label(season)}: "
+        f"**{st['w']}W {st['d']}D {st['l']}L** in {st['played']}, {pts} pts "
+        f"({pts / max(st['played'], 1):.2f} per game), goals {st['for']}-{st['against']}, "
+        f"{st['clean']} clean sheets.",
+        suggestions=[
+            f"{display} {'away' if venue == 'home' else 'home'} record",
+            f"Tell me about {display}",
+        ],
+    )
+
+
+def _last_meeting(q: str, analytics_db: Path) -> Reply | None:
+    """'Last time A played B' -> their most recent meeting in the loaded results."""
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        named = _resolve_teams(q, _team_index(adb, loaded))
+        if len(named) < 2:
+            return None
+        (a, division, _s), (b, _d2, _s2) = named[0], named[1]
+        na, nb = _norm(a), _norm(b)
+        seasons = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division},
+            key=season_sort_key,
+            reverse=True,
+        )
+        for season in seasons:
+            games = [
+                o
+                for o in adb.outcomes_for(season, division)
+                if {_norm(o.home), _norm(o.away)} == {na, nb}
+            ]
+            if games:
+                o = games[-1]
+                return Reply(
+                    f"Last meeting: **{o.home} {o.fthg}-{o.ftag} {o.away}** on "
+                    f"{o.match_date:%d %b %Y} ({division_name(division)} {season_label(season)}).",
+                    suggestions=[f"{a} vs {b} head to head", f"{a} vs {b}, who wins next?"],
+                )
+    return None
+
+
+def _cross_league_forecast(
+    first: tuple[str, str, str], second: tuple[str, str, str], analytics_db: Path
+) -> Reply:
+    """Two clubs from different leagues: the cross-league cup model if it can, else say why."""
+    from soccer.dashboard.data import CUP_MODEL_NOTE, _cup_norm, cup_model
+    from soccer.models.markets import compute_markets
+    from soccer.models.poisson import DEFAULT_RHO
+
+    (home, hdiv, _hs), (away, adiv, _as) = first, second
+    fitted = cup_model(Path(analytics_db))
+    if fitted is not None:
+        model, ratings = fitted
+        hr, ar = ratings.get(_cup_norm(_norm(home))), ratings.get(_cup_norm(_norm(away)))
+        if hr is not None and ar is not None:
+            lam, mu = model.expected_goals(hr, ar)
+            slate = compute_markets(home, away, lam, mu, DEFAULT_RHO)
+            res = {m.name: m.probability for m in slate.result}
+            return Reply(
+                f"**{home} vs {away}** (cross-league)\n\n"
+                f"- Expected goals: {home} **{lam:.1f}**, {away} **{mu:.1f}**\n"
+                f"- {home} win **{res[home]:.0%}** · draw **{res['Draw']:.0%}** · "
+                f"{away} win **{res[away]:.0%}**\n\n_{CUP_MODEL_NOTE}_"
+            )
+    return Reply(
+        f"**{home}** ({division_name(hdiv)}) and **{away}** ({division_name(adiv)}) play in "
+        "different leagues, so no domestic model covers this match — and cross-league "
+        "forecasts need Champions League history that isn't loaded yet."
+    )
+
+
+def _intent_team_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """'Compare Arsenal and Spurs' -> the two clubs side by side this season."""
+    if not re.search(r"\b(compare|compared|comparison|better|stronger|side by side)\b", q):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        named = _resolve_teams(q, _team_index(adb, loaded))
+        if len(named) < 2:
+            return None
+        picks = named[:2]
+        rows_by: dict[str, Any] = {}
+        for display, division, season in picks:
+            table = adb.league_table(season, division)
+            row = next((r for r in table if _norm(r.team) == _norm(display)), None)
+            if row is None:
+                return None
+            rows_by[display] = (row, division, season)
+    (a, (ra, da, sa)), (b, (rb, db_, sb)) = rows_by.items()
+    metrics = [
+        (
+            "League",
+            f"{division_name(da)} {season_label(sa)}",
+            f"{division_name(db_)} {season_label(sb)}",
+        ),
+        ("Position", _ordinal(ra.position), _ordinal(rb.position)),
+        ("Points", ra.points, rb.points),
+        ("Played", ra.played, rb.played),
+        ("W-D-L", f"{ra.won}-{ra.drawn}-{ra.lost}", f"{rb.won}-{rb.drawn}-{rb.lost}"),
+        ("Goals for", ra.goals_for, rb.goals_for),
+        ("Goals against", ra.goals_against, rb.goals_against),
+        ("Goal difference", f"{ra.goal_difference:+d}", f"{rb.goal_difference:+d}"),
+    ]
+    ppg_a, ppg_b = ra.points / max(ra.played, 1), rb.points / max(rb.played, 1)
+    ahead = a if ppg_a >= ppg_b else b
+    return Reply(
+        f"**{a}** vs **{b}** — **{ahead}** have the better season so far "
+        f"({max(ppg_a, ppg_b):.2f} vs {min(ppg_a, ppg_b):.2f} points per game).",
+        table=[{"": m, a: x, b: y} for m, x, y in metrics],
+        suggestions=[f"{a} vs {b}, who wins?", f"{a} vs {b} head to head"],
+    )
+
+
+def _intent_scoring(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """Team scoring: best/worst attack, highest/lowest scoring sides -- not player scorers."""
+    if not re.search(
+        r"\b((best|worst|strongest|weakest|deadliest|most potent) attack"
+        r"|(highest|lowest|top|most|least|fewest)[ -]scoring (team|side|club)s?"
+        r"|(team|side|club)s? (that )?(score|scores|scored|scoring) (the )?(most|fewest|least)"
+        r"|which (team|side|club)s? scores?|scores? the (most|fewest|least) goals"
+        r"|most goals scored)\b",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+        table = adb.league_table(season, division)
+    if not table:
+        return None
+    low = bool(re.search(r"\b(worst|weakest|lowest|least|fewest)\b", q))
+    ranked = sorted(table, key=lambda r: (r.goals_for / max(r.played, 1)) * (1 if low else -1))
     rows = [
         {
             "Team": r.team,
             "P": r.played,
-            "Conceded": r.goals_against,
-            "Per game": round(r.goals_against / max(r.played, 1), 2),
-            "Clean sheets": clean.get(_norm(r.team), 0),
+            "Scored": r.goals_for,
+            "Per game": round(r.goals_for / max(r.played, 1), 2),
         }
         for r in ranked[:8]
     ]
     top = rows[0]
-    league = f"{division_name(division)} {season_label(season)}"
-    if by_clean:
-        claim = f"the most clean sheets in {league}: **{top['Clean sheets']}**"
-    else:
-        quality = "leakiest" if worst else "best"
-        claim = f"the {quality} defence in {league}: **{top['Per game']}** conceded a game"
-    head = f"**{top['Team']}** have {claim}"
+    label = "lowest-scoring" if low else "highest-scoring"
     return Reply(
-        f"{head} ({top['Conceded']} in {top['P']}, {top['Clean sheets']} clean sheets).",
+        f"**{top['Team']}** are the {label} team in {division_name(division)} "
+        f"{season_label(season)}: **{top['Scored']}** in {top['P']} "
+        f"({top['Per game']} a game).",
         table=rows,
-        suggestions=[f"{division_name(division)} table", "Which teams are overperforming?"],
+        suggestions=["Which team has the best defence?", f"{division_name(division)} table"],
+    )
+
+
+def _intent_improvement(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """Most improved (or declined) clubs: points per game this season vs last."""
+    if not re.search(
+        r"\b(most improved|improved|improvement|biggest (rise|risers|jump)|gone backwards"
+        r"|declined|gone downhill|better than last season|worse than last season)\b",
+        q,
+    ):
+        return None
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+        seasons = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division}, key=season_sort_key
+        )
+        if season not in seasons or seasons.index(season) == 0:
+            return None
+        previous = seasons[seasons.index(season) - 1]
+        now = {_norm(r.team): r for r in adb.league_table(season, division)}
+        before = {_norm(r.team): r for r in adb.league_table(previous, division)}
+    common = [t for t in now if t in before]
+    if not common:
+        return None
+
+    def ppg(r: Any) -> float:
+        return float(r.points / max(r.played, 1))
+
+    worse = bool(re.search(r"\b(declined|backwards|downhill|worse)\b", q))
+    ranked = sorted(common, key=lambda t: (ppg(now[t]) - ppg(before[t])) * (1 if worse else -1))
+    rows = [
+        {
+            "Team": now[t].team,
+            f"{season_label(previous)} ppg": round(ppg(before[t]), 2),
+            f"{season_label(season)} ppg": round(ppg(now[t]), 2),
+            "Change": f"{ppg(now[t]) - ppg(before[t]):+.2f}",
+        }
+        for t in ranked[:8]
+    ]
+    top = now[ranked[0]]
+    word = "declined most" if worse else "improved most"
+    return Reply(
+        f"**{top.team}** have {word} in {division_name(division)}: "
+        f"{ppg(before[ranked[0]]):.2f} → **{ppg(top):.2f}** points per game "
+        f"({season_label(previous)} → {season_label(season)}). Promoted/relegated clubs aren't "
+        "compared.",
+        table=rows,
     )
 
 
 def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
         r"\b(fixtures?|upcoming|next (game|match|fixture|up)|who ?s playing|this weekends?"
+        r"|tonight|today|playing next|plays? next|who plays"
         r"|schedule|play next|playing next)\b|when (do|does|will|are|is) \w+",
         q,
     ):
@@ -1742,10 +2125,18 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     # A named club's (or competition's) next match can be weeks out, past the first slice by
     # kickoff, so pull a wide window when filtering; stay cheap for the all-competitions view.
     # Slates are computed per fixture, so keep this bounded.
-    limit = 500 if named or competition else 60
+    # Two named clubs: their meeting can be months out, so search the whole loaded schedule
+    # (the same call the Predictions page warms, so it is a cache hit).
+    limit = 5000 if len(named) >= 2 else 500 if named or competition else 60
     every = fixture_forecasts(live_db, analytics_db, limit=limit)
     if competition:
         every = [f for f in every if f.competition == competition]
+    if re.search(r"\b(tonight|today|this evening)\b", q):
+        # "Today/tonight" = the next 24 hours: robust across midnight and time zones.
+        horizon = datetime.now(UTC) + timedelta(hours=24)
+        every = [f for f in every if f.kickoff_utc <= horizon]
+        if not every:
+            return Reply("No fixtures in the next 24 hours in the loaded schedule.")
     fixtures = [f for f in every if f.slate is not None]
     if competition and not fixtures:
         if not every:
@@ -1764,6 +2155,25 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     if not fixtures:
         return Reply("No upcoming fixtures with a forecast yet — try **Home → Update fixtures**.")
 
+    if len(named) >= 2:  # two clubs (or a named derby) -> their next meeting
+        a, b = _norm(named[0][0]), _norm(named[1][0])
+        meet = [
+            f
+            for f in fixtures
+            if {a, b} <= {_norm(f.home), _norm(f.away)}
+            or (a in _norm(f.home + " " + f.away) and b in _norm(f.home + " " + f.away))
+        ]
+        if not meet:
+            return Reply(f"No upcoming **{named[0][0]} v {named[1][0]}** in the loaded schedule.")
+        f = meet[0]
+        assert f.slate is not None
+        res = [m.probability for m in f.slate.result]
+        return Reply(
+            f"Next meeting: **{f.home} v {f.away}** on {f.kickoff_utc.strftime('%a %b %d')} "
+            f"({f.competition}) — {f.home} **{res[0]:.0%}** · draw **{res[1]:.0%}** · "
+            f"{f.away} **{res[2]:.0%}**.",
+            suggestions=[f"{f.home} vs {f.away} head to head", f"{f.home} vs {f.away}, who wins?"],
+        )
     if named:  # a club is named -> that club's own schedule, team-first
         tnorm = _norm(named[0][0])
         mine = [f for f in fixtures if tnorm in _norm(f.home) or tnorm in _norm(f.away)]

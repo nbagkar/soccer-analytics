@@ -98,6 +98,9 @@ def build_store(tmp_path: Path) -> tuple[Path, Path]:
     with LiveDB(live) as db:
         for i, (home, away, comp, hours) in enumerate(
             [
+                # Arsenal's NEXT match is not the derby, so "next north london derby" must
+                # find the meeting rather than just Arsenal's next game.
+                ("Arsenal FC", "Brighton & Hove Albion FC", "Premier League", 2),  # tonight
                 ("Arsenal FC", "Tottenham Hotspur FC", "Premier League", 3),  # tonight
                 ("Chelsea FC", "Liverpool FC", "Premier League", 27),
                 ("Derby County FC", "Wrexham AFC", "Championship", 28),
@@ -245,7 +248,9 @@ def score(cases: list[Case], analytics: Path, live: Path) -> list[Result]:
     results = []
     for case in cases:
         reply = answer(case.question, analytics, live)
-        text = reply.text
+        # The whole reply counts: list answers carry their names in the table, not the text.
+        cells = [str(v) for row in (reply.table or []) for v in row.values()]
+        text = " ".join([reply.text, *cells])
         problems = []
         if reply.intent not in case.intents:
             problems.append(f"intent {reply.intent!r}, expected one of {case.intents}")
