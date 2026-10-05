@@ -49,7 +49,9 @@ from soccer.storage.live_db import LiveDB
 # button-driven, no-terminal-needed dashboard does not require. `any_stale` below only flags
 # a source that actively failed and fell back to cache; it says nothing about a fetch that
 # succeeded but is simply old, which is the common case for a casual, one-off "Refresh".
-STALE_LIVE_AGE_MINUTES = 120
+# 30 minutes: a third of a match. At 120, a snapshot showing games in stoppage time ("90+6")
+# still read as live 52 minutes later, long after they had finished.
+STALE_LIVE_AGE_MINUTES = 30
 
 
 @dataclass(frozen=True)
