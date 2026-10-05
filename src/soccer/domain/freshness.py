@@ -21,11 +21,14 @@ RESULTS = "results"
 FIXTURES = "fixtures"
 INJURIES = "injuries"
 SQUADS = "squads"
-JOBS = (RESULTS, FIXTURES, INJURIES, SQUADS)
+LIVE = "live"
+JOBS = (RESULTS, FIXTURES, INJURIES, SQUADS, LIVE)
 
 STALE_AFTER = timedelta(hours=24)
 # Rosters change at transfer windows, not daily -- a weekly re-pull is plenty.
 SQUADS_STALE_AFTER = timedelta(days=7)
+# A third of a match: past this, "in play" statuses are more likely finished than live.
+LIVE_STALE_AFTER = timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,8 @@ class Freshness:
     so a cache fallback still reads as old). None if none is stored."""
     squads_as_of: date | None = None
     """When the stored squads were fetched. None if none are stored."""
+    live_checked_at: datetime | None = None
+    """Last *successful* live-scores refresh (TheSportsDB); None if never recorded."""
     headline_through: date | None = None
     """The newest Premier League result. Shown beside the store-wide date when it lags, so
     a busy MLS/Brazil calendar can't make the headline league look more current than it is
@@ -102,6 +107,11 @@ class Freshness:
     @property
     def injuries_stale(self) -> bool:
         return self.injuries_as_of is None or self.now - self.injuries_as_of > STALE_AFTER
+
+    @property
+    def live_stale(self) -> bool:
+        checked = self.live_checked_at
+        return checked is None or self.now - checked > LIVE_STALE_AFTER
 
     @property
     def squads_stale(self) -> bool:
@@ -144,6 +154,7 @@ def freshness(
         injuries_as_of=injuries_as_of(live_db),
         squads_as_of=squads_as_of,
         headline_through=headline_through,
+        live_checked_at=log.last_success(LIVE),
         now=now or datetime.now(UTC),
     )
 

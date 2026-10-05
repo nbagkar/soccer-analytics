@@ -20,7 +20,7 @@ from typing import Any, ParamSpec, TypeVar, cast
 from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
-from soccer.domain.freshness import Freshness, freshness, injuries_as_of
+from soccer.domain.freshness import LIVE_STALE_AFTER, Freshness, freshness, injuries_as_of
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -51,7 +51,7 @@ from soccer.storage.live_db import LiveDB
 # succeeded but is simply old, which is the common case for a casual, one-off "Refresh".
 # 30 minutes: a third of a match. At 120, a snapshot showing games in stoppage time ("90+6")
 # still read as live 52 minutes later, long after they had finished.
-STALE_LIVE_AGE_MINUTES = 30
+STALE_LIVE_AGE_MINUTES = int(LIVE_STALE_AFTER.total_seconds() // 60)
 
 
 @dataclass(frozen=True)

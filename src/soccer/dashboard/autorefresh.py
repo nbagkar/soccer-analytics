@@ -78,6 +78,32 @@ def _run(settings: Settings) -> None:
         _running.clear()
 
 
+# Live scores are refreshed inline (one cheap request) when someone actually looks at them;
+# after an attempt, don't retry for a few minutes so an offline machine doesn't stall every
+# click on a timeout.
+LIVE_RETRY_AFTER_SECONDS = 5 * 60
+_last_live_attempt: float | None = None
+
+
+def refresh_live_if_stale(settings: Settings) -> bool:
+    """Refresh live scores now if they are over 30 minutes old. True if a refresh succeeded."""
+    global _last_live_attempt
+    if not settings.auto_refresh or not data_freshness(settings).live_stale:
+        return False
+    now = time.monotonic()
+    if _last_live_attempt is not None and now - _last_live_attempt < LIVE_RETRY_AFTER_SECONDS:
+        return False
+    _last_live_attempt = now
+    from soccer.dashboard import actions
+
+    try:
+        logger.info("live auto-refresh: %s", actions.refresh_scores(settings))
+    except Exception:  # recorded in refresh_log by the action; show what's cached
+        logger.exception("live auto-refresh failed")
+        return False
+    return True
+
+
 def start_if_stale(settings: Settings) -> bool:
     """Start a background refresh if any feed is stale and none is running. True if started."""
     if not settings.auto_refresh or not settings.analytics_db.exists():

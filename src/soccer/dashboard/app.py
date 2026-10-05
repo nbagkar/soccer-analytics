@@ -360,6 +360,18 @@ def _render_assistant(settings: Settings) -> None:
                 settings.live_db,
                 st.session_state.get("_chat_context"),
             )
+        if reply.intent == "live":
+            from soccer.dashboard import autorefresh
+
+            # Asked for live scores on a stale snapshot: refresh, then answer from it.
+            with st.spinner("Fetching the latest live scores…"):
+                if autorefresh.refresh_live_if_stale(settings):
+                    reply = assistant_answer(
+                        prompt,
+                        settings.analytics_db,
+                        settings.live_db,
+                        st.session_state.get("_chat_context"),
+                    )
         st.session_state._chat_context = reply.context
         # Question text only for unanswered ones -- that's the unmet demand worth reading.
         intent = reply.intent or "unknown"
@@ -2693,6 +2705,12 @@ def main() -> None:
             icon=":material/bolt:",
         )
         return
+
+    if page == "Live Centre":
+        from soccer.dashboard import autorefresh
+
+        with st.spinner("Fetching the latest live scores…"):
+            autorefresh.refresh_live_if_stale(settings)
 
     with LiveDB(settings.live_db) as db:
         if page == "Live Centre":

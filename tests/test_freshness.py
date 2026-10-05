@@ -345,3 +345,49 @@ class TestCachedUntilDataChanges:
         stat = db.stat()
         os.utime(db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # a refresh wrote it
         assert expensive(db, "E0") == 3
+
+
+class TestLiveAutoRefresh:
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(autorefresh, "_last_live_attempt", None)
+
+    def _fake_scores(self, monkeypatch, calls: list[str], *, fail: bool = False) -> None:
+        def fake(s: Settings) -> str:
+            calls.append("live")
+            if fail:
+                return actions._logged(s, "live", lambda: (_ for _ in ()).throw(OSError("down")))
+            return actions._logged(s, "live", lambda: "thesportsdb: 3 seen")
+
+        monkeypatch.setattr(actions, "refresh_scores", fake)
+
+    def test_stale_live_scores_refresh_when_viewed(self, tmp_path, monkeypatch) -> None:
+        settings, calls = _settings(tmp_path), []
+        self._fake_scores(monkeypatch, calls)
+        assert autorefresh.refresh_live_if_stale(settings)
+        assert calls == ["live"]
+        assert not data_freshness(settings).live_stale
+
+    def test_fresh_live_scores_are_left_alone(self, tmp_path, monkeypatch) -> None:
+        settings, calls = _settings(tmp_path), []
+        self._fake_scores(monkeypatch, calls)
+        with LiveDB(settings.live_db) as db:
+            RefreshLog(db).mark("live", ok=True, message="m", at=datetime.now(UTC))
+        assert not autorefresh.refresh_live_if_stale(settings)
+        assert calls == []
+
+    def test_a_failure_backs_off_instead_of_retrying_every_click(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        settings, calls = _settings(tmp_path), []
+        self._fake_scores(monkeypatch, calls, fail=True)
+        assert not autorefresh.refresh_live_if_stale(settings)
+        assert not autorefresh.refresh_live_if_stale(settings)  # within the cooldown
+        assert calls == ["live"]
+        assert data_freshness(settings).last_error is not None  # visible, not silent
+
+    def test_disabled_never_fetches(self, tmp_path, monkeypatch) -> None:
+        calls: list[str] = []
+        self._fake_scores(monkeypatch, calls)
+        assert not autorefresh.refresh_live_if_stale(_settings(tmp_path, auto_refresh=False))
+        assert calls == []

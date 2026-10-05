@@ -15,7 +15,7 @@ from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
-from soccer.domain.freshness import FIXTURES, INJURIES, RESULTS, SQUADS, RefreshLog
+from soccer.domain.freshness import FIXTURES, INJURIES, LIVE, RESULTS, SQUADS, RefreshLog
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     NEW_LEAGUE_CODES,
@@ -154,7 +154,7 @@ def refresh_scores(settings: Settings) -> str:
             ) as tsdb:
                 return str(await IngestPipeline(db).ingest_thesportsdb(tsdb))
 
-    return asyncio.run(run())
+    return _logged(settings, LIVE, lambda: asyncio.run(run()))
 
 
 # football-data.org free competitions to pull full current-season fixtures for: the league
