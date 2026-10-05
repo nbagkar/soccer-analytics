@@ -1184,7 +1184,9 @@ def serve(
     ),
     once: bool = typer.Option(False, "--once", help="Run all due jobs once and exit."),
 ) -> None:
-    """Run ingestion unattended on a cadence: live scores, fixtures, history, housekeeping.
+    """Run ingestion unattended on a cadence: live scores, fixtures, results, injury news,
+    squads, housekeeping -- the same refreshes the dashboard runs. Injury news and squads are
+    fetched only once stale (a day; a week), so frequent `--once` runs stay cheap.
 
     A failing source is logged and retried next interval, never crashes the loop. The
     history job re-fetches the CURRENT season for every already-loaded league, so when the
@@ -1200,37 +1202,32 @@ def serve(
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
 
-    def live_job() -> str:
-        async def run_it() -> str:
-            with LiveDB(settings.live_db) as db:
-                async with TheSportsDB(
-                    raw,
-                    api_key=settings.thesportsdb_key,
-                    rate_limit_per_minute=settings.thesportsdb_rpm,
-                ) as tsdb:
-                    return str(await IngestPipeline(db).ingest_thesportsdb(tsdb))
+    # Every job delegates to the same refresh the dashboard runs (dashboard/actions.py), so the
+    # two can't drift apart and every run is stamped in refresh_log for the staleness banner.
+    from soccer.dashboard import actions
+    from soccer.dashboard.data import data_freshness
 
-        return asyncio.run(run_it())
+    def live_job() -> str:
+        return actions.refresh_scores(settings)
 
     def fixtures_job() -> str:
-        token = settings.football_data_org_token
-        if not token:
+        if not settings.football_data_org_token:
             return "skipped (no football-data.org token)"
+        return actions.update_fixtures(settings)
 
-        async def run_it() -> str:
-            today = datetime.now(UTC).date()
-            with LiveDB(settings.live_db) as db:
-                async with FootballDataOrg(
-                    token,
-                    raw,
-                    rate_limit_per_minute=settings.football_data_org_rpm,
-                ) as fd:
-                    summary = await IngestPipeline(db).ingest_football_data(
-                        fd, today, today + timedelta(days=2)
-                    )
-            return str(summary)
+    def news_job() -> str:
+        if not settings.enable_fpl:
+            return "skipped (SOCCER_ENABLE_FPL is off)"
+        if not data_freshness(settings).injuries_stale:
+            return "fresh, skipped"
+        return actions.update_availability(settings)
 
-        return asyncio.run(run_it())
+    def squads_job() -> str:
+        if not settings.football_data_org_token:
+            return "skipped (no football-data.org token)"
+        if not data_freshness(settings).squads_stale:
+            return "fresh, skipped"
+        return actions.update_squads(settings)
 
     def history_job() -> str:
         """Refresh the current season for every already-loaded league (see
@@ -1248,6 +1245,8 @@ def serve(
             Job("live", timedelta(seconds=live_interval), live_job),
             Job("fixtures", timedelta(seconds=fixtures_interval), fixtures_job),
             Job("history", timedelta(seconds=history_interval), history_job),
+            Job("injuries", timedelta(seconds=history_interval), news_job),
+            Job("squads", timedelta(days=1), squads_job),
             Job("prune", timedelta(days=1), prune_job),
         ]
     )
