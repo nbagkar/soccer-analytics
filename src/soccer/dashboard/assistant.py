@@ -29,6 +29,7 @@ from soccer.sources.football_data_co_uk import (
     season_sort_key,
 )
 from soccer.storage.analytics_db import AnalyticsDB, _position_rank
+from soccer.storage.live_db import LiveDB
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,8 @@ def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None]
         _intent_season_compare,
         _intent_h2h,
         _intent_match_centre,
+        _intent_live,
+        _intent_recent_results,
         _intent_forecast,
         _intent_model,
         _intent_value,
@@ -284,6 +287,7 @@ def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None]
         _intent_title_odds,
         _intent_underlying,
         _intent_records,
+        _intent_defence,
         _intent_form,
         _intent_standings,
         _intent_fixtures,
@@ -1451,9 +1455,165 @@ def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply
     return Reply(headline, table=rows, suggestions=suggestions)
 
 
+def _intent_live(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """Live scores -- what's in play now, or the last week's full-time results if nothing is."""
+    if not re.search(r"\b(live|in play|livescores?|scores? (right )?now|scores? today)\b", q):
+        return None
+    if live_db is None or not Path(live_db).exists():
+        return Reply("No live data yet. Go to **Home → Refresh live scores**.")
+    from soccer.dashboard.data import live_snapshot
+
+    with LiveDB(live_db) as db:
+        snap = live_snapshot(db)
+    if not snap.matches:
+        return Reply(
+            "Nothing live and no results in the last week — try **Home → Refresh live scores**."
+        )
+    rows = [
+        {
+            "Competition": m.competition,
+            "Match": f"{m.home} v {m.away}",
+            "Score": m.score,
+            "Status": m.minute or m.status.value.replace("_", " ").lower(),
+        }
+        for m in snap.matches[:12]
+    ]
+    if snap.mode == "live":
+        head = f"**{snap.kpis.in_play} match(es) in play** right now:"
+    else:
+        head = "Nothing is live right now — here are **full-time results from the last 7 days**:"
+    return Reply(
+        f"{head} (last refreshed {snap.kpis.freshness_label}).",
+        table=rows,
+        suggestions=["Show upcoming fixtures", "Who is top of the Premier League?"],
+    )
+
+
+def _intent_recent_results(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """The latest results -- a named club's last few games, else the league's latest round."""
+    if not re.search(
+        r"\b(last (game|match|result|fixture)s?|latest results?|recent results?|what happened"
+        r"|how did \w+( \w+)? (get on|do)|did \w+( \w+)? (win|lose|draw))\b",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        named = _resolve_teams(q, _team_index(adb, loaded))
+        display = ""
+        if named:
+            display, division, season = named[0]
+        else:
+            league, season = _league_and_season(q, adb, loaded)
+            if league is None:
+                return None
+            division = league
+        outcomes = adb.outcomes_for(season, division)
+    if not outcomes:
+        return None
+    if named:
+        tnorm = _norm(display)
+        games = [o for o in outcomes if tnorm in (_norm(o.home), _norm(o.away))][-5:][::-1]
+        if not games:
+            return None
+        rows = []
+        for o in games:
+            home_is = _norm(o.home) == tnorm
+            us, them = (o.fthg, o.ftag) if home_is else (o.ftag, o.fthg)
+            rows.append(
+                {
+                    "Date": o.match_date.strftime("%b %d"),
+                    "Opponent": o.away if home_is else o.home,
+                    "H/A": "H" if home_is else "A",
+                    "Score": f"{us}-{them}",
+                    "Result": "W" if us > them else "D" if us == them else "L",
+                }
+            )
+        last = rows[0]
+        word = {"W": "beat", "D": "drew with", "L": "lost to"}[last["Result"]]
+        return Reply(
+            f"**{display}** {word} **{last['Opponent']}** {last['Score']} on {last['Date']} "
+            f"({division_name(division)}). Their last {len(rows)}:",
+            table=rows,
+            suggestions=[f"When do {display} play next?", f"How is {display}'s form?"],
+        )
+    latest = outcomes[-1].match_date
+    recent = [o for o in outcomes if (latest - o.match_date).days <= 3][::-1]
+    rows = [
+        {"Date": o.match_date.strftime("%b %d"), "Match": f"{o.home} {o.fthg}-{o.ftag} {o.away}"}
+        for o in recent[:12]
+    ]
+    return Reply(
+        f"**Latest {division_name(division)} results** (up to {latest.day} {latest:%b %Y}):",
+        table=rows,
+        suggestions=["Show live scores", f"{division_name(division)} table"],
+    )
+
+
+def _intent_defence(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """Best (or worst) defence: goals conceded per game, plus clean sheets."""
+    if not re.search(
+        r"\b((best|meanest|tightest|strongest|worst|leakiest|weakest) (defen[cs]es?|defensive)"
+        r"|clean sheets?|conceded (the )?(fewest|least|most)|(fewest|most) goals conceded)\b",
+        q,
+    ):
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        loaded = _loaded_divisions(adb)
+        division, season = _league_and_season(q, adb, loaded)
+        if division is None:
+            return None
+        table = adb.league_table(season, division)
+        outcomes = adb.outcomes_for(season, division)
+    if not table:
+        return None
+    clean: dict[str, int] = {}
+    for o in outcomes:
+        if o.ftag == 0:
+            clean[_norm(o.home)] = clean.get(_norm(o.home), 0) + 1
+        if o.fthg == 0:
+            clean[_norm(o.away)] = clean.get(_norm(o.away), 0) + 1
+    worst = bool(
+        re.search(r"\b(worst|leakiest|weakest|most goals conceded|conceded (the )?most)\b", q)
+    )
+    by_clean = "clean sheet" in q
+
+    def key(r: Any) -> tuple[float, ...]:
+        per_game = r.goals_against / max(r.played, 1)
+        cs = clean.get(_norm(r.team), 0)
+        if by_clean:
+            return (-cs, per_game)
+        return (-per_game, cs) if worst else (per_game, -cs)
+
+    ranked = sorted(table, key=key)
+    rows = [
+        {
+            "Team": r.team,
+            "P": r.played,
+            "Conceded": r.goals_against,
+            "Per game": round(r.goals_against / max(r.played, 1), 2),
+            "Clean sheets": clean.get(_norm(r.team), 0),
+        }
+        for r in ranked[:8]
+    ]
+    top = rows[0]
+    league = f"{division_name(division)} {season_label(season)}"
+    if by_clean:
+        claim = f"the most clean sheets in {league}: **{top['Clean sheets']}**"
+    else:
+        quality = "leakiest" if worst else "best"
+        claim = f"the {quality} defence in {league}: **{top['Per game']}** conceded a game"
+    head = f"**{top['Team']}** have {claim}"
+    return Reply(
+        f"{head} ({top['Conceded']} in {top['P']}, {top['Clean sheets']} clean sheets).",
+        table=rows,
+        suggestions=[f"{division_name(division)} table", "Which teams are overperforming?"],
+    )
+
+
 def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     if not re.search(
-        r"\b(fixtures?|upcoming|next (game|match|fixture|up)|who ?s playing|this weekend"
+        r"\b(fixtures?|upcoming|next (game|match|fixture|up)|who ?s playing|this weekends?"
         r"|schedule|play next|playing next)\b|when (do|does|will|are|is) \w+",
         q,
     ):
@@ -2041,6 +2201,7 @@ def _fallback(q: str, analytics_db: Path) -> Reply:
         "scores, team reports, league tables (any loaded league or past season), top scorers "
         "and player comparisons, scouting profiles, head-to-head records, form, "
         "over/under-performance (xG), all-time records and titles, league style comparisons, "
-        "model accuracy and betting backtests, and fixtures.",
+        "model accuracy and betting backtests, fixtures, live scores and latest results, "
+        "and best defences and clean sheets.",
         suggestions=_EXAMPLES[:4],
     )

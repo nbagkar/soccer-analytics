@@ -769,3 +769,67 @@ class TestConversationContext:
         # Turn 3 has no team of its own and only a pronoun; the subject must survive turn 2.
         assert r3.context is not None
         assert any(display == "Arsenal" for display, _d, _s in r3.context.teams)
+
+
+class TestCoverageGaps:
+    """Questions a realistic probe found falling through to the fallback, though the data to
+    answer them was already loaded (best defence, clean sheets, this weekend's odds, latest
+    results, live scores)."""
+
+    def test_best_defence(self, tmp_path) -> None:
+        # Seeded so the first-listed club wins every home game 2-0 and draws 1-1 away.
+        reply = answer("which team has the best defence?", _seed(tmp_path))
+        assert reply.intent == "defence"
+        assert reply.text.startswith("**Arsenal** have the best defence")
+        assert reply.table and reply.table[0]["Team"] == "Arsenal"
+
+    def test_worst_defence_ranks_the_other_way(self, tmp_path) -> None:
+        reply = answer("worst defence in the premier league", _seed(tmp_path))
+        assert "leakiest" in reply.text
+        assert reply.table and reply.table[0]["Team"] == "Brentford"
+
+    def test_clean_sheets(self, tmp_path) -> None:
+        reply = answer("who has the most clean sheets", _seed(tmp_path))
+        assert reply.intent == "defence"
+        assert reply.table and reply.table[0]["Team"] == "Arsenal"
+        assert reply.table[0]["Clean sheets"] == 3  # three home 2-0 wins
+
+    def test_a_clubs_last_result(self, tmp_path) -> None:
+        reply = answer("did chelsea win?", _seed(tmp_path))
+        assert reply.intent == "recent_results"
+        assert reply.text.startswith("**Chelsea**")
+        assert reply.table and {"Opponent", "Score", "Result"} <= set(reply.table[0])
+
+    def test_league_latest_results(self, tmp_path) -> None:
+        reply = answer("what happened in the last game", _seed(tmp_path))
+        assert reply.intent == "recent_results"
+        assert "Latest Premier League results" in reply.text and reply.table
+
+    def test_this_weekends_games_reach_fixtures(self, tmp_path) -> None:
+        # "weekend's" normalizes to "weekends"; it must still reach the fixtures intent.
+        live = tmp_path / "live.sqlite"
+        from soccer.storage.live_db import LiveDB
+
+        LiveDB(live).close()
+        reply = answer("what are the odds for this weekend's games", _seed(tmp_path), live)
+        assert reply.intent == "fixtures"
+
+    def test_live_scores(self, tmp_path) -> None:
+        from soccer.domain.match_state import MatchStatus
+        from soccer.storage.live_db import LiveDB
+        from tests.test_dashboard_data import add_match
+
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as db:
+            add_match(
+                db,
+                match_id="1",
+                home="Arsenal FC",
+                away="Chelsea FC",
+                competition="Premier League",
+                status=MatchStatus.SECOND_HALF,
+            )
+        reply = answer("show me live scores", _seed(tmp_path), live)
+        assert reply.intent == "live"
+        assert "in play" in reply.text
+        assert reply.table and reply.table[0]["Match"] == "Arsenal FC v Chelsea FC"
