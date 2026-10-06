@@ -188,6 +188,24 @@ class TestClosingOdds:
         r = parse_results_csv(csv, season="2526", division="E0")[0]
         assert r.close_home_odds is None
 
+    def test_closing_over_under_parsed_pinnacle_first(self) -> None:
+        csv = (
+            "Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,PSCH,PSCD,PSCA,"
+            "AvgC>2.5,AvgC<2.5,PC>2.5,PC<2.5\n"
+            "01/01/2026,A,B,2,1,H,1.85,3.6,4.5,1.80,2.00,1.85,2.05\n"
+        )
+        r = parse_results_csv(csv, season="2526", division="E0")[0]
+        assert (r.close_over25_odds, r.close_under25_odds) == (1.85, 2.05)
+
+    def test_pre_match_over_under_is_not_used(self) -> None:
+        # Only closing lines were backtested; the older Betbrain average stays out.
+        csv = (
+            "Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,BbAv>2.5,BbAv<2.5,P>2.5,P<2.5\n"
+            "01/01/2016,A,B,2,1,H,1.9,1.9,1.95,1.95\n"
+        )
+        r = parse_results_csv(csv, season="1516", division="E0")[0]
+        assert (r.close_over25_odds, r.close_under25_odds) == (None, None)
+
     def test_new_league_odds_parsed(self) -> None:
         # The BRA schema carries PSCH/PSCD/PSCA closing odds too.
         rows = parse_new_league_csv(NEW_CSV, division="BRA")

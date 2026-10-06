@@ -749,6 +749,14 @@ FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
 # Every one of 18 leagues improved. Settings: weight 1.0, half-life 120d, shrinkage 0.5 --
 # shrinkage 0 scored the same overall but worse on the thin slice (+0.0210), and faster
 # decay (60d, 30d) was clearly worse. The model still trails the closing line.
+# 2026-10-06: where a match carries a closing over/under 2.5 line (European divisions from
+# 2019/20), it is inverted jointly with the 1X2, so the implied goal TOTAL comes from the
+# totals market instead of the draw price. Walk-forward 2021/22-2026/27, 18 divisions,
+# ~33,000 matches: gap +0.0150 -> +0.0146; 15 of 18 improved (G1 -0.0016, P1 -0.0020, E2
+# -0.0008), E3 level, F2/I2 +0.0003/+0.0001. App Scorecard: E0 +0.0197 -> +0.0194, SP1 +0.0122
+# -> +0.0119, D1 +0.0120 -> +0.0116, I1 +0.0089 -> +0.0083, F1 +0.0145 -> +0.0143. Weighting
+# the O/U equation 0.5x-3x changed nothing (the three prices fit near-exactly). Asian handicap
+# not added: with 1X2 + O/U both rates are already pinned and AH mostly restates supremacy.
 FORECAST_MARKET_WEIGHT = 1.0
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`

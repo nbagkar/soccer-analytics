@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS results (
     referee            VARCHAR,
     close_home_odds    DOUBLE,
     close_draw_odds    DOUBLE,
-    close_away_odds    DOUBLE
+    close_away_odds    DOUBLE,
+    close_over25_odds  DOUBLE,
+    close_under25_odds DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS shots (
@@ -466,10 +468,12 @@ class ResultRow:
     close_home_odds: float | None = None
     close_draw_odds: float | None = None
     close_away_odds: float | None = None
+    close_over25_odds: float | None = None
+    close_under25_odds: float | None = None
 
 
 def _result_row(r: tuple[Any, ...]) -> ResultRow:
-    """A ResultRow from (9 core columns + 3 closing-odds columns); xG stays None."""
+    """A ResultRow from (9 core columns + 5 closing-odds columns); xG stays None."""
     return ResultRow(
         match_date=r[0],
         home=r[1],
@@ -483,6 +487,8 @@ def _result_row(r: tuple[Any, ...]) -> ResultRow:
         close_home_odds=r[9],
         close_draw_odds=r[10],
         close_away_odds=r[11],
+        close_over25_odds=r[12],
+        close_under25_odds=r[13],
     )
 
 
@@ -508,6 +514,8 @@ class OddsRow:
     away_shots_target: int | None = None
     home_xg: float | None = None
     away_xg: float | None = None
+    close_over25_odds: float | None = None
+    close_under25_odds: float | None = None
 
     @property
     def has_odds(self) -> bool:
@@ -604,7 +612,13 @@ class AnalyticsDB:
 
     def _migrate(self) -> None:
         """Idempotent column additions for databases created before a column existed."""
-        for column in ("close_home_odds", "close_draw_odds", "close_away_odds"):
+        for column in (
+            "close_home_odds",
+            "close_draw_odds",
+            "close_away_odds",
+            "close_over25_odds",
+            "close_under25_odds",
+        ):
             self._con.execute(f"ALTER TABLE results ADD COLUMN IF NOT EXISTS {column} DOUBLE")
 
     def close(self) -> None:
@@ -868,7 +882,7 @@ class AnalyticsDB:
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
             "home_shots_target, away_shots_target, close_home_odds, close_draw_odds, "
-            "close_away_odds "
+            "close_away_odds, close_over25_odds, close_under25_odds "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()
@@ -916,7 +930,7 @@ class AnalyticsDB:
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
             "home_shots_target, away_shots_target, close_home_odds, close_draw_odds, "
-            "close_away_odds "
+            "close_away_odds, close_over25_odds, close_under25_odds "
             f"FROM results WHERE division=? AND season IN ({placeholders}) "
             "ORDER BY match_date, home",
             [division, *seasons],
@@ -932,11 +946,29 @@ class AnalyticsDB:
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
             "       close_home_odds, close_draw_odds, close_away_odds, "
-            "       home_shots_target, away_shots_target "
+            "       home_shots_target, away_shots_target, close_over25_odds, close_under25_odds "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()
-        return [OddsRow(*r) for r in rows]
+        return [
+            OddsRow(
+                match_date=r[0],
+                home=r[1],
+                away=r[2],
+                home_norm=r[3],
+                away_norm=r[4],
+                fthg=r[5],
+                ftag=r[6],
+                close_home_odds=r[7],
+                close_draw_odds=r[8],
+                close_away_odds=r[9],
+                home_shots_target=r[10],
+                away_shots_target=r[11],
+                close_over25_odds=r[12],
+                close_under25_odds=r[13],
+            )
+            for r in rows
+        ]
 
     def odds_coverage(self, season: str, division: str) -> tuple[int, int]:
         """(matches with a full closing-odds triple, total matches) for a slice."""

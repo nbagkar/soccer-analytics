@@ -11,6 +11,7 @@ from soccer.models.poisson import (
     DEFAULT_RHO,
     fit_poisson_shots,
     implied_goal_rates,
+    implied_goal_rates_with_total,
     market_expected_goals,
     score_grid,
 )
@@ -39,6 +40,49 @@ class Played:
     close_home_odds: float | None = None
     close_draw_odds: float | None = None
     close_away_odds: float | None = None
+    close_over25_odds: float | None = None
+    close_under25_odds: float | None = None
+
+
+def _market_probs(lam: float, mu: float) -> tuple[float, float, float]:
+    grid = score_grid(lam, mu, DEFAULT_RHO)
+    return (
+        sum(p for (x, y), p in grid.items() if x > y),
+        sum(p for (x, y), p in grid.items() if x < y),
+        sum(p for (x, y), p in grid.items() if x + y >= 3),
+    )
+
+
+@pytest.mark.parametrize(("lam", "mu"), [(1.5, 1.1), (2.4, 0.6), (0.9, 1.7), (1.0, 0.9)])
+def test_inversion_with_total_recovers_the_goal_rates(lam: float, mu: float) -> None:
+    lam2, mu2 = implied_goal_rates_with_total(*_market_probs(lam, mu))
+    assert (lam2, mu2) == (pytest.approx(lam, abs=1e-4), pytest.approx(mu, abs=1e-4))
+
+
+def test_the_over_under_line_moves_the_goal_total_not_the_gap() -> None:
+    # Same 1X2, but one match is priced for goals and the other for a low-scoring grind:
+    # the 1X2-only inversion cannot tell them apart; with the total line it can.
+    ph, pa, _ = _market_probs(1.6, 1.1)
+    open_game = implied_goal_rates_with_total(round(ph, 3), round(pa, 3), 0.62)
+    tight_game = implied_goal_rates_with_total(round(ph, 3), round(pa, 3), 0.40)
+    assert sum(open_game) > sum(tight_game) + 0.4
+    assert open_game[0] > open_game[1] and tight_game[0] > tight_game[1]
+
+
+def test_market_view_uses_the_over_under_when_present() -> None:
+    base = Played(date(2026, 1, 1), "a", "b", 1, 0, 2.0, 3.5, 4.0)
+    goals_heavy = Played(date(2026, 1, 1), "a", "b", 1, 0, 2.0, 3.5, 4.0, 1.5, 2.6)
+    assert market_expected_goals(base) == implied_goal_rates(*_vig_free(2.0, 4.0, 3.5))
+    assert sum(market_expected_goals(goals_heavy)) > sum(market_expected_goals(base))  # type: ignore[arg-type]
+    # an unusable over/under falls back to the 1X2-only view
+    broken = Played(date(2026, 1, 1), "a", "b", 1, 0, 2.0, 3.5, 4.0, 1.0, 2.6)
+    assert market_expected_goals(broken) == market_expected_goals(base)
+
+
+def _vig_free(home: float, away: float, draw: float) -> tuple[float, float]:
+    inv = [1 / home, 1 / draw, 1 / away]
+    total = sum(inv)
+    return round(inv[0] / total, 3), round(inv[2] / total, 3)
 
 
 def test_missing_or_invalid_odds_mean_no_market_view() -> None:
@@ -77,12 +121,24 @@ def test_results_carry_their_closing_odds(tmp_path) -> None:
 
     with AnalyticsDB(path) as adb:
         adb.load_results(
-            [replace(row, close_home_odds=1.9, close_draw_odds=3.6, close_away_odds=4.2)]
+            [
+                replace(
+                    row,
+                    close_home_odds=1.9,
+                    close_draw_odds=3.6,
+                    close_away_odds=4.2,
+                    close_over25_odds=1.8,
+                    close_under25_odds=2.1,
+                )
+            ]
         )
         (out,) = adb.outcomes_for("2526", "E0")
         (recent,) = adb.recent_outcomes_through("E0", "2526", n_seasons=1)
+        (odds,) = adb.outcomes_with_odds("2526", "E0")
     assert (out.close_home_odds, out.close_away_odds) == (1.9, 4.2)
     assert recent.close_draw_odds == 3.6
+    assert (out.close_over25_odds, recent.close_under25_odds) == (1.8, 2.1)
+    assert (odds.close_over25_odds, odds.close_under25_odds) == (1.8, 2.1)
 
 
 def test_extreme_favourite_gets_a_sane_closest_fit() -> None:

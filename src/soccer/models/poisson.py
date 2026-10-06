@@ -212,11 +212,12 @@ def fit_poisson(outcomes: Sequence[Outcome], *, rho: float = DEFAULT_RHO) -> Poi
 _GOALS = None  # lazily-built numpy helpers for the fast 1X2 inversion below
 
 
-def _fast_outcome_probs(lam: float, mu: float, rho: float) -> tuple[float, float]:
-    """(P home win, P away win) on the same Dixon-Coles grid as `score_grid`, in numpy.
+def _fast_outcome_probs(lam: float, mu: float, rho: float) -> tuple[float, float, float]:
+    """(P home win, P away win, P over 2.5 goals) on the same Dixon-Coles grid as `score_grid`.
 
-    `score_grid` builds a Python dict cell by cell -- fine for one forecast, but inverting
-    every past match's odds through it cost ~10ms a solve (35s to forecast all fixtures).
+    In numpy: `score_grid` builds a Python dict cell by cell -- fine for one forecast, but
+    inverting every past match's odds through it cost ~10ms a solve (35s to forecast all
+    fixtures).
     """
     import numpy as np
 
@@ -224,8 +225,8 @@ def _fast_outcome_probs(lam: float, mu: float, rho: float) -> tuple[float, float
     if _GOALS is None:
         k = np.arange(MAX_GOALS + 1)
         log_fact = np.array([math.lgamma(i + 1) for i in k])
-        _GOALS = (k, log_fact, np.subtract.outer(k, k))
-    k, log_fact, diff = _GOALS
+        _GOALS = (k, log_fact, np.subtract.outer(k, k), np.add.outer(k, k) >= 3)
+    k, log_fact, diff, over = _GOALS
     px = np.exp(k * math.log(lam) - lam - log_fact)
     py = np.exp(k * math.log(mu) - mu - log_fact)
     grid = np.outer(px, py)
@@ -235,7 +236,11 @@ def _fast_outcome_probs(lam: float, mu: float, rho: float) -> tuple[float, float
     grid[1, 1] *= 1.0 - rho
     np.maximum(grid, 0.0, out=grid)
     total = grid.sum()
-    return float(grid[diff > 0].sum() / total), float(grid[diff < 0].sum() / total)
+    return (
+        float(grid[diff > 0].sum() / total),
+        float(grid[diff < 0].sum() / total),
+        float(grid[over].sum() / total),
+    )
 
 
 @functools.lru_cache(maxsize=65536)
@@ -294,14 +299,88 @@ def implied_goal_rates(
     return math.exp(fit.x[0]), math.exp(fit.x[1])
 
 
+@functools.lru_cache(maxsize=65536)
+def implied_goal_rates_with_total(
+    p_home: float, p_away: float, p_over: float, rho: float = DEFAULT_RHO
+) -> tuple[float, float]:
+    """(lambda, mu) best reproducing a match's home/away win AND over-2.5 probabilities.
+
+    The 1X2 mostly fixes the gap between the sides; how many goals the match holds is left
+    to the draw price alone, a weak read. The over/under line prices the total directly, so
+    with it the attack/defence split of the implied goals is pinned instead of guessed.
+    Three equations, two unknowns: Gauss-Newton least squares on log-rates, with scipy's
+    solver as the fallback if it fails to settle. Prices arrive rounded to 3 decimals, so a
+    1e-6 step in log-rate is far below anything the inputs can resolve.
+    """
+
+    def residual(x0: float, x1: float) -> tuple[float, float, float]:
+        f = _fast_outcome_probs(math.exp(x0), math.exp(x1), rho)
+        return f[0] - p_home, f[1] - p_away, f[2] - p_over
+
+    def cost(r: tuple[float, float, float]) -> float:
+        return r[0] * r[0] + r[1] * r[1] + r[2] * r[2]
+
+    start = [math.log(1.5), math.log(1.1)]
+    x0, x1 = start
+    r = residual(x0, x1)
+    h = 1e-6
+    for _ in range(50):
+        ra, rb = residual(x0 + h, x1), residual(x0, x1 + h)
+        ja = [(ra[i] - r[i]) / h for i in range(3)]
+        jb = [(rb[i] - r[i]) / h for i in range(3)]
+        # normal equations (J^T J) d = J^T r for the 3x2 Jacobian
+        a11 = sum(v * v for v in ja)
+        a12 = sum(u * v for u, v in zip(ja, jb, strict=True))
+        a22 = sum(v * v for v in jb)
+        g1 = sum(u * v for u, v in zip(ja, r, strict=True))
+        g2 = sum(u * v for u, v in zip(jb, r, strict=True))
+        det = a11 * a22 - a12 * a12
+        if abs(det) < 1e-18:
+            break
+        d0 = (g1 * a22 - g2 * a12) / det
+        d1 = (a11 * g2 - a12 * g1) / det
+        if abs(d0) + abs(d1) < 1e-6:  # converged to the least-squares point
+            return math.exp(x0), math.exp(x1)
+        size = cost(r)
+        step = 1.0
+        while step > 1e-4:
+            n0 = min(max(x0 - step * d0, -3.0), 2.0)
+            n1 = min(max(x1 - step * d1, -3.0), 2.0)
+            nr = residual(n0, n1)
+            if cost(nr) < size:
+                x0, x1, r = n0, n1, nr
+                break
+            step /= 2
+        else:  # no improving step: we are at (or numerically next to) the minimum
+            return math.exp(x0), math.exp(x1)
+
+    from scipy.optimize import least_squares
+
+    def vector_residual(x: Any) -> list[float]:
+        return list(residual(float(x[0]), float(x[1])))
+
+    fit = least_squares(vector_residual, start, bounds=([-3, -3], [2, 2]))
+    return math.exp(fit.x[0]), math.exp(fit.x[1])
+
+
 def market_expected_goals(o: object) -> tuple[float, float] | None:
-    """A played match's market-implied expected goals from its closing 1X2, else None."""
+    """A played match's market-implied expected goals from its closing prices, else None.
+
+    The closing 1X2, plus the closing over/under 2.5 line where the match carries one
+    (`close_over25_odds`/`close_under25_odds`) to price the goal total directly.
+    """
     odds = [getattr(o, f"close_{k}_odds", None) for k in ("home", "draw", "away")]
     if any(x is None or x <= 1.0 for x in odds):
         return None
     inv = [1.0 / x for x in odds]  # type: ignore[operator]
     total = sum(inv)
-    return implied_goal_rates(round(inv[0] / total, 3), round(inv[2] / total, 3))
+    p_home, p_away = round(inv[0] / total, 3), round(inv[2] / total, 3)
+    over = getattr(o, "close_over25_odds", None)
+    under = getattr(o, "close_under25_odds", None)
+    if over is not None and under is not None and over > 1.0 and under > 1.0:
+        p_over = (1.0 / over) / (1.0 / over + 1.0 / under)
+        return implied_goal_rates_with_total(p_home, p_away, round(p_over, 3))
+    return implied_goal_rates(p_home, p_away)
 
 
 def fit_poisson_shots(
@@ -339,7 +418,8 @@ def fit_poisson_shots(
     same mechanic as `shrinkage`, applied to home advantage instead of attack/defence.
 
     ``market_weight`` (0-1, 0 = off) mixes in each played match's market-implied expected
-    goals (its closing 1X2 inverted through the score model -- `market_expected_goals`):
+    goals (its closing 1X2 and over/under inverted through the score model --
+    `market_expected_goals`):
     pseudo-goals become ``(1-w)*blend + w*market``. The closing line prices a match far more
     precisely than its goals or shots do, so ratings built from past prices are much less
     noisy; only odds of matches already played are used, never an upcoming match's. A match

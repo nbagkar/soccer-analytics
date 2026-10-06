@@ -194,6 +194,10 @@ class MatchResult:
     close_home_odds: float | None = None
     close_draw_odds: float | None = None
     close_away_odds: float | None = None
+    # Closing over/under 2.5 goals odds -- the market's price on the goal total, which pins
+    # the attack/defence split of its implied expected goals (see market_expected_goals).
+    close_over25_odds: float | None = None
+    close_under25_odds: float | None = None
 
 
 # Preference order for closing 1X2 odds: Pinnacle closing (sharpest) -> market-average
@@ -206,6 +210,16 @@ _ODDS_KEYS = (
     ("PSH", "PSD", "PSA"),
     ("AvgH", "AvgD", "AvgA"),
     ("B365H", "B365D", "B365A"),
+)
+
+
+# Closing over/under 2.5 only (Pinnacle -> market average -> Bet365). The files carry them from
+# 2019/20; earlier seasons have just a pre-match Betbrain average, deliberately not used --
+# the backtest that justified this measured closing lines only.
+_OU_KEYS = (
+    ("PC>2.5", "PC<2.5"),
+    ("AvgC>2.5", "AvgC<2.5"),
+    ("B365C>2.5", "B365C<2.5"),
 )
 
 
@@ -226,6 +240,15 @@ def _best_close_odds(row: dict[str, str]) -> tuple[float | None, float | None, f
         if h and d and a and h > 1 and d > 1 and a > 1:
             return h, d, a
     return None, None, None
+
+
+def _best_close_over_under(row: dict[str, str]) -> tuple[float | None, float | None]:
+    """The best available closing over/under 2.5 pair, or (None, None) if none parse."""
+    for o_key, u_key in _OU_KEYS:
+        over, under = _float(row, o_key), _float(row, u_key)
+        if over and under and over > 1 and under > 1:
+            return over, under
+    return None, None
 
 
 def _parse_date(value: str) -> date | None:
@@ -271,6 +294,7 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
             continue
 
         close_h, close_d, close_a = _best_close_odds(row)
+        close_over, close_under = _best_close_over_under(row)
         results.append(
             MatchResult(
                 season=season,
@@ -299,6 +323,8 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
                 close_home_odds=close_h,
                 close_draw_odds=close_d,
                 close_away_odds=close_a,
+                close_over25_odds=close_over,
+                close_under25_odds=close_under,
             )
         )
 
