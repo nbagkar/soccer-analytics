@@ -86,7 +86,7 @@ def _event_score(pairs: list[tuple[float, bool]]) -> EventScore:
 
 def backtest_season_projections(
     seasons: Sequence[tuple[str, Sequence[Any]]],
-    fit: Callable[[list[Any], list[str]], ScorelineModel],
+    fit: Callable[[list[Any], list[str], str], ScorelineModel],
     *,
     checkpoints: Sequence[float] = (0.0, 0.25, 0.5, 0.75),
     history_seasons: int = 2,
@@ -98,8 +98,9 @@ def backtest_season_projections(
     """Score projections made part-way through each season against its final table.
 
     `seasons` is (season code, results) in chronological order; the earlier entries supply
-    fitting history (up to `history_seasons` before each scored season). `fit(window, teams)`
-    returns the model, fit only on `window` (everything before the checkpoint). Seasons
+    fitting history (up to `history_seasons` before each scored season). `fit(window, teams,
+    code)` returns the model for season `code`, fit only on `window` (everything before the
+    checkpoint). Seasons
     that are not a clean double round-robin (splits, play-offs, unfinished) are skipped --
     their final table is not what the projection describes. None if nothing was scored.
     """
@@ -122,7 +123,7 @@ def backtest_season_projections(
             window = history + played
             points, goal_diff = standings(played)
             remaining, fraction = remaining_round_robin(teams, played)
-            model = fit(window, teams)
+            model = fit(window, teams, code)
             matches = len(window) or 1
             flat = _Flat(
                 sum(o.fthg for o in window) / matches, sum(o.ftag for o in window) / matches

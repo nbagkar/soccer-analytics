@@ -10,6 +10,7 @@ job). A view that cannot be filled by the data we actually have is simply not pr
 from __future__ import annotations
 
 import functools
+import itertools
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -486,7 +487,10 @@ def _attack_defence_goodness(
 
 
 def _stabilize_thin_samples(
-    model: DixonColesModel | PoissonModel, teams: list[str], match_counts: dict[str, int]
+    model: DixonColesModel | PoissonModel,
+    teams: list[str],
+    match_counts: dict[str, int],
+    priors: dict[str, tuple[float, float]] | None = None,
 ) -> list[str]:
     """Give every thin-sample team a rating blended toward the league's weakest well-supported
     teams, in place on `model`. Returns the sorted list of teams the fit never saw at all (a
@@ -500,6 +504,10 @@ def _stabilize_thin_samples(
     artifact through and can rate the team WORSE than every genuinely weak, well-supported
     side in the league. Clipping the raw fit to the range actually spanned by well-supported
     teams before blending closes that gap.
+
+    `priors` (team -> (attack, defence), in `model`'s units) replaces the weakest-teams prior
+    for the clubs it names -- a club relegated into the division is not a weak newcomer
+    (`_newcomer_priors`).
     """
     promoted = sorted(t for t in teams if t not in model.strengths)
     thin_sample = sorted(
@@ -517,31 +525,87 @@ def _stabilize_thin_samples(
     lo_a, hi_a = min(scores[t][0] for t in pool), max(scores[t][0] for t in pool)
     lo_d, hi_d = min(scores[t][1] for t in pool), max(scores[t][1] for t in pool)
 
+    priors = priors or {}
     for norm in promoted:
-        model.add_team(norm, prior_attack, prior_defence)
+        model.add_team(norm, *priors.get(norm, (prior_attack, prior_defence)))
     for norm in thin_sample:
         weight = match_counts.get(norm, 0) / SEASON_SIM_MIN_MATCHES
         raw_attack, raw_defence, _g = _attack_defence_goodness(model, norm)
         raw_attack = min(max(raw_attack, lo_a), hi_a)
         raw_defence = min(max(raw_defence, lo_d), hi_d)
+        team_attack, team_defence = priors.get(norm, (prior_attack, prior_defence))
         model.add_team(
             norm,
-            weight * raw_attack + (1 - weight) * prior_attack,
-            weight * raw_defence + (1 - weight) * prior_defence,
+            weight * raw_attack + (1 - weight) * team_attack,
+            weight * raw_defence + (1 - weight) * team_defence,
         )
     return promoted
 
 
-def _season_model(window: list[ResultRow], teams: list[str]) -> tuple[PoissonModel, list[str]]:
+def _newcomer_priors(
+    adb: AnalyticsDB, division: str, last_season: str, teams: list[str]
+) -> dict[str, tuple[float, float]]:
+    """Rating priors for the clubs in `teams` that were not in `division` in `last_season`
+    but played in the division directly above or below it (DIVISION_LADDERS) that season.
+
+    Each is rated by the same model on that division's recent results, then mapped onto
+    this division's scale with NEWCOMER_RATING_MAP -- so a club relegated from the
+    Championship starts League One as one of its stronger sides, not as the average of its
+    three weakest. Clubs promoted into a top flight, and clubs from outside the loaded
+    pyramid, are left out (the caller's weakest-three prior stands). {} for a division not in
+    a ladder.
+    """
+    import math
+
+    ladder = next((lad for lad in DIVISION_LADDERS if division in lad), None)
+    if ladder is None:
+        return {}
+    staying = {o.home_norm for o in adb.outcomes_for(last_season, division)}
+    newcomers = {t for t in teams if t not in staying}
+    level = ladder.index(division)
+    priors: dict[str, tuple[float, float]] = {}
+    for direction, other_level in (("down", level - 1), ("up", level + 1)):
+        if not newcomers or not 0 <= other_level < len(ladder):
+            continue
+        if direction == "up" and level == 0:
+            continue  # a top flight's promoted sides: the weakest-three prior measured better
+        other = ladder[other_level]
+        moved = newcomers & {o.home_norm for o in adb.outcomes_for(last_season, other)}
+        if not moved:
+            continue
+        (b_att, c_att), (b_def, c_def) = NEWCOMER_RATING_MAP[direction]
+        source = _forecast_fit(
+            adb.recent_outcomes_through(other, last_season, n_seasons=FORECAST_SEASONS)
+        )
+        for t in sorted(moved):
+            s = source.strengths.get(t)
+            if s is None:
+                continue
+            # The map was fit on uncalibrated ratings: undo FORECAST_SPREAD, map, redo it.
+            log_att, log_def = (math.log(v) / FORECAST_SPREAD for v in (s.attack, s.defence))
+            priors[t] = (
+                math.exp(FORECAST_SPREAD * (c_att + b_att * log_att)),
+                math.exp(FORECAST_SPREAD * (c_def + b_def * log_def)),
+            )
+        newcomers -= moved
+    return priors
+
+
+def _season_model(
+    window: list[ResultRow],
+    teams: list[str],
+    priors: dict[str, tuple[float, float]] | None = None,
+) -> tuple[PoissonModel, list[str]]:
     """The season-projection rating model: the forecast model fit on `window`, with every
-    thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`). Returns
-    (model, the teams the fit never saw -- the newly promoted)."""
+    thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`, toward
+    `priors` for the clubs it names). Returns (model, the teams the fit never saw -- the
+    newcomers)."""
     model = _forecast_fit(window)
     match_counts: dict[str, int] = {}
     for o in window:
         match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
         match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
-    promoted = _stabilize_thin_samples(model, teams, match_counts)
+    promoted = _stabilize_thin_samples(model, teams, match_counts, priors)
     return model, promoted
 
 
@@ -608,12 +672,14 @@ def season_briefing(
     with AnalyticsDB(analytics_db) as adb:
         anchor = adb.outcomes_for(season, division)
         window = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
+        names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
+        teams = sorted(names)
+        last = previous_season(adb.seasons_loaded(), division, season)
+        priors = _newcomer_priors(adb, division, last, teams) if last and anchor else {}
     if not anchor:
         return None
 
-    names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
-    teams = sorted(names)
-    model, _promoted = _season_model(window, teams)
+    model, _promoted = _season_model(window, teams, priors)
     projections, played, total = _project_from_table(
         model,
         teams,
@@ -748,8 +814,18 @@ def upcoming_season_briefing(
         return None  # a partial fixture list is no line-up to project a season from
 
     teams = sorted(names)
-    model, promoted = _season_model(window, teams)
     season_label_code = anchor_season if still_in_progress else _next_season_code(anchor_season)
+
+    # Newcomers are the clubs new since the last COMPLETED season: the anchor itself once it
+    # is over, the one before it while it is still being played.
+    with AnalyticsDB(analytics_db) as adb:
+        last = (
+            previous_season(adb.seasons_loaded(), division, anchor_season)
+            if still_in_progress
+            else anchor_season
+        )
+        priors = _newcomer_priors(adb, division, last, teams) if last else {}
+    model, promoted = _season_model(window, teams, priors)
     projections, played, total = _project_from_table(
         model,
         teams,
@@ -837,6 +913,38 @@ FORECAST_RHO = -0.09
 # title or relegation probability. Below the threshold the team's rating is blended toward the
 # "typical promoted side" prior in proportion to how little data it actually has.
 SEASON_SIM_MIN_MATCHES = 5
+# Pyramids with more than one division loaded, top first. A club new to a division usually
+# came from the one directly above (relegated) or below (promoted) -- `_newcomer_priors`.
+DIVISION_LADDERS = (
+    ("E0", "E1", "E2", "E3"),
+    ("SP1", "SP2"),
+    ("D1", "D2"),
+    ("I1", "I2"),
+    ("F1", "F2"),
+)
+# A club new to a division is rated from the division it played in last season:
+# log(new rating) = c + b * log(old rating), ((b_att, c_att), (b_def, c_def)) per direction.
+# Least-squares on every move between adjacent divisions in DIVISION_LADDERS, 1995/96-2026/27
+# (690 relegations, 706 promotions): the old rating is the season model's going into the move,
+# the new one its single-season fit in the new division. Relegated clubs average attack 1.07,
+# defence 0.92 in their new division (above average); the slopes are low (0.14-0.29) -- a
+# club's old rating says much less than which way it moved. Before this every newcomer got the
+# division's weakest-three prior, so relegated clubs finished far above their pre-season
+# projection (actual - projected points: E2 +16.6, SP2 +10.8, E1 +9.8, D2 +8.2, I2 +8.1).
+# `soccer backtest-season`, 20 seasons, pre-season skill (points RMSE), before -> after, on
+# the recalibrated forecast model (FORECAST_SPREAD): E1 +2.1% (14.8) -> +14.0% (12.8); E2
+# -10.2% (16.5) -> +4.9% (14.3); E3 -1.5% (13.9) -> +2.9% (13.6); SP2 -3.8% (13.3) -> +8.2%
+# (11.7); D2 -2.1% (11.6) -> +9.8% (10.2); I2 -12.5% (14.8) -> +1.8% (13.2); F2 -1.2% (12.1)
+# -> +6.5% (11.2). Before the recalibration the gains were the same within 1pp. Slopes fit on
+# 2006+ only, or intercept-only (b=0), score within 0.5pp. From 25% played every newcomer has
+# enough matches of its own, so later checkpoints are unchanged.
+# Promoted INTO a top flight keeps the weakest-three prior: the "up" map there measured worse
+# (pre-recalibration: E0 +39.9% -> +38.8%, RMSE 10.3 -> 10.5; SP1 +41.9% -> +41.4%) -- that
+# prior already fits.
+NEWCOMER_RATING_MAP: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
+    "down": ((0.135, 0.098), (0.255, -0.128)),
+    "up": ((0.223, -0.175), (0.291, 0.144)),
+}
 
 
 def _forecast_fit(outcomes: Sequence[Any]) -> PoissonModel:
@@ -1514,9 +1622,13 @@ def season_backtest(
             {s for s, d, _n in adb.seasons_loaded() if d == division}, key=season_sort_key
         )[-(n_seasons + FORECAST_SEASONS) :]
         seasons = [(code, adb.outcomes_for(code, division)) for code in codes]
+        priors = {
+            code: _newcomer_priors(adb, division, last, sorted({o.home_norm for o in rows}))
+            for (last, _r), (code, rows) in itertools.pairwise(seasons)
+        }
 
-    def fit(window: list[ResultRow], teams: list[str]) -> PoissonModel:
-        return _season_model(window, teams)[0]
+    def fit(window: list[ResultRow], teams: list[str], code: str) -> PoissonModel:
+        return _season_model(window, teams, priors.get(code))[0]
 
     return backtest_season_projections(
         seasons,
