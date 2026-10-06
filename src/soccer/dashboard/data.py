@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +31,7 @@ from soccer.models.poisson import DEFAULT_RHO, PoissonModel, calibrate_model, fi
 from soccer.models.season_backtest import SeasonBacktest
 from soccer.models.simulation import (
     TeamProjection,
+    games_by_team,
     remaining_round_robin,
     season_rating_noise,
     simulate_season,
@@ -549,6 +550,7 @@ def _project_from_table(
     teams: list[str],
     played: list[ResultRow],
     *,
+    history: Mapping[str, int],
     n_sims: int,
     top_n: int,
     relegation: int,
@@ -557,7 +559,8 @@ def _project_from_table(
     """Project the final table from the points already banked.
 
     Only the unplayed fixtures are simulated, with rating noise that fades as the season is
-    played (`season_rating_noise`). Backtested 2026-10-06 (`season_backtest`): replaying the
+    played and shrinks with each club's `history` (matches behind its rating;
+    `season_rating_noise`). Backtested 2026-10-06 (`season_backtest`): replaying the
     whole season from zero -- what the projections did before -- ignores the table and is
     far worse once games are played (E0 halfway: title Brier 0.026 vs 0.015, points RMSE
     8.3 vs 5.7). Returns (projections, matches played, matches in the full season).
@@ -575,7 +578,7 @@ def _project_from_table(
         top_n=top_n,
         relegation=relegation,
         seed=seed,
-        rating_noise=season_rating_noise(fraction),
+        rating_noise={t: season_rating_noise(fraction, history.get(t, 0)) for t in teams},
     )
     total = len(teams) * (len(teams) - 1)
     return result.projections, total - len(remaining), total
@@ -612,7 +615,14 @@ def season_briefing(
     teams = sorted(names)
     model, _promoted = _season_model(window, teams)
     projections, played, total = _project_from_table(
-        model, teams, anchor, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
+        model,
+        teams,
+        anchor,
+        history=games_by_team(window),
+        n_sims=n_sims,
+        top_n=top_n,
+        relegation=relegation,
+        seed=seed,
     )
     return SeasonBriefing(
         season=season,
@@ -744,6 +754,7 @@ def upcoming_season_briefing(
         model,
         teams,
         anchor_rows if still_in_progress else [],
+        history=games_by_team(window),
         n_sims=n_sims,
         top_n=top_n,
         relegation=relegation,

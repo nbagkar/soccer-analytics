@@ -19,6 +19,7 @@ from typing import Any
 
 from soccer.models.simulation import (
     ScorelineModel,
+    games_by_team,
     remaining_round_robin,
     season_rating_noise,
     simulate_season,
@@ -126,10 +127,13 @@ def backtest_season_projections(
             flat = _Flat(
                 sum(o.fthg for o in window) / matches, sum(o.ftag for o in window) / matches
             )
-            for key, m, noise in (
-                ("model", model, season_rating_noise(fraction)),
+            games = games_by_team(window)
+            doubt = {t: season_rating_noise(fraction, games.get(t, 0)) for t in teams}
+            noises: tuple[tuple[str, ScorelineModel, float | dict[str, float]], ...] = (
+                ("model", model, doubt),
                 ("base", flat, 0.0),
-            ):
+            )
+            for key, m, noise in noises:
                 sim = simulate_season(
                     m,
                     remaining,

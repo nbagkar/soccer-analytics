@@ -21,7 +21,7 @@ is already played (measured -- see SEASON_NOISE_START).
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -55,14 +55,36 @@ class Outcome(Protocol):
 # -> 0.606, neutral from halfway (no noise is already calibrated there). Confirmed untuned on
 # E2/E3/I2/F2 (1,763): pre-season 1.354 -> 1.099. Without it, a pre-season "61% top four"
 # came true 45% of the time; flat noise of any size hurt from halfway on, hence the fade.
-SEASON_NOISE_START = 0.25
+#
+# Per club, not flat (later 2026-10-06): the same doubt for everyone left established top
+# clubs UNDER-confident (pre-season title calls of 50%+ averaged 0.60 and came true 0.76),
+# while a promoted side really is uncertain. Doubt now shrinks with the matches behind the
+# rating: sd = START * sqrt(HISTORY / (HISTORY + games in the fitting window)) -- ~0.16 for
+# a club with three seasons in the division, the full 0.4 for one with none. Pre-season
+# summed log loss 0.828 -> 0.814 (13 tuning leagues), 1.112 -> 1.079 (untuned E2/E3/I2/F2);
+# title 50%+ calls now 0.63 predicted / 0.67 actual. Cost: relegation log loss slightly worse
+# (0.370 -> 0.376 tuning, 0.410 -> 0.445 untuned) -- newcomers carry more doubt. Capping the
+# doubt at the old 0.25 gave the gain straight back. Neutral from a quarter played on.
+SEASON_NOISE_START = 0.4
+SEASON_NOISE_HISTORY = 20.0
 SEASON_NOISE_POWER = 2.0
 
 
-def season_rating_noise(fraction_played: float) -> float:
-    """Per-team rating noise (log-scale sd) for a season `fraction_played` (0-1) through."""
+def season_rating_noise(fraction_played: float, games: float = 0.0) -> float:
+    """A club's rating noise (log-scale sd), `fraction_played` (0-1) into the season, with
+    `games` matches behind its rating in the fitting window."""
     remaining = min(max(1.0 - fraction_played, 0.0), 1.0)
-    return SEASON_NOISE_START * math.pow(remaining, SEASON_NOISE_POWER)
+    history = math.sqrt(SEASON_NOISE_HISTORY / (SEASON_NOISE_HISTORY + max(games, 0.0)))
+    return SEASON_NOISE_START * history * math.pow(remaining, SEASON_NOISE_POWER)
+
+
+def games_by_team(rows: Iterable[Outcome]) -> dict[str, int]:
+    """Matches each club played in `rows` -- the history behind its rating."""
+    games: dict[str, int] = {}
+    for o in rows:
+        games[o.home_norm] = games.get(o.home_norm, 0) + 1
+        games[o.away_norm] = games.get(o.away_norm, 0) + 1
+    return games
 
 
 def standings(played: Iterable[Outcome]) -> tuple[dict[str, int], dict[str, int]]:
@@ -129,15 +151,16 @@ def simulate_season(
     top_n: int = 4,
     relegation: int = 3,
     seed: int | None = None,
-    rating_noise: float = 0.0,
+    rating_noise: float | Mapping[str, float] = 0.0,
 ) -> SimulationResult:
     """Simulate the remaining fixtures `n_sims` times and summarise final tables.
 
     Team keys are normalized names (matching the model). `remaining` is (home, away)
     pairs. Teams are the union of `teams`, the starting standings, and the fixtures.
-    `rating_noise` (log-scale sd, 0 = off) gives each team one attack and one defence shock
-    per simulated season, so the spread of outcomes includes doubt about the ratings
-    themselves, not just match luck -- see `season_rating_noise`.
+    `rating_noise` (log-scale sd, 0 = off; one number for every team or a per-team mapping)
+    gives each team one attack and one defence shock per simulated season, so the spread of
+    outcomes includes doubt about the ratings themselves, not just match luck -- see
+    `season_rating_noise`.
     """
     points_start = points_start or {}
     goal_diff_start = goal_diff_start or {}
@@ -159,10 +182,14 @@ def simulate_season(
     away_idx = np.array([index[a] for _, a in remaining], dtype=np.intp)
     lam = np.array([model.expected_goals(h, a)[0] for h, a in remaining])
     mu = np.array([model.expected_goals(h, a)[1] for h, a in remaining])
-    if rating_noise > 0 and remaining:
+    if isinstance(rating_noise, Mapping):
+        sd = np.array([rating_noise.get(team, 0.0) for team in order])
+    else:
+        sd = np.full(n_teams, float(rating_noise))
+    if remaining and np.any(sd > 0):
         # attack scales a team's own goals; defence scales what its opponents score
-        attack = np.exp(rng.normal(0.0, rating_noise, (n_sims, n_teams)))
-        defence = np.exp(rng.normal(0.0, rating_noise, (n_sims, n_teams)))
+        attack = np.exp(rng.normal(0.0, 1.0, (n_sims, n_teams)) * sd[None, :])
+        defence = np.exp(rng.normal(0.0, 1.0, (n_sims, n_teams)) * sd[None, :])
         lam = lam[None, :] * attack[:, home_idx] * defence[:, away_idx]
         mu = mu[None, :] * attack[:, away_idx] * defence[:, home_idx]
 

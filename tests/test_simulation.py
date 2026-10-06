@@ -136,3 +136,40 @@ class TestTableHelpers:
         remaining, fraction = remaining_round_robin(["a", "b", "c"], played)
         assert len(remaining) == 4 and ("a", "b") not in remaining and ("b", "a") in remaining
         assert fraction == pytest.approx(2 / 6)
+
+
+class TestPerTeamDoubt:
+    def test_more_history_means_less_doubt(self) -> None:
+        from soccer.models.simulation import season_rating_noise
+
+        assert season_rating_noise(0.0, games=114) < season_rating_noise(0.0, games=10)
+        assert season_rating_noise(0.0, games=10) < season_rating_noise(0.0, games=0)
+        assert season_rating_noise(1.0, games=0) == 0.0  # nothing left to doubt
+
+    def test_doubt_is_applied_per_team(self) -> None:
+        # Only the favourite is doubted: its title odds fall; with no doubt anywhere they
+        # match the plain simulation exactly.
+        sure = simulate_season(FOUR, FIXTURES, n_sims=4000, seed=1)
+        doubted = simulate_season(FOUR, FIXTURES, n_sims=4000, seed=1, rating_noise={"strong": 0.5})
+        none = simulate_season(FOUR, FIXTURES, n_sims=4000, seed=1, rating_noise={})
+        title = {p.team: p.title_pct for p in sure.projections}
+        assert {p.team: p.title_pct for p in doubted.projections}["strong"] < title["strong"]
+        assert none == sure
+
+    def test_games_by_team(self) -> None:
+        from dataclasses import dataclass
+
+        from soccer.models.simulation import games_by_team
+
+        @dataclass(frozen=True)
+        class Played:
+            home_norm: str
+            away_norm: str
+            fthg: int
+            ftag: int
+
+        assert games_by_team([Played("a", "b", 1, 0), Played("a", "c", 0, 0)]) == {
+            "a": 2,
+            "b": 1,
+            "c": 1,
+        }
