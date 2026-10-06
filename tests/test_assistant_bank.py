@@ -7,22 +7,27 @@ the score. HOLDOUT failures are deliberately not printed -- it is scored, never 
 
 from __future__ import annotations
 
-from tests.assistant_bank import DEV, HOLDOUT, build_store, report, score
+from tests.assistant_bank import DEPTH, DEV, HOLDOUT, build_store, report, score
 
 # 2026-10-05 baseline before any fix: DEV 21/45, HOLDOUT 6/20 (re-scored once the scorer
 # began reading reply tables; 5/20 text-only). After the first category fixes (club stats,
 # time words, derbies/aliases, team compare, scoring, improvement): DEV 45/45, HOLDOUT 18/20.
+# 2026-10-06: DEPTH checklist added (why / market comparison / ranges / peer ranks): 0/10 on
+# the code before it, 10/10 after.
 DEV_FLOOR = 45
 HOLDOUT_FLOOR = 18
+DEPTH_FLOOR = 10
 
 
 def test_question_bank_score_never_drops(tmp_path) -> None:
     analytics, live = build_store(tmp_path)
     dev = score(DEV, analytics, live)
     holdout = score(HOLDOUT, analytics, live)
+    depth = score(DEPTH, analytics, live)
     dev_passed = sum(r.ok for r in dev)
     holdout_passed = sum(r.ok for r in holdout)
     print(report("DEV", dev))
     print(f"HOLDOUT: {holdout_passed}/{len(holdout)}")
     assert dev_passed >= DEV_FLOOR, report("DEV", dev)
     assert holdout_passed >= HOLDOUT_FLOOR, f"HOLDOUT {holdout_passed}/{len(holdout)}"
+    assert sum(r.ok for r in depth) >= DEPTH_FLOOR, report("DEPTH", depth)

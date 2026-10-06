@@ -1554,6 +1554,48 @@ class TestUpcomingSeasonBriefing:
         assert relegation_pct[strugglers_norm] < 0.8
 
 
+class TestUpcomingSeasonRoster:
+    def test_a_partial_fixture_feed_keeps_the_whole_league(self, tmp_path) -> None:
+        """Fixtures for only some clubs once made a five-team 'league' whose top four and
+        bottom three overlapped (78% top four AND 75% relegated). The roster must be the
+        season's own clubs, so the buckets stay disjoint."""
+        from soccer.dashboard.data import upcoming_season_briefing
+
+        analytics = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford", "Everton", "Wolves", "Spurs"]
+        seed_results(analytics, division="E0", teams=teams, season="2526")
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        with AnalyticsDB(analytics) as adb:  # make the season recent, so it is in progress
+            latest = adb.latest_result_date("E0")
+            assert latest is not None
+            shift = (date.today() - latest).days - 7
+            adb._con.execute(f"UPDATE results SET match_date = match_date + INTERVAL {shift} DAY")
+            adb._con.execute(  # drop the last few matchdays, so the season is unfinished
+                "DELETE FROM results WHERE match_date > ?", [date.today() - timedelta(days=20)]
+            )
+        live = tmp_path / "live.sqlite"
+        db = LiveDB(live)
+        for i, (home, away) in enumerate([("Arsenal", "Chelsea"), ("Fulham", "Brentford")]):
+            add_match(
+                db,
+                match_id=str(i),
+                home=home,
+                away=away,
+                competition="Premier League",
+                status=MatchStatus.NOT_STARTED,
+            )
+        db.close()
+
+        result = upcoming_season_briefing(live, analytics, "E0", n_sims=500, relegation=3)
+        assert result is not None
+        briefing, _promoted = result
+        assert briefing.season == "2526" and 0 < briefing.played < briefing.total
+        assert len(briefing.projections) == len(teams)
+        for p in briefing.projections:
+            assert p.top_pct + p.relegation_pct <= 1.0 + 1e-9  # disjoint in a 7-team league
+
+
 class TestStabilizeThinSamples:
     """Direct tests of the blending `_stabilize_thin_samples` does, without the Monte Carlo
     noise of a full season simulation on top -- that noise is too coarse, at a test-sized

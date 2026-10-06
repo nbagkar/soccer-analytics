@@ -646,6 +646,9 @@ def _next_season_code(code: str) -> str:
 # can't mistake a fresh new season's first few matches for last season's tail end, or vice
 # versa.
 IN_PROGRESS_WINDOW_DAYS = 270
+# A new season's projection needs its fixtures to name at least this share of the previous
+# season's club count; fewer is a partial feed, not a line-up.
+NEW_SEASON_MIN_LINEUP = 0.8
 
 
 @_cached_until_data_changes()
@@ -708,21 +711,34 @@ def upcoming_season_briefing(
         disp, norm = resolve_canonical_name(raw, model_names)
         names.setdefault(norm, disp)
 
-    teams = sorted(names)
-    model, promoted = _season_model(window, teams)
-
     # `anchor_season` is "the latest loaded season" -- which used to always mean the last
     # CONCLUDED one, so the projection was safely labelled the season after it. That breaks
     # the instant this season's own results start loading: anchor_season then already IS the
     # season being projected, and blindly advancing it mislabels the projection a full year
-    # ahead. Tell the two cases apart from the data itself: recent enough to still be in
-    # progress, and every club in that season's results still has fixtures. Clubs dropping
-    # out of the line-up (relegated) mean the fixtures are the NEXT season's, whose table
-    # starts empty; a club that has simply not played yet this season is no signal at all.
+    # ahead. Tell the cases apart from the data itself (and recent enough to be in progress):
+    # * every club in that season's results still has fixtures (maybe plus clubs yet to
+    #   play) -> in progress, roster = both;
+    # * the fixtures only cover some of that season's clubs (a partial fixture feed) -> in
+    #   progress, roster = the season's own clubs -- simulating just the clubs that happen to
+    #   have fixtures once produced a five-team "league" whose top four and bottom three
+    #   overlapped (78% top four AND 75% relegated);
+    # * clubs have left AND new ones arrived -> the NEXT season, whose table starts empty --
+    #   trusted only if the fixtures name close to a full line-up.
     most_recent_match = max(o.match_date for o in window)
     days_since = (datetime.now(UTC).date() - most_recent_match).days
-    anchor_teams = {o.home_norm for o in anchor_rows} | {o.away_norm for o in anchor_rows}
-    still_in_progress = days_since <= IN_PROGRESS_WINDOW_DAYS and anchor_teams <= set(teams)
+    anchor_names = {o.home_norm: o.home for o in anchor_rows} | {
+        o.away_norm: o.away for o in anchor_rows
+    }
+    anchor_teams, fixture_set = set(anchor_names), set(names)
+    recent = days_since <= IN_PROGRESS_WINDOW_DAYS
+    still_in_progress = recent and (anchor_teams <= fixture_set or fixture_set <= anchor_teams)
+    if still_in_progress:
+        names = anchor_names | names
+    elif len(fixture_set) < NEW_SEASON_MIN_LINEUP * len(anchor_teams):
+        return None  # a partial fixture list is no line-up to project a season from
+
+    teams = sorted(names)
+    model, promoted = _season_model(window, teams)
     season_label_code = anchor_season if still_in_progress else _next_season_code(anchor_season)
     projections, played, total = _project_from_table(
         model,
@@ -1003,13 +1019,20 @@ def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:
     return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
+# How many matches a rating needs before the forecast calls it well supported. This was the
+# rating shrinkage (3) until market-implied ratings cut that to 0.5 -- after which nearly
+# every forecast read "High" confidence. Decoupled so the label keeps its meaning: High
+# from ~17 matches in the window, Low under ~5 (a promoted side's first weeks).
+CONFIDENCE_PSEUDO_GAMES = 3.0
+
+
 @dataclass(frozen=True)
 class TeamFactor:
     name: str
     attack: float  # scoring rate vs league average (1.0 = average, >1 = scores more)
     solidity: float  # 1 / concede-rate vs league (1.0 = average, >1 = concedes fewer)
     games: int  # matches backing the rating in the fitting window
-    data_weight: float  # games / (games + shrinkage): how much rating is data vs the prior
+    data_weight: float  # games / (games + CONFIDENCE_PSEUDO_GAMES): data behind the rating
 
 
 @dataclass(frozen=True)
@@ -1084,7 +1107,7 @@ def forecast_explanation(
             attack=st.attack,
             solidity=1.0 / max(st.defence, 0.05),
             games=g,
-            data_weight=g / (g + FORECAST_SHRINKAGE) if g else 0.0,
+            data_weight=g / (g + CONFIDENCE_PSEUDO_GAMES) if g else 0.0,
         )
 
     hf, af = factor(hn, home), factor(an, away)

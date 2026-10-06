@@ -242,6 +242,30 @@ HOLDOUT: list[Case] = [
 ]
 
 
+# DEPTH: not "did it answer" but "did it answer well" -- the parts that make a number usable.
+# A forecast says why (the multiplied-out ratings) and how it compares with the bookmakers;
+# a season projection gives a points range; a player answer ranks the player against peers.
+# A spec of what a deep answer contains, so it is a checklist rather than a held-out score.
+DEPTH: list[Case] = [
+    Case("tottenham vs arsenal odds", ("forecast",), ("Why:", "home side", "Bookmakers")),
+    Case("celtic v rangers prediction", ("forecast",), ("Why:", "second opinion")),
+    Case("chelsea vs liverpool who wins", ("forecast",), ("Why:", "Bookmakers")),
+    Case("will chelsea make top four", ("title_odds",), ("Chelsea", "pts", "range")),
+    Case("liverpool title chances", ("title_odds",), ("Liverpool", "Projected", "range")),
+    Case("who will win la liga", ("title_odds",), ("Real Madrid", "–")),
+    Case("messi stats", ("player",), ("Messi", "Best ranks", "top")),
+    Case("how many goals has otamendi scored", ("player",), ("Otamendi", "Best ranks")),
+    Case("compare messi and otamendi", ("compare",), ("xT per 90",)),
+    Case(
+        "will chelsea get relegated",
+        ("title_odds",),
+        ("Chelsea", "range"),
+        ("78% top four",),
+        note="the 5-team projection once put Chelsea 78% top four AND 75% relegated",
+    ),
+]
+
+
 def score(cases: list[Case], analytics: Path, live: Path) -> list[Result]:
     from soccer.dashboard.assistant import answer
 

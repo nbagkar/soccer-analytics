@@ -697,6 +697,7 @@ def _render_season(briefing: SeasonBriefing) -> None:
             "#": list(range(1, len(projs) + 1)),
             "Team": [names.get(p.team, p.team) for p in projs],
             "xPts": [round(p.expected_points) for p in projs],
+            "80% range": [f"{p.points_low:.0f}–{p.points_high:.0f}" for p in projs],
             "Title %": [round(100 * p.title_pct, 1) for p in projs],
             f"Top {briefing.top_n} %": [round(100 * p.top_pct, 1) for p in projs],
             "Relegation %": [round(100 * p.relegation_pct, 1) for p in projs],
