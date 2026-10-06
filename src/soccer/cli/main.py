@@ -955,6 +955,52 @@ def value(
     )
 
 
+@app.command("backtest-season")
+def backtest_season(
+    division: str = typer.Option("E0", help="Division to backtest on."),
+    seasons: int = typer.Option(20, help="How many recent completed seasons to score."),
+    sims: int = typer.Option(4000, help="Monte Carlo runs per projection."),
+) -> None:
+    """Score the season projections (title / top 4 / relegation) against real final tables."""
+    from soccer.dashboard.data import season_backtest
+
+    settings = get_settings()
+    with console.status("Replaying seasons..."):
+        report = season_backtest(settings.analytics_db, division, n_seasons=seasons, n_sims=sims)
+    if report is None:
+        console.print(f"[yellow]No complete round-robin seasons loaded for {division}.[/yellow]")
+        raise typer.Exit(1)
+
+    tbl = Table(
+        title=f"Season projections - {division_name(division)}, {len(report.seasons)} seasons "
+        f"({season_label(report.seasons[0])} to {season_label(report.seasons[-1])})",
+        header_style="bold",
+    )
+    tbl.add_column("Made at")
+    for col in ("Title", "Top 4", "Releg"):
+        tbl.add_column(f"{col} LL", justify="right")
+    tbl.add_column("Baseline LL", justify="right")
+    tbl.add_column("Skill", justify="right")
+    tbl.add_column("Pts RMSE (base)", justify="right")
+    for cp in report.checkpoints:
+        model_ll = [cp.model[e].log_loss for e in ("title", "top", "relegation")]
+        base_ll = sum(cp.baseline[e].log_loss for e in ("title", "top", "relegation"))
+        tbl.add_row(
+            "pre-season" if cp.checkpoint == 0 else f"{cp.checkpoint:.0%} played",
+            *(f"{x:.3f}" for x in model_ll),
+            f"{base_ll:.3f}",
+            f"{cp.skill:+.0%}",
+            f"{cp.points_rmse:.1f} ({cp.baseline_points_rmse:.1f})",
+        )
+    console.print(tbl)
+    console.print(
+        "[dim]Log loss of each yes/no outcome per team-season (lower is better). Baseline: "
+        "every team league-average, starting from the same banked points -- Skill is the share "
+        "of its error the ratings remove. Late in a season the table itself does most of the "
+        "work, so skill shrinks while every error falls.[/dim]"
+    )
+
+
 @app.command()
 def simulate(
     season: str | None = typer.Option(
@@ -975,7 +1021,7 @@ def simulate(
     from datetime import date as _date
 
     from soccer.models.poisson import fit_poisson
-    from soccer.models.simulation import simulate_season
+    from soccer.models.simulation import simulate_season, standings
 
     outcomes = _load_outcomes(season, division)
     names = _display_names(outcomes)
@@ -986,7 +1032,7 @@ def simulate(
 
     # Fit on what has been played; before any cutoff, use the whole season's strengths.
     model = fit_poisson(played or outcomes)
-    points_start, gd_start = _standings_from(played)
+    points_start, gd_start = standings(played)
     remaining = [(o.home_norm, o.away_norm) for o in remaining_matches]
 
     result = simulate_season(
@@ -1021,19 +1067,6 @@ def simulate(
             f"{p.expected_points:.0f}",
         )
     console.print(tbl)
-
-
-def _standings_from(played: list[ResultRow]) -> tuple[dict[str, int], dict[str, int]]:
-    points: dict[str, int] = {}
-    goal_diff: dict[str, int] = {}
-    for o in played:
-        hp = 3 if o.fthg > o.ftag else 1 if o.fthg == o.ftag else 0
-        ap = 3 if o.ftag > o.fthg else 1 if o.fthg == o.ftag else 0
-        points[o.home_norm] = points.get(o.home_norm, 0) + hp
-        points[o.away_norm] = points.get(o.away_norm, 0) + ap
-        goal_diff[o.home_norm] = goal_diff.get(o.home_norm, 0) + (o.fthg - o.ftag)
-        goal_diff[o.away_norm] = goal_diff.get(o.away_norm, 0) + (o.ftag - o.fthg)
-    return points, goal_diff
 
 
 def _resolve_season(season: str | None, division: str, *, complete: bool = False) -> str:

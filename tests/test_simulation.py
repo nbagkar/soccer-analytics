@@ -85,3 +85,54 @@ class TestSensitivity:
 def test_no_teams_raises() -> None:
     with pytest.raises(ValueError, match="no teams"):
         simulate_season(model({}), [], n_sims=10)
+
+
+class TestRatingNoise:
+    def test_noise_keeps_the_invariants(self) -> None:
+        result = simulate_season(FOUR, FIXTURES, n_sims=2000, seed=1, rating_noise=0.3)
+        assert sum(p.title_pct for p in result.projections) == pytest.approx(1.0, abs=1e-9)
+
+    def test_noise_pulls_a_favourite_toward_the_field(self) -> None:
+        # Doubt about the ratings means the best-rated side is less of a sure thing.
+        sure = simulate_season(FOUR, FIXTURES, n_sims=4000, seed=1)
+        doubt = simulate_season(FOUR, FIXTURES, n_sims=4000, seed=1, rating_noise=0.4)
+        title = {p.team: p.title_pct for p in sure.projections}
+        title_doubt = {p.team: p.title_pct for p in doubt.projections}
+        assert title_doubt["strong"] < title["strong"]
+        assert title_doubt["weak"] > title["weak"]
+
+    def test_zero_noise_is_the_plain_simulation(self) -> None:
+        a = simulate_season(FOUR, FIXTURES, n_sims=500, seed=3)
+        b = simulate_season(FOUR, FIXTURES, n_sims=500, seed=3, rating_noise=0.0)
+        assert a == b
+
+    def test_schedule_fades_to_nothing_as_the_season_is_played(self) -> None:
+        from soccer.models.simulation import SEASON_NOISE_START, season_rating_noise
+
+        assert season_rating_noise(0.0) == pytest.approx(SEASON_NOISE_START)
+        assert season_rating_noise(0.5) < season_rating_noise(0.25) < season_rating_noise(0.0)
+        assert season_rating_noise(1.0) == 0.0
+        assert season_rating_noise(1.5) == 0.0  # out-of-range input is clamped
+
+
+class TestTableHelpers:
+    def test_standings_and_remaining_pairs(self) -> None:
+        from dataclasses import dataclass
+
+        from soccer.models.simulation import remaining_round_robin, standings
+
+        @dataclass(frozen=True)
+        class Played:
+            home_norm: str
+            away_norm: str
+            fthg: int
+            ftag: int
+
+        played = [Played("a", "b", 2, 0), Played("c", "a", 1, 1)]
+        points, gd = standings(played)
+        assert points == {"a": 4, "b": 0, "c": 1}
+        assert gd == {"a": 2, "b": -2, "c": 0}
+
+        remaining, fraction = remaining_round_robin(["a", "b", "c"], played)
+        assert len(remaining) == 4 and ("a", "b") not in remaining and ("b", "a") in remaining
+        assert fraction == pytest.approx(2 / 6)

@@ -28,7 +28,14 @@ from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
 from soccer.models.poisson import DEFAULT_RHO, PoissonModel, fit_poisson_shots
-from soccer.models.simulation import TeamProjection, simulate_season
+from soccer.models.season_backtest import SeasonBacktest
+from soccer.models.simulation import (
+    TeamProjection,
+    remaining_round_robin,
+    season_rating_noise,
+    simulate_season,
+    standings,
+)
 from soccer.models.value import ValueReport
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
 from soccer.storage.analytics_db import (
@@ -37,6 +44,7 @@ from soccer.storage.analytics_db import (
     MatchRecord,
     PlayerProfile,
     PlayerRow,
+    ResultRow,
     TableRow,
     TeamForm,
     TeamStreak,
@@ -461,6 +469,8 @@ class SeasonBriefing:
     relegation: int
     projections: list[TeamProjection]  # team = normalized name
     names: dict[str, str]  # normalized -> display name
+    played: int = 0  # matches already banked in the table the projection starts from
+    total: int = 0  # matches in the full (double round-robin) season
 
 
 def _attack_defence_goodness(
@@ -527,6 +537,62 @@ def _stabilize_thin_samples(
     return promoted
 
 
+def _season_model(window: list[ResultRow], teams: list[str]) -> tuple[PoissonModel, list[str]]:
+    """The season-projection rating model: the forecast model fit on `window`, with every
+    thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`). Returns
+    (model, the teams the fit never saw -- the newly promoted)."""
+    model = fit_poisson_shots(
+        window,
+        alpha=FORECAST_ALPHA,
+        shrinkage=FORECAST_SHRINKAGE,
+        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+        market_weight=FORECAST_MARKET_WEIGHT,
+    )
+    match_counts: dict[str, int] = {}
+    for o in window:
+        match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
+        match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
+    promoted = _stabilize_thin_samples(model, teams, match_counts)
+    return model, promoted
+
+
+def _project_from_table(
+    model: PoissonModel,
+    teams: list[str],
+    played: list[ResultRow],
+    *,
+    n_sims: int,
+    top_n: int,
+    relegation: int,
+    seed: int,
+) -> tuple[list[TeamProjection], int, int]:
+    """Project the final table from the points already banked.
+
+    Only the unplayed fixtures are simulated, with rating noise that fades as the season is
+    played (`season_rating_noise`). Backtested 2026-10-06 (`season_backtest`): replaying the
+    whole season from zero -- what the projections did before -- ignores the table and is
+    far worse once games are played (E0 halfway: title Brier 0.026 vs 0.015, points RMSE
+    8.3 vs 5.7). Returns (projections, matches played, matches in the full season).
+    """
+    in_league = [o for o in played if o.home_norm in teams and o.away_norm in teams]
+    points, goal_diff = standings(in_league)
+    remaining, fraction = remaining_round_robin(teams, in_league)
+    result = simulate_season(
+        model,
+        remaining,
+        points_start=points,
+        goal_diff_start=goal_diff,
+        teams=teams,
+        n_sims=n_sims,
+        top_n=top_n,
+        relegation=relegation,
+        seed=seed,
+        rating_noise=season_rating_noise(fraction),
+    )
+    total = len(teams) * (len(teams) - 1)
+    return result.projections, total - len(remaining), total
+
+
 @_cached_until_data_changes()
 def season_briefing(
     analytics_db: Path,
@@ -538,23 +604,16 @@ def season_briefing(
     relegation: int = 3,
     seed: int = 1,
 ) -> SeasonBriefing | None:
-    """Monte Carlo a full season among `season`'s teams, from the recency-weighted model.
+    """Project `season`'s final table from its current standings, using the recency-weighted model.
 
-    Simulates every team playing every other home and away (a clean round-robin, not the
-    real schedule) using the same multi-season shots-on-target blend the single-match
-    forecasts use (`fit_poisson_shots`, see `FORECAST_ALPHA`/`FORECAST_SHRINKAGE`) -- a
-    pre-season projection of title / top-N / relegation odds and expected points. Previously
-    fit a plain goals-only Dixon-Coles here while the match forecasts had already moved to
-    the shots blend; unified so a league's title odds and its match-by-match forecasts agree
-    on the same team ratings. None if the season has no results. A team with fewer than
-    `SEASON_SIM_MIN_MATCHES` matches in the fitting window (a newly promoted side early in
-    `season`) has its unregularised rating blended toward the league's weakest teams, same as
-    `upcoming_season_briefing` -- without it, one or two of its early results get replayed
-    hundreds of times by the simulation and come out as an overconfident title or relegation
-    call.
+    The points already banked stand; only the fixtures not yet played (of the double
+    round-robin) are simulated, with the same multi-season rating model the single-match
+    forecasts use (`fit_poisson_shots`, see `FORECAST_ALPHA`/`FORECAST_SHRINKAGE`) and rating
+    noise that fades as the season is played (`_project_from_table`). A finished season
+    therefore comes back as its actual final table. None if the season has no results. A team
+    with fewer than `SEASON_SIM_MIN_MATCHES` matches in the fitting window has its rating
+    blended toward the league's weakest teams (`_stabilize_thin_samples`).
     """
-    from soccer.models.simulation import simulate_season
-
     with AnalyticsDB(analytics_db) as adb:
         anchor = adb.outcomes_for(season, division)
         window = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
@@ -563,23 +622,9 @@ def season_briefing(
 
     names = {o.home_norm: o.home for o in anchor} | {o.away_norm: o.away for o in anchor}
     teams = sorted(names)
-    model = fit_poisson_shots(
-        window,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
-
-    match_counts: dict[str, int] = {}
-    for o in window:
-        match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
-        match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
-    _stabilize_thin_samples(model, teams, match_counts)
-
-    fixtures = [(home, away) for home in teams for away in teams if home != away]
-    result = simulate_season(
-        model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
+    model, _promoted = _season_model(window, teams)
+    projections, played, total = _project_from_table(
+        model, teams, anchor, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
     )
     return SeasonBriefing(
         season=season,
@@ -587,8 +632,10 @@ def season_briefing(
         n_sims=n_sims,
         top_n=top_n,
         relegation=relegation,
-        projections=result.projections,
+        projections=projections,
         names=names,
+        played=played,
+        total=total,
     )
 
 
@@ -637,11 +684,11 @@ def upcoming_season_briefing(
     matches (any team, not just the newly promoted, early in a season) is blended toward that
     same prior in proportion to how little data it has -- otherwise an unregularised fit
     turns one or two flattering results (e.g. a promoted side's opening upset win) into a
-    wildly overconfident title favourite. Returns (SeasonBriefing, promoted_display_names)
-    or None.
+    wildly overconfident title favourite. Once the season is under way (the fixtures' teams
+    are the latest loaded season's own, and its most recent match is recent), the points
+    already banked stand and only the unplayed fixtures are simulated (`_project_from_table`).
+    Returns (SeasonBriefing, promoted_display_names) or None.
     """
-    from soccer.models.simulation import simulate_season
-
     if not Path(live_db).exists():
         return None
     with AnalyticsDB(analytics_db) as adb:
@@ -651,21 +698,11 @@ def upcoming_season_briefing(
             if anchor_season
             else []
         )
+        anchor_rows = adb.outcomes_for(anchor_season, division) if anchor_season else []
     if not window:
         return None
     assert anchor_season is not None  # window is only non-empty when anchor_season was truthy
-    model = fit_poisson_shots(
-        window,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
-    match_counts: dict[str, int] = {}
-    for o in window:
-        match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
-        match_counts[o.away_norm] = match_counts.get(o.away_norm, 0) + 1
 
     comps = {c for c, d in COMPETITION_TO_DIVISION.items() if d == division}
     with LiveDB(live_db) as db:
@@ -683,32 +720,41 @@ def upcoming_season_briefing(
         disp, norm = resolve_canonical_name(raw, model_names)
         names.setdefault(norm, disp)
 
-    promoted = _stabilize_thin_samples(model, list(names), match_counts)
-
     teams = sorted(names)
-    fixtures = [(home, away) for home in teams for away in teams if home != away]
-    result = simulate_season(
-        model, fixtures, teams=teams, n_sims=n_sims, top_n=top_n, relegation=relegation, seed=seed
-    )
+    model, promoted = _season_model(window, teams)
+
     # `anchor_season` is "the latest loaded season" -- which used to always mean the last
     # CONCLUDED one, so the projection was safely labelled the season after it. That breaks
     # the instant this season's own results start loading: anchor_season then already IS the
     # season being projected, and blindly advancing it mislabels the projection a full year
-    # ahead. Tell the two cases apart from the data itself (is anchor_season's own most recent
-    # match recent enough to still be in progress?) rather than assuming "latest loaded" always
-    # means "finished".
+    # ahead. Tell the two cases apart from the data itself: recent enough to still be in
+    # progress, and every club in that season's results still has fixtures. Clubs dropping
+    # out of the line-up (relegated) mean the fixtures are the NEXT season's, whose table
+    # starts empty; a club that has simply not played yet this season is no signal at all.
     most_recent_match = max(o.match_date for o in window)
     days_since = (datetime.now(UTC).date() - most_recent_match).days
-    still_in_progress = days_since <= IN_PROGRESS_WINDOW_DAYS
+    anchor_teams = {o.home_norm for o in anchor_rows} | {o.away_norm for o in anchor_rows}
+    still_in_progress = days_since <= IN_PROGRESS_WINDOW_DAYS and anchor_teams <= set(teams)
     season_label_code = anchor_season if still_in_progress else _next_season_code(anchor_season)
+    projections, played, total = _project_from_table(
+        model,
+        teams,
+        anchor_rows if still_in_progress else [],
+        n_sims=n_sims,
+        top_n=top_n,
+        relegation=relegation,
+        seed=seed,
+    )
     briefing = SeasonBriefing(
         season=season_label_code,
         division=division,
         n_sims=n_sims,
         top_n=top_n,
         relegation=relegation,
-        projections=result.projections,
+        projections=projections,
         names=names,
+        played=played,
+        total=total,
     )
     return briefing, [names[n] for n in promoted]
 
@@ -1410,6 +1456,42 @@ def market_edge(
         return value_backtest(rows, model=model, min_history=60)
     except ValueError:
         return None
+
+
+@_cached_until_data_changes()
+def season_backtest(
+    analytics_db: Path,
+    division: str,
+    *,
+    n_seasons: int = 20,
+    checkpoints: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
+    n_sims: int = 4000,
+) -> SeasonBacktest | None:
+    """Score the season projections on a division's last `n_seasons` completed seasons.
+
+    Same rating model, thin-sample handling and projection-from-the-table as the Season tab
+    (`_season_model` + `season_rating_noise`), refit at each checkpoint on only what had been
+    played -- see `backtest_season_projections`. None if no clean season could be scored.
+    """
+    from soccer.models.season_backtest import backtest_season_projections
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    with AnalyticsDB(analytics_db) as adb:
+        codes = sorted(
+            {s for s, d, _n in adb.seasons_loaded() if d == division}, key=season_sort_key
+        )[-(n_seasons + FORECAST_SEASONS) :]
+        seasons = [(code, adb.outcomes_for(code, division)) for code in codes]
+
+    def fit(window: list[ResultRow], teams: list[str]) -> PoissonModel:
+        return _season_model(window, teams)[0]
+
+    return backtest_season_projections(
+        seasons,
+        fit,
+        checkpoints=checkpoints,
+        history_seasons=FORECAST_SEASONS - 1,
+        n_sims=n_sims,
+    )
 
 
 @_cached_until_data_changes()

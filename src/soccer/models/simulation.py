@@ -10,10 +10,18 @@ Two framings the CLI exposes:
   preseason projection given the fitted strengths.
 * Rest of season (cutoff date): matches before the cutoff set the current table and the
   fitted strengths; matches on/after it are simulated.
+
+Rating uncertainty: a point-estimate rating replayed ten thousand times is overconfident --
+the ratings themselves are uncertain (transfers, promoted sides, plain estimation noise),
+most of all before a ball is kicked. `rating_noise` draws one log-normal shock per team per
+simulated season, and `season_rating_noise` sets how big it is from how much of the season
+is already played (measured -- see SEASON_NOISE_START).
 """
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -25,6 +33,67 @@ class ScorelineModel(Protocol):
     DixonColesModel both satisfy it; only `expected_goals` is actually used here."""
 
     def expected_goals(self, home: str, away: str) -> tuple[float, float]: ...
+
+
+class Outcome(Protocol):
+    """A played result: who played whom, and the score."""
+
+    @property
+    def home_norm(self) -> str: ...
+    @property
+    def away_norm(self) -> str: ...
+    @property
+    def fthg(self) -> int: ...
+    @property
+    def ftag(self) -> int: ...
+
+
+# Rating-uncertainty schedule: noise sd = START * (1 - fraction played) ** POWER. Backtested
+# 2026-10-06 on 2005/06-2025/26, projecting at 0 / 25 / 50 / 75% of each season and scoring
+# title / top-4 / relegation against the real final tables (`season_backtest`). Tuned on 13
+# leagues (4,963 team-seasons): summed log loss pre-season 0.893 -> 0.830, quarter-way 0.608
+# -> 0.606, neutral from halfway (no noise is already calibrated there). Confirmed untuned on
+# E2/E3/I2/F2 (1,763): pre-season 1.354 -> 1.099. Without it, a pre-season "61% top four"
+# came true 45% of the time; flat noise of any size hurt from halfway on, hence the fade.
+SEASON_NOISE_START = 0.25
+SEASON_NOISE_POWER = 2.0
+
+
+def season_rating_noise(fraction_played: float) -> float:
+    """Per-team rating noise (log-scale sd) for a season `fraction_played` (0-1) through."""
+    remaining = min(max(1.0 - fraction_played, 0.0), 1.0)
+    return SEASON_NOISE_START * math.pow(remaining, SEASON_NOISE_POWER)
+
+
+def standings(played: Iterable[Outcome]) -> tuple[dict[str, int], dict[str, int]]:
+    """(points, goal difference) per normalized team from results already played."""
+    points: dict[str, int] = {}
+    goal_diff: dict[str, int] = {}
+    for o in played:
+        hp = 3 if o.fthg > o.ftag else 1 if o.fthg == o.ftag else 0
+        ap = 3 if o.ftag > o.fthg else 1 if o.fthg == o.ftag else 0
+        points[o.home_norm] = points.get(o.home_norm, 0) + hp
+        points[o.away_norm] = points.get(o.away_norm, 0) + ap
+        goal_diff[o.home_norm] = goal_diff.get(o.home_norm, 0) + (o.fthg - o.ftag)
+        goal_diff[o.away_norm] = goal_diff.get(o.away_norm, 0) + (o.ftag - o.fthg)
+    return points, goal_diff
+
+
+def remaining_round_robin(
+    teams: Iterable[str], played: Iterable[Outcome]
+) -> tuple[list[tuple[str, str]], float]:
+    """(unplayed home/away pairs of a double round-robin, fraction of it already played).
+
+    Every team meets every other once at home and once away; a pair that has been played
+    is done. Leagues that add a split or extra rounds are approximated by the double
+    round-robin -- the same assumption the season projections have always made.
+    """
+    roster = sorted(set(teams))
+    done = {(o.home_norm, o.away_norm) for o in played}
+    pairs = [(h, a) for h in roster for a in roster if h != a]
+    remaining = [p for p in pairs if p not in done]
+    fraction = 1.0 - len(remaining) / len(pairs) if pairs else 0.0
+    return remaining, fraction
 
 
 @dataclass(frozen=True)
@@ -57,11 +126,15 @@ def simulate_season(
     top_n: int = 4,
     relegation: int = 3,
     seed: int | None = None,
+    rating_noise: float = 0.0,
 ) -> SimulationResult:
     """Simulate the remaining fixtures `n_sims` times and summarise final tables.
 
     Team keys are normalized names (matching the model). `remaining` is (home, away)
     pairs. Teams are the union of `teams`, the starting standings, and the fixtures.
+    `rating_noise` (log-scale sd, 0 = off) gives each team one attack and one defence shock
+    per simulated season, so the spread of outcomes includes doubt about the ratings
+    themselves, not just match luck -- see `season_rating_noise`.
     """
     points_start = points_start or {}
     goal_diff_start = goal_diff_start or {}
@@ -83,6 +156,12 @@ def simulate_season(
     away_idx = np.array([index[a] for _, a in remaining], dtype=np.intp)
     lam = np.array([model.expected_goals(h, a)[0] for h, a in remaining])
     mu = np.array([model.expected_goals(h, a)[1] for h, a in remaining])
+    if rating_noise > 0 and remaining:
+        # attack scales a team's own goals; defence scales what its opponents score
+        attack = np.exp(rng.normal(0.0, rating_noise, (n_sims, n_teams)))
+        defence = np.exp(rng.normal(0.0, rating_noise, (n_sims, n_teams)))
+        lam = lam[None, :] * attack[:, home_idx] * defence[:, away_idx]
+        mu = mu[None, :] * attack[:, away_idx] * defence[:, home_idx]
 
     points = np.zeros((n_sims, n_teams))
     goal_diff = np.zeros((n_sims, n_teams))

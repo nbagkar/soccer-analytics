@@ -468,6 +468,43 @@ class TestSeasonBriefing:
         TestAnalyticsSnapshot()._seed_results(path)
         assert season_briefing(path, "9999", "ZZ") is None
 
+    def test_a_finished_season_is_its_actual_final_table(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_briefing
+
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]  # earlier listed = stronger
+        seed_results(path, division="E0", teams=teams)
+        briefing = season_briefing(path, "2526", "E0", n_sims=200, seed=1)
+        assert briefing is not None
+        assert briefing.played == briefing.total == 12
+        title = {briefing.names[p.team]: p.title_pct for p in briefing.projections}
+        assert title["Arsenal"] == 1.0  # nothing left to play: the table is the answer
+        points = {briefing.names[p.team]: p.expected_points for p in briefing.projections}
+        assert points == {"Arsenal": 12.0, "Chelsea": 9.0, "Fulham": 6.0, "Brentford": 3.0}
+
+    def test_mid_season_starts_from_the_banked_points(self, tmp_path) -> None:
+        from soccer.dashboard.data import season_briefing
+        from soccer.models.simulation import standings
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2526")
+        seed_results(path, division="E0", teams=teams, season="2627")
+        with AnalyticsDB(path) as adb:  # keep only the first few matchdays of 2627
+            adb._con.execute(
+                "DELETE FROM results WHERE season='2627' AND match_date > DATE '2026-01-04'"
+            )
+            played = adb.outcomes_for("2627", "E0")
+        assert 0 < len(played) < 12
+
+        briefing = season_briefing(path, "2627", "E0", n_sims=500, seed=1)
+        assert briefing is not None
+        assert (briefing.played, briefing.total) == (len(played), 12)
+        banked, _gd = standings(played)
+        for p in briefing.projections:
+            assert p.expected_points >= banked.get(p.team, 0)  # points on the board stand
+
 
 class TestSeasonRecords:
     def test_streaks_and_notable_matches(self, tmp_path) -> None:
@@ -1503,7 +1540,12 @@ class TestUpcomingSeasonBriefing:
         assert newcomers_norm not in promoted  # it DID play -- this is the thin-sample path
         assert strugglers_norm not in promoted
         title_pct = {p.team: p.title_pct for p in briefing.projections}
-        assert title_pct[newcomers_norm] < 0.5  # two flattering games must not make it a lock
+        # Two flattering games must not make it a lock (the bug gave ~94%). Its banked 3-point
+        # lead is real, though -- the projection starts from the table, and with every side
+        # rated equal that lead alone is worth ~49% in a five-team league -- so the bar is
+        # "not a lock" (TestStabilizeThinSamples pins the rating mechanism itself).
+        assert briefing.played == 4 and briefing.total == 20
+        assert title_pct[newcomers_norm] < 0.75
 
         relegation_pct = {p.team: p.relegation_pct for p in briefing.projections}
         # Shut out twice must not be treated as a near-certainty -- that symptom (relegation

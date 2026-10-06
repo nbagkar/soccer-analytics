@@ -1489,7 +1489,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
                 f"**{name}** — {division_name(division)} "
                 f"{season_label(briefing.season)}: **{proj.title_pct:.0%}** to win the title, "
                 f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation. "
-                "A Monte-Carlo sim off recent strengths, blind to transfers.",
+                "A Monte-Carlo sim from the current table off recent strengths, "
+                "blind to transfers.",
                 suggestions=["Who are the favourites?", f"How is {name}'s form?"],
             )
 
@@ -1516,7 +1517,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     )
     return Reply(
         f"**{division_name(division)} {season_label(briefing.season)} projection** — most likely "
-        f"for {label}: {lead}. A Monte-Carlo sim off recent strengths, blind to transfers.",
+        f"for {label}: {lead}. A Monte-Carlo sim from the current table off recent strengths, "
+        "blind to transfers.",
         table=rows,
         suggestions=["Who is in form?", "Show upcoming fixtures"],
     )

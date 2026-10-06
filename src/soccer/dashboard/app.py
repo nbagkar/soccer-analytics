@@ -653,10 +653,21 @@ def _render_season(briefing: SeasonBriefing) -> None:
     st.subheader(
         f"{division_name(briefing.division)} {season_label(briefing.season)}", anchor=False
     )
+    if briefing.total and briefing.played >= briefing.total:
+        start = "The season is complete — this is the final table."
+    elif briefing.played:
+        start = (
+            f"Starts from the current table ({briefing.played} of {briefing.total} matches "
+            "played) and simulates only the fixtures left."
+        )
+    else:
+        start = (
+            "A pre-season projection: every fixture still to play. Blind to summer transfers "
+            "and injuries, so it allows for the ratings being wrong."
+        )
     st.caption(
-        f"{briefing.n_sims:,} Monte Carlo seasons from the recency-weighted model, every team "
-        f"playing a full round-robin. A pre-season projection off {season_label(briefing.season)} "
-        "strengths — blind to summer transfers and injuries, so treat the extremes with care."
+        f"{briefing.n_sims:,} Monte Carlo seasons from the recency-weighted model. {start} "
+        "Backtested on 20 past seasons per league — `soccer backtest-season`."
     )
     names = briefing.names
     projs = sorted(briefing.projections, key=lambda p: -p.expected_points)
@@ -2561,7 +2572,7 @@ def main() -> None:
                     st.caption(
                         f"Projecting the **{season_label(briefing.season)}** season from the "
                         "loaded fixtures and the current model — title, top-four and relegation "
-                        "odds. A clean round-robin among the actual new-season line-up."
+                        "odds for the actual line-up, from the points already on the board."
                     )
                     _render_season(briefing)
                     if promoted:
