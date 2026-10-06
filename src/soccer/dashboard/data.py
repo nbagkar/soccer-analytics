@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 import itertools
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +28,7 @@ from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
-from soccer.models.poisson import DEFAULT_RHO, PoissonModel, fit_poisson_shots
+from soccer.models.poisson import DEFAULT_RHO, PoissonModel, calibrate_model, fit_poisson_shots
 from soccer.models.season_backtest import SeasonBacktest
 from soccer.models.simulation import (
     TeamProjection,
@@ -328,13 +328,7 @@ def analytics_snapshot(
     power = power_ranking(outcomes)
     fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
     projections = simulate_season(
-        fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        ),
+        _forecast_fit(outcomes),
         fixtures,
         teams=list(names),
         n_sims=sims,
@@ -547,17 +541,6 @@ def _stabilize_thin_samples(
     return promoted
 
 
-def _fit_season_ratings(window: list[ResultRow]) -> PoissonModel:
-    """The forecast rating model (`fit_poisson_shots` at the FORECAST_* settings) on `window`."""
-    return fit_poisson_shots(
-        window,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
-
-
 def _newcomer_priors(
     adb: AnalyticsDB, division: str, last_season: str, teams: list[str]
 ) -> dict[str, tuple[float, float]]:
@@ -590,16 +573,18 @@ def _newcomer_priors(
         if not moved:
             continue
         (b_att, c_att), (b_def, c_def) = NEWCOMER_RATING_MAP[direction]
-        source = _fit_season_ratings(
+        source = _forecast_fit(
             adb.recent_outcomes_through(other, last_season, n_seasons=FORECAST_SEASONS)
         )
         for t in sorted(moved):
             s = source.strengths.get(t)
             if s is None:
                 continue
+            # The map was fit on uncalibrated ratings: undo FORECAST_SPREAD, map, redo it.
+            log_att, log_def = (math.log(v) / FORECAST_SPREAD for v in (s.attack, s.defence))
             priors[t] = (
-                math.exp(c_att + b_att * math.log(s.attack)),
-                math.exp(c_def + b_def * math.log(s.defence)),
+                math.exp(FORECAST_SPREAD * (c_att + b_att * log_att)),
+                math.exp(FORECAST_SPREAD * (c_def + b_def * log_def)),
             )
         newcomers -= moved
     return priors
@@ -614,7 +599,7 @@ def _season_model(
     thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`, toward
     `priors` for the clubs it names). Returns (model, the teams the fit never saw -- the
     newcomers)."""
-    model = _fit_season_ratings(window)
+    model = _forecast_fit(window)
     match_counts: dict[str, int] = {}
     for o in window:
         match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
@@ -727,6 +712,9 @@ def _next_season_code(code: str) -> str:
 # can't mistake a fresh new season's first few matches for last season's tail end, or vice
 # versa.
 IN_PROGRESS_WINDOW_DAYS = 270
+# A new season's projection needs its fixtures to name at least this share of the previous
+# season's club count; fewer is a partial feed, not a line-up.
+NEW_SEASON_MIN_LINEUP = 0.8
 
 
 @_cached_until_data_changes()
@@ -788,20 +776,34 @@ def upcoming_season_briefing(
     for raw in fixture_teams:
         disp, norm = resolve_canonical_name(raw, model_names)
         names.setdefault(norm, disp)
-    teams = sorted(names)
 
     # `anchor_season` is "the latest loaded season" -- which used to always mean the last
     # CONCLUDED one, so the projection was safely labelled the season after it. That breaks
     # the instant this season's own results start loading: anchor_season then already IS the
     # season being projected, and blindly advancing it mislabels the projection a full year
-    # ahead. Tell the two cases apart from the data itself: recent enough to still be in
-    # progress, and every club in that season's results still has fixtures. Clubs dropping
-    # out of the line-up (relegated) mean the fixtures are the NEXT season's, whose table
-    # starts empty; a club that has simply not played yet this season is no signal at all.
+    # ahead. Tell the cases apart from the data itself (and recent enough to be in progress):
+    # * every club in that season's results still has fixtures (maybe plus clubs yet to
+    #   play) -> in progress, roster = both;
+    # * the fixtures only cover some of that season's clubs (a partial fixture feed) -> in
+    #   progress, roster = the season's own clubs -- simulating just the clubs that happen to
+    #   have fixtures once produced a five-team "league" whose top four and bottom three
+    #   overlapped (78% top four AND 75% relegated);
+    # * clubs have left AND new ones arrived -> the NEXT season, whose table starts empty --
+    #   trusted only if the fixtures name close to a full line-up.
     most_recent_match = max(o.match_date for o in window)
     days_since = (datetime.now(UTC).date() - most_recent_match).days
-    anchor_teams = {o.home_norm for o in anchor_rows} | {o.away_norm for o in anchor_rows}
-    still_in_progress = days_since <= IN_PROGRESS_WINDOW_DAYS and anchor_teams <= set(teams)
+    anchor_names = {o.home_norm: o.home for o in anchor_rows} | {
+        o.away_norm: o.away for o in anchor_rows
+    }
+    anchor_teams, fixture_set = set(anchor_names), set(names)
+    recent = days_since <= IN_PROGRESS_WINDOW_DAYS
+    still_in_progress = recent and (anchor_teams <= fixture_set or fixture_set <= anchor_teams)
+    if still_in_progress:
+        names = anchor_names | names
+    elif len(fixture_set) < NEW_SEASON_MIN_LINEUP * len(anchor_teams):
+        return None  # a partial fixture list is no line-up to project a season from
+
+    teams = sorted(names)
     season_label_code = anchor_season if still_in_progress else _next_season_code(anchor_season)
 
     # Newcomers are the clubs new since the last COMPLETED season: the anchor itself once it
@@ -882,6 +884,18 @@ FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
 # the O/U equation 0.5x-3x changed nothing (the three prices fit near-exactly). Asian handicap
 # not added: with 1X2 + O/U both rates are already pinned and AH mostly restates supremacy.
 FORECAST_MARKET_WEIGHT = 1.0
+# Goal-space recalibration of the fitted model (`calibrate_model`). Walk-forward over 18
+# divisions, 2012/13-2026/27 (~95,000 matches), refitting the three numbers pooled on all
+# EARLIER seasons before scoring each season: the raw model was underconfident (a "0.64"
+# favourite won 0.68), short on home wins (~1.5-2.5 points in every league) and long on draws
+# (~1-2 points). Spreading strengths, nudging home advantage and easing the low-score
+# correlation together cut the gap to the closing line +0.0134 -> +0.0126; each alone was
+# worth ~0.0002. The fitted values barely moved across 15 seasons (spread 1.06-1.10, home
+# 0.012-0.025, rho -0.08 to -0.11), so they are fixed here. Fitting them per league scored no
+# better than pooled -- league-specific calibration is not worth its extra parameters.
+FORECAST_SPREAD = 1.08
+FORECAST_HOME_SHIFT = 0.02
+FORECAST_RHO = -0.09
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
@@ -906,18 +920,37 @@ DIVISION_LADDERS = (
 # club's old rating says much less than which way it moved. Before this every newcomer got the
 # division's weakest-three prior, so relegated clubs finished far above their pre-season
 # projection (actual - projected points: E2 +16.6, SP2 +10.8, E1 +9.8, D2 +8.2, I2 +8.1).
-# `soccer backtest-season`, 20 seasons, pre-season skill (points RMSE), before -> after:
-# E1 +3.3% (14.5) -> +13.6% (12.8); E2 -8.6% (16.3) -> +5.2% (14.3); E3 -0.7% (13.7) -> +3.4%
-# (13.4); SP2 -2.1% (13.1) -> +8.5% (11.6); D2 -0.8% (11.4) -> +9.8% (10.1); I2 -10.2% (14.5)
-# -> +2.8% (13.0); F2 -0.6% (12.0) -> +6.4% (11.1). Slopes fit on 2006+ only, or
-# intercept-only (b=0), score within 0.5pp. From 25% played every newcomer has enough matches
-# of its own, so later checkpoints are unchanged.
+# `soccer backtest-season`, 20 seasons, pre-season skill (points RMSE), before -> after, on
+# the recalibrated forecast model (FORECAST_SPREAD): E1 +2.1% (14.8) -> +14.0% (12.8); E2
+# -10.2% (16.5) -> +4.9% (14.3); E3 -1.5% (13.9) -> +2.9% (13.6); SP2 -3.8% (13.3) -> +8.2%
+# (11.7); D2 -2.1% (11.6) -> +9.8% (10.2); I2 -12.5% (14.8) -> +1.8% (13.2); F2 -1.2% (12.1)
+# -> +6.5% (11.2). Before the recalibration the gains were the same within 1pp. Slopes fit on
+# 2006+ only, or intercept-only (b=0), score within 0.5pp. From 25% played every newcomer has
+# enough matches of its own, so later checkpoints are unchanged.
 # Promoted INTO a top flight keeps the weakest-three prior: the "up" map there measured worse
-# (E0 +39.9% -> +38.8%, RMSE 10.3 -> 10.5; SP1 +41.9% -> +41.4%) -- that prior already fits.
+# (pre-recalibration: E0 +39.9% -> +38.8%, RMSE 10.3 -> 10.5; SP1 +41.9% -> +41.4%) -- that
+# prior already fits.
 NEWCOMER_RATING_MAP: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
     "down": ((0.135, 0.098), (0.255, -0.128)),
     "up": ((0.223, -0.175), (0.291, 0.144)),
 }
+
+
+def _forecast_fit(outcomes: Sequence[Any]) -> PoissonModel:
+    """The live forecast model: market-implied shots-blend ratings, then the measured
+    goal-space recalibration (`FORECAST_SPREAD`/`FORECAST_HOME_SHIFT`/`FORECAST_RHO`)."""
+    return calibrate_model(
+        fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            market_weight=FORECAST_MARKET_WEIGHT,
+        ),
+        spread=FORECAST_SPREAD,
+        home_shift=FORECAST_HOME_SHIFT,
+        rho=FORECAST_RHO,
+    )
 
 
 def _decay(half_life_days: float) -> float:
@@ -964,13 +997,7 @@ def _expected_for(
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
     else:
-        model = fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        )
+        model = _forecast_fit(outcomes)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -1100,13 +1127,20 @@ def format_missing(adj: AvailabilityAdjustment, *, limit: int = 3) -> str:
     return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
+# How many matches a rating needs before the forecast calls it well supported. This was the
+# rating shrinkage (3) until market-implied ratings cut that to 0.5 -- after which nearly
+# every forecast read "High" confidence. Decoupled so the label keeps its meaning: High
+# from ~17 matches in the window, Low under ~5 (a promoted side's first weeks).
+CONFIDENCE_PSEUDO_GAMES = 3.0
+
+
 @dataclass(frozen=True)
 class TeamFactor:
     name: str
     attack: float  # scoring rate vs league average (1.0 = average, >1 = scores more)
     solidity: float  # 1 / concede-rate vs league (1.0 = average, >1 = concedes fewer)
     games: int  # matches backing the rating in the fitting window
-    data_weight: float  # games / (games + shrinkage): how much rating is data vs the prior
+    data_weight: float  # games / (games + CONFIDENCE_PSEUDO_GAMES): data behind the rating
 
 
 @dataclass(frozen=True)
@@ -1161,13 +1195,7 @@ def forecast_explanation(
         outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
     if not outcomes:
         return None
-    model = fit_poisson_shots(
-        outcomes,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
+    model = _forecast_fit(outcomes)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -1187,7 +1215,7 @@ def forecast_explanation(
             attack=st.attack,
             solidity=1.0 / max(st.defence, 0.05),
             games=g,
-            data_weight=g / (g + FORECAST_SHRINKAGE) if g else 0.0,
+            data_weight=g / (g + CONFIDENCE_PSEUDO_GAMES) if g else 0.0,
         )
 
     hf, af = factor(hn, home), factor(an, away)
@@ -1346,13 +1374,7 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
         form = next((f for f in forms if f.team == row.team), None)
         streak = next((s for s in adb.team_streaks(season, division) if s.team == row.team), None)
         outcomes = adb.outcomes_for(season, division)
-        model = fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        )
+        model = _forecast_fit(outcomes)
 
     strength = model.strengths.get(norm)
     attack = strength.attack if strength else 1.0
@@ -1636,6 +1658,11 @@ def forecast_report(
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
         market_weight=FORECAST_MARKET_WEIGHT,
+        calibration={
+            "spread": FORECAST_SPREAD,
+            "home_shift": FORECAST_HOME_SHIFT,
+            "rho": FORECAST_RHO,
+        },
         min_history=60,
     )
 
@@ -1742,6 +1769,10 @@ _PERCENTILE_METRICS = [
     ("Possession", "Prog. passes", "progressive_passes", True),
     ("Possession", "Prog. carries", "progressive_carries", True),
     ("Possession", "Dribbles", "dribbles_completed", True),
+    # Open-play expected threat added by passes and carries -- see models/xthreat.py for why
+    # it earns a place: as repeatable as progressive passes, barely correlated with them,
+    # and the best of these at predicting a team's future goals.
+    ("Possession", "Threat added (xT)", "xt", True),
     ("Defending", "Tackles", "tackles", True),
     ("Defending", "Interceptions", "interceptions", True),
     ("Defending", "Blocks", "blocks", True),
@@ -2144,13 +2175,7 @@ def fixture_forecasts(
                 if outcomes:
                     # Recency window (last few seasons), fit on the shots-on-target blend --
                     # measured to roughly halve the goals-only model's gap to the market.
-                    model = fit_poisson_shots(
-                        outcomes,
-                        alpha=FORECAST_ALPHA,
-                        shrinkage=FORECAST_SHRINKAGE,
-                        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-                        market_weight=FORECAST_MARKET_WEIGHT,
-                    )
+                    model = _forecast_fit(outcomes)
                     model_names[division] = {o.home_norm: o.home for o in outcomes} | {
                         o.away_norm: o.away for o in outcomes
                     }

@@ -2,17 +2,13 @@
 name = "soccer-analytics"
 version = "0.1.0"
 description = "Local-first football intelligence centre built on free and open data"
-# Capped at <3.13 by socceraction, which is required for SPADL/VAEP and declares
-# `requires_python = "<3.13,>=3.9"`. Its last release was 2024-08-15, so do not
-# expect this ceiling to lift on its own. Raising it means dropping socceraction
-# and hand-rolling action valuation.
-requires-python = ">=3.12,<3.13"
+# No upper cap: the old <3.13 ceiling came from socceraction, dropped 2026-10-06 in favour
+# of a hand-rolled expected-threat model (soccer.models.xthreat). CI tests 3.12.
+requires-python = ">=3.12"
 
 dependencies = [
     # numpy powers the Monte Carlo simulation; scipy fits the Dixon-Coles model.
-    # NOT pinned <2 here: nothing in the base/forecasting stack needs numpy 1.x. The
-    # numpy<2 constraint belongs to socceraction, which lives in the `analytics` extra
-    # and is unused so far -- see that extra and docs/source-verification.md.
+    # NOT pinned <2: nothing here needs numpy 1.x (the old pin came from socceraction).
     "numpy>=1.26",
     "scipy>=1.11",
     "httpx>=0.27",
@@ -30,10 +26,6 @@ dependencies = [
 # pandas is already pulled in transitively (altair/streamlit need it for `.to_pandas()`
 # frames); listed explicitly because dashboard/app.py now imports it directly for typing.
 dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4", "pandas>=2.0"]
-# socceraction caps numpy<2 and Python<3.13 (see docs/source-verification.md). Installing
-# this extra therefore constrains numpy for the whole environment and may need an older
-# scipy; resolve when StatsBomb/SPADL work actually begins.
-analytics = ["socceraction>=1.5", "kloppy>=3.15", "numpy<2.0.0"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -61,6 +53,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+# Deliberate typography in user-facing text: "×1.20" multipliers and "62–74 pts" ranges.
+allowed-confusables = ["×", "–"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -1146,6 +1146,7 @@ def ingest_events(
     from soccer.sources.statsbomb import ATTRIBUTION as SB_ATTRIBUTION
     from soccer.sources.statsbomb import (
         StatsBomb,
+        parse_actions,
         parse_match_meta,
         parse_player_stats,
         parse_shots,
@@ -1198,12 +1199,25 @@ def ingest_events(
                 total_players += len(stats)
             if match or len(match_ids) <= 10:
                 console.print(f"  match {match_id}: {len(shots)} shots, {len(stats)} players")
+            adb.load_actions(parse_actions(events, match_id))
+        adb.refresh_xt()  # refit the threat grid on everything now loaded
 
     console.print(
         f"\n[green]Loaded {total_shots} shots and {total_players} player-match rows[/green] "
         f"across {len(match_ids)} match(es)."
     )
     console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
+
+
+@app.command("rebuild-xt")
+def rebuild_xt() -> None:
+    """Rebuild passes/carries/shots from cached StatsBomb events (offline) and refit xT."""
+    from soccer.dashboard.actions import rebuild_expected_threat
+
+    settings = get_settings()
+    with console.status("Re-parsing cached event files..."):
+        message = rebuild_expected_threat(settings)
+    console.print(f"[green]{message}[/green]")
 
 
 @app.command()

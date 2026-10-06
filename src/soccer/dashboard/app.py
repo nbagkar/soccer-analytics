@@ -697,6 +697,7 @@ def _render_season(briefing: SeasonBriefing) -> None:
             "#": list(range(1, len(projs) + 1)),
             "Team": [names.get(p.team, p.team) for p in projs],
             "xPts": [round(p.expected_points) for p in projs],
+            "80% range": [f"{p.points_low:.0f}–{p.points_high:.0f}" for p in projs],
             "Title %": [round(100 * p.title_pct, 1) for p in projs],
             f"Top {briefing.top_n} %": [round(100 * p.top_pct, 1) for p in projs],
             "Relegation %": [round(100 * p.relegation_pct, 1) for p in projs],
@@ -1872,6 +1873,7 @@ _LEADER_COLUMNS = [
     ("Key pass", "key_passes", True, "%.2f"),
     ("Prg pass", "progressive_passes", True, "%.1f"),
     ("Prg carry", "progressive_carries", True, "%.1f"),
+    ("xT", "xt", True, "%.2f"),
     ("Dribbles", "dribbles_completed", True, "%.1f"),
     ("Tackles", "tackles", True, "%.1f"),
     ("Int", "interceptions", True, "%.1f"),
@@ -1885,6 +1887,7 @@ _RANK_OPTIONS = {
     "Assists": "assists",
     "xA": "xa",
     "Progression": "progressive",
+    "Threat added (xT)": "xt",
     "Defending": "defensive",
     "Passes": "passes",
     "Minutes": "minutes",
@@ -1929,8 +1932,12 @@ def _render_player_leaderboard(
         "Min": st.column_config.NumberColumn("Min", format="%d", help="Minutes played"),
         "Pass %": st.column_config.NumberColumn("Pass %", format="%.1f%%"),
     }
-    for header, _attr, _is_rate, fmt in _LEADER_COLUMNS:
-        column_config[header] = st.column_config.NumberColumn(header, format=fmt if per90 else "%d")
+    for header, attr, _is_rate, fmt in _LEADER_COLUMNS:
+        # xG, xA and xT totals are fractional; only counts are whole numbers
+        total_fmt = "%.1f" if attr in ("xg", "npxg", "xa", "xt") else "%d"
+        column_config[header] = st.column_config.NumberColumn(
+            header, format=fmt if per90 else total_fmt
+        )
 
     st.dataframe(
         frame,

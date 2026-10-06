@@ -126,6 +126,79 @@ def parse_shots(events: list[dict[str, Any]], match_id: int) -> list[Shot]:
     return shots
 
 
+@dataclass(frozen=True)
+class Action:
+    """One ball-moving action -- the raw material for expected threat (xT).
+
+    StatsBomb's pitch is 120x80 with every team attacking left to right, so locations need
+    no flipping. `ok` = pass completed / carry (always) / shot scored. `set_piece` marks
+    dead-ball restarts (corners, free kicks, throw-ins, goal kicks) and penalties, which are
+    kept out of the open-play threat model.
+    """
+
+    match_id: int
+    team: str
+    player: str
+    kind: str  # "pass" | "carry" | "shot"
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    ok: bool
+    set_piece: bool
+
+
+_SET_PIECE_PASSES = {"Corner", "Free Kick", "Throw-in", "Goal Kick"}
+
+
+def parse_actions(events: list[dict[str, Any]], match_id: int) -> list[Action]:
+    """Passes, carries and shots with start/end locations, from a StatsBomb events array."""
+    actions: list[Action] = []
+    for event in events:
+        kind = event.get("type", {}).get("name")
+        location = event.get("location")
+        player = event.get("player", {}).get("name")
+        if kind not in ("Pass", "Carry", "Shot") or not location or not player:
+            continue
+        x0, y0 = float(location[0]), float(location[1])
+        if kind == "Pass":
+            detail = event.get("pass", {})
+            restart = detail.get("type", {}).get("name")
+            end = detail.get("end_location")
+            if restart == "Kick Off" or not end:
+                continue
+            action = ("pass", end, "outcome" not in detail, restart in _SET_PIECE_PASSES)
+        elif kind == "Carry":
+            end = event.get("carry", {}).get("end_location")
+            if not end:
+                continue
+            action = ("carry", end, True, False)
+        else:
+            detail = event.get("shot", {})
+            action = (
+                "shot",
+                location,
+                detail.get("outcome", {}).get("name") == "Goal",
+                detail.get("type", {}).get("name") == "Penalty",
+            )
+        name, end, ok, set_piece = action
+        actions.append(
+            Action(
+                match_id=match_id,
+                team=event.get("team", {}).get("name", "Unknown"),
+                player=player,
+                kind=name,
+                x0=x0,
+                y0=y0,
+                x1=float(end[0]),
+                y1=float(end[1]),
+                ok=bool(ok),
+                set_piece=bool(set_piece),
+            )
+        )
+    return actions
+
+
 def parse_player_stats(events: list[dict[str, Any]], match_id: int) -> list[PlayerMatchStats]:
     """Aggregate per-player match contributions from a StatsBomb events array.
 

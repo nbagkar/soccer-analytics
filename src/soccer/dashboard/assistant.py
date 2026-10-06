@@ -674,6 +674,15 @@ def _intent_help(q: str, analytics_db: Path, live_db: Path | None) -> Reply | No
     return None
 
 
+# Every match forecast says how it compares with the market. Walk-forward over ~95,000
+# matches in 18 divisions (2026-10-06), this model's log loss is ~0.013 above the vig-free
+# closing odds -- about 1% worse; see forecast-model-quality notes in data.py.
+MARKET_CAVEAT = (
+    "Bookmakers' closing odds are still sharper: across ~95,000 past matches this model "
+    "scores about 1% worse than them, so treat it as a second opinion."
+)
+
+
 def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
     triggers = re.search(
         r"\b(vs|versus|beat|predict|forecasts?|prediction|wins?|winner|odds"
@@ -750,11 +759,22 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     )
     expl = forecast_explanation(analytics_db, season, division, home, away)
     if expl is not None:
+        hf, af = expl.home_factor, expl.away_factor
+        # The model is multiplicative, so the numbers below multiply out to the expected goals.
+        text += (
+            f"\n- Why: a home side here averages {expl.league_home_avg:.2f} goals; "
+            f"{hf.name}'s attack ×{hf.attack:.2f} and {af.name}'s defence "
+            f"×{1 / af.solidity:.2f} make **{expl.home_xg:.2f}**. Away sides average "
+            f"{expl.league_away_avg:.2f}; {af.name}'s attack ×{af.attack:.2f} and "
+            f"{hf.name}'s defence ×{1 / hf.solidity:.2f} make **{expl.away_xg:.2f}** "
+            "(×1 = league average; a defence above 1 concedes more)"
+        )
         text += f"\n\n{expl.summary} (confidence: {expl.confidence.lower()})"
     else:
         text += (
             f"\n\nModel leans **{lead if lead != 'Draw' else 'a draw'}**. Directional, not advice."
         )
+    text += f"\n\n_{MARKET_CAVEAT}_"
     if adjusted is not None:
         adj_res = {m.name: m.probability for m in adjusted.adjusted.result}
         # One more decimal than the headline numbers above: team-news nudges are individually
@@ -1170,10 +1190,36 @@ def _intent_player(q: str, analytics_db: Path, live_db: Path | None) -> Reply | 
         f"- {profile.key_passes} key passes · {profile.pass_pct:.0f}% passing · "
         f"{profile.progressive_passes + profile.progressive_carries} progressive actions\n"
         f"- Defending: {profile.tackles} tackles, {profile.interceptions} interceptions"
+    )
+    if profile.xt:  # zero only when no event actions are loaded (see `soccer rebuild-xt`)
+        text += (
+            f"\n- Threat added (xT) **{profile.per90(profile.xt):.2f} per 90** — how much the "
+            "player's passes and carries raise the chance of a goal"
+        )
+    from soccer.dashboard.data import player_percentiles
+
+    # The comparison point: the player's rank among everyone with enough minutes loaded.
+    ranks = player_percentiles(analytics_db, profile.player, min_minutes=PEER_MIN_MINUTES)
+    if ranks:
+        best = sorted(ranks, key=lambda m: -m.percentile)[:3]
+        text += (
+            f"\n- Best ranks against every player with {PEER_MIN_MINUTES}+ minutes: "
+            + ", ".join(f"{m.label} ({_percentile_phrase(m.percentile)})" for m in best)
+        )
+    text += (
         "\n\n_Player stats come from StatsBomb's free historical archive (selected "
         "competitions and seasons), not the current season._"
     )
-    return Reply(text, suggestions=["Top scorers", "Who is the best playmaker?"])
+    return Reply(text, suggestions=["Top scorers", f"Who plays like {profile.player}?"])
+
+
+PEER_MIN_MINUTES = 200  # the percentile pool, as on the Players page
+
+
+def _percentile_phrase(percentile: float) -> str:
+    """92.4 -> 'top 8%'; under the median reads as a plain percentile."""
+    top = max(1, round(100 - percentile))
+    return f"top {top}%" if percentile >= 50 else f"{percentile:.0f}th percentile"
 
 
 def _vs_avg(multiplier: float) -> str:
@@ -1213,6 +1259,7 @@ def _intent_compare(q: str, analytics_db: Path, live_db: Path | None) -> Reply |
             ("xA", round(a.xa, 1), round(b.xa, 1)),
             ("Key passes", a.key_passes, b.key_passes),
             ("Pass %", round(a.pass_pct), round(b.pass_pct)),
+            ("xT per 90", round(a.per90(a.xt), 2), round(b.per90(b.xt), 2)),
         )
     ]
     return Reply(
@@ -1477,6 +1524,19 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     if briefing is None:
         return None
     names = briefing.names
+    finished = briefing.total > 0 and briefing.played >= briefing.total
+    if finished:
+        basis = "The season is complete, so these are the final standings."
+    else:
+        start = (
+            f"from the current table ({briefing.played} of {briefing.total} matches played)"
+            if briefing.played
+            else "before a ball is kicked"
+        )
+        basis = (
+            f"A Monte-Carlo sim {start} off recent strengths, blind to transfers; "
+            "points ranges cover 80% of simulated seasons."
+        )
 
     if named:
         target = _norm(named[0][0])
@@ -1485,12 +1545,23 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
         )
         if proj is not None:
             name = names.get(proj.team, proj.team)
+            by_points = sorted(briefing.projections, key=lambda p: -p.expected_points)
+            leader = by_points[0]
+            # the points it takes: the expected total of the side projected 4th
+            fourth = by_points[min(briefing.top_n, len(by_points)) - 1]
+            if proj is leader:
+                gap = "the most of any side"
+            else:
+                behind = leader.expected_points - proj.expected_points
+                gap = f"{behind:.0f} behind {names.get(leader.team, leader.team)}"
+            rank = by_points.index(proj) + 1
             return Reply(
                 f"**{name}** — {division_name(division)} "
                 f"{season_label(briefing.season)}: **{proj.title_pct:.0%}** to win the title, "
-                f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation. "
-                "A Monte-Carlo sim from the current table off recent strengths, "
-                "blind to transfers.",
+                f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation.\n\n"
+                f"- Projected **{proj.expected_points:.0f} pts** (range "
+                f"{proj.points_low:.0f}–{proj.points_high:.0f}), {_ordinal(rank)} — {gap}\n"
+                f"- Top four looks like about {fourth.expected_points:.0f} pts\n\n{basis}",
                 suggestions=["Who are the favourites?", f"How is {name}'s form?"],
             )
 
@@ -1506,6 +1577,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     rows = [
         {
             "Team": names.get(p.team, p.team),
+            "Pts": round(p.expected_points),
+            "Pts range": f"{p.points_low:.0f}–{p.points_high:.0f}",
             "Title %": round(100 * p.title_pct, 1),
             "Top 4 %": round(100 * p.top_pct),
             "Relegation %": round(100 * p.relegation_pct),
@@ -1515,10 +1588,25 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     lead = ", ".join(
         f"**{names.get(p.team, p.team)}** ({getattr(p, focus):.0%})" for p in projs[:3]
     )
+    if finished:
+        # Answer what was asked from the final table: champions, top four, or who went down.
+        settled = [p for p in projs if getattr(p, focus) >= 0.5]
+        outcome = {
+            "title_pct": "champions",
+            "top_pct": f"top {briefing.top_n}",
+            "relegation_pct": "finished in the relegation places",
+        }[focus]
+        headline = (
+            f"**{division_name(division)} {season_label(briefing.season)}** is complete — "
+            f"{outcome}: " + ", ".join(f"**{names.get(p.team, p.team)}**" for p in settled) + "."
+        )
+    else:
+        headline = (
+            f"**{division_name(division)} {season_label(briefing.season)} projection** — most "
+            f"likely for {label}: {lead}. {basis}"
+        )
     return Reply(
-        f"**{division_name(division)} {season_label(briefing.season)} projection** — most likely "
-        f"for {label}: {lead}. A Monte-Carlo sim from the current table off recent strengths, "
-        "blind to transfers.",
+        headline,
         table=rows,
         suggestions=["Who is in form?", "Show upcoming fixtures"],
     )

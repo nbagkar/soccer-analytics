@@ -312,6 +312,13 @@ dependencies.
 - Event-only. **No tracking support** — SkillCorner work is kloppy plus custom code.
 - Prefer the `socceraction.spadl.kloppy` bridge: kloppy parses, socceraction values.
 
+**Update 2026-10-06 — socceraction dropped.** Its `analytics` extra was never installable
+next to the rest of the stack (a dry run would have downgraded numpy 2.5 -> 1.26 and pandas
+3 -> 2.3 for everything), so it was unused dead weight holding Python below 3.13. Action
+valuation is now hand-rolled: expected threat (xT) in `soccer.models.xthreat`, fit in numpy
+on the StatsBomb events parsed directly (no kloppy either). VAEP would need a trained
+classifier; xT needs none and was validated first (see that module's docstring).
+
 ---
 
 ## Cross-source identity (how the crosswalk joins sources)

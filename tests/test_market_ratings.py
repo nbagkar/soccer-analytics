@@ -149,3 +149,46 @@ def test_extreme_favourite_gets_a_sane_closest_fit() -> None:
     total = sum(inv)
     lam, mu = implied_goal_rates(round(inv[0] / total, 3), round(inv[2] / total, 3))
     assert 0.3 < lam < 2.0 and 2.0 < mu < 5.0
+
+
+class TestCalibrateModel:
+    def _model(self):
+        from soccer.models.poisson import PoissonModel, TeamStrength
+
+        return PoissonModel(
+            strengths={
+                "top": TeamStrength(1.5, 0.7),
+                "mid": TeamStrength(1.0, 1.0),
+                "low": TeamStrength(0.7, 1.4),
+            },
+            home_avg=1.5,
+            away_avg=1.2,
+        )
+
+    def test_identity_settings_change_nothing(self) -> None:
+        from soccer.models.poisson import calibrate_model
+
+        base = self._model()
+        same = calibrate_model(base)
+        assert same.expected_goals("top", "low") == pytest.approx(base.expected_goals("top", "low"))
+        assert same.rho == base.rho
+
+    def test_spread_widens_the_gap_and_leaves_an_average_side_alone(self) -> None:
+        from soccer.models.poisson import calibrate_model
+
+        base, wide = self._model(), calibrate_model(self._model(), spread=1.1)
+        assert wide.forecast("top", "low").prob_home > base.forecast("top", "low").prob_home
+        assert wide.expected_goals("mid", "mid") == pytest.approx(base.expected_goals("mid", "mid"))
+
+    def test_home_shift_moves_goals_home_and_rho_replaces_the_grid_correlation(self) -> None:
+        from soccer.models.poisson import calibrate_model
+
+        base = self._model()
+        shifted = calibrate_model(base, home_shift=0.05, rho=-0.05)
+        (bh, ba), (sh, sa) = base.expected_goals("mid", "mid"), shifted.expected_goals("mid", "mid")
+        assert sh > bh and sa < ba
+        assert shifted.rho == -0.05
+        assert (
+            base.forecast("mid", "mid").prob_draw
+            > calibrate_model(base, rho=-0.05).forecast("mid", "mid").prob_draw
+        )  # a weaker low-score correlation, fewer draws

@@ -181,6 +181,7 @@ def evaluate_forecasts(
     shrinkage: float = 0.0,
     time_decay: float = 0.0,
     market_weight: float = 0.0,
+    calibration: dict[str, float] | None = None,
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
@@ -196,19 +197,27 @@ def evaluate_forecasts(
     shots-on-target counts (see ``fit_poisson_xg``) -- only meaningful for rows that carry
     ``home_xg``/``away_xg`` (StatsBomb-covered matches merged in by the caller); rows without
     it fall back to the actual scoreline, same as a shots-blend row missing shot data.
+    ``calibration`` (``spread``/``home_shift``/``rho``) recalibrates the shots model's
+    expected goals the way the live forecasts do -- see ``calibrate_model``.
     """
     from soccer.models.dixon_coles import fit_dixon_coles
-    from soccer.models.poisson import fit_poisson, fit_poisson_shots, fit_poisson_xg
+    from soccer.models.poisson import (
+        calibrate_model,
+        fit_poisson,
+        fit_poisson_shots,
+        fit_poisson_xg,
+    )
 
     def fit(played: list[OddsRow]) -> object:
         if model == "shots":
-            return fit_poisson_shots(
+            fitted = fit_poisson_shots(
                 played,
                 alpha=alpha,
                 shrinkage=shrinkage,
                 time_decay=time_decay,
                 market_weight=market_weight,
             )
+            return calibrate_model(fitted, **calibration) if calibration else fitted
         if model == "xg":
             return fit_poisson_xg(played, alpha=alpha, shrinkage=shrinkage, time_decay=time_decay)
         if model == "dixon_coles":

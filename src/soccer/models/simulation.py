@@ -104,6 +104,9 @@ class TeamProjection:
     relegation_pct: float
     expected_points: float
     avg_position: float
+    points_low: float = 0.0
+    """10th percentile of simulated final points -- with `points_high`, an 80% range."""
+    points_high: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,7 @@ def simulate_season(
     top = (position <= top_n).mean(axis=0)
     releg = (position > n_teams - relegation).mean(axis=0)
     exp_points = points.mean(axis=0)
+    low, high = np.percentile(points, [10, 90], axis=0)
     avg_pos = position.mean(axis=0)
 
     projections = [
@@ -206,6 +210,8 @@ def simulate_season(
             relegation_pct=float(releg[i]),
             expected_points=float(exp_points[i]),
             avg_position=float(avg_pos[i]),
+            points_low=float(low[i]),
+            points_high=float(high[i]),
         )
         for i in range(n_teams)
     ]

@@ -22,7 +22,7 @@ import duckdb
 import polars as pl
 
 from soccer.sources.football_data_co_uk import MatchResult, season_sort_key
-from soccer.sources.statsbomb import PlayerMatchStats, Shot
+from soccer.sources.statsbomb import Action, PlayerMatchStats, Shot
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -101,6 +101,28 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
     touches             INTEGER NOT NULL
 );
 
+-- Ball-moving actions (passes, carries, shots) for expected threat; see models/xthreat.py.
+CREATE TABLE IF NOT EXISTS actions (
+    match_id   INTEGER NOT NULL,
+    team       VARCHAR NOT NULL,
+    player     VARCHAR NOT NULL,
+    kind       VARCHAR NOT NULL,
+    x0         DOUBLE  NOT NULL,
+    y0         DOUBLE  NOT NULL,
+    x1         DOUBLE  NOT NULL,
+    y1         DOUBLE  NOT NULL,
+    ok         BOOLEAN NOT NULL,
+    set_piece  BOOLEAN NOT NULL
+);
+
+-- The fitted xT grid and each player's open-play xT per match, rebuilt by refresh_xt().
+CREATE TABLE IF NOT EXISTS xt_grid (cell INTEGER PRIMARY KEY, xt DOUBLE NOT NULL);
+CREATE TABLE IF NOT EXISTS player_match_xt (
+    match_id INTEGER NOT NULL,
+    player   VARCHAR NOT NULL,
+    xt       DOUBLE  NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS match_meta (
     match_id       INTEGER PRIMARY KEY,
     competition    VARCHAR,
@@ -145,6 +167,7 @@ _PROFILE_ORDER = {
     "defensive": "p.tackles+p.interceptions+p.blocks+p.clearances+p.ball_recoveries",
     "minutes": "p.minutes",
     "touches": "p.touches",
+    "xt": "COALESCE(x.xt,0)",
 }
 
 
@@ -165,7 +188,7 @@ def _profile_select(competition: str | None, season: str | None = None) -> tuple
         filt = (
             f"WHERE match_id IN (SELECT match_id FROM match_meta WHERE {' AND '.join(conditions)})"
         )
-        params = meta_params + meta_params  # the filter appears in both CTEs below
+        params = meta_params * 3  # the filter appears in all three CTEs below
     else:
         filt, params = "", []
     sql = f"""
@@ -189,6 +212,9 @@ def _profile_select(competition: str | None, season: str | None = None) -> tuple
                    COALESCE(SUM(xg) FILTER (WHERE NOT is_penalty), 0) AS npxg,
                    SUM(is_goal::INT) AS goals, COUNT(*) AS shots
             FROM shots {filt} GROUP BY player
+        ),
+        x AS (
+            SELECT player, SUM(xt) AS xt FROM player_match_xt {filt} GROUP BY player
         )
         SELECT p.player, p.team, p.position, p.matches, p.minutes,
                COALESCE(sh.goals, 0), COALESCE(sh.xg, 0.0), COALESCE(sh.npxg, 0.0),
@@ -196,8 +222,8 @@ def _profile_select(competition: str | None, season: str | None = None) -> tuple
                p.passes_completed, p.progressive_passes, p.carries, p.progressive_carries,
                p.dribbles, p.dribbles_completed, p.tackles, p.tackles_won, p.interceptions,
                p.blocks, p.clearances, p.ball_recoveries, p.pressures, p.fouls, p.fouled,
-               p.yellow_cards, p.red_cards, p.touches
-        FROM pstat p LEFT JOIN sh ON sh.player = p.player
+               p.yellow_cards, p.red_cards, p.touches, COALESCE(x.xt, 0.0)
+        FROM pstat p LEFT JOIN sh ON sh.player = p.player LEFT JOIN x ON x.player = p.player
     """
     return sql, params
 
@@ -370,6 +396,8 @@ class PlayerProfile:
     yellow_cards: int
     red_cards: int
     touches: int
+    xt: float = 0.0
+    """Open-play expected threat added by the player's passes and carries (models/xthreat)."""
 
     @property
     def goal_contributions(self) -> int:
@@ -1170,6 +1198,112 @@ class AnalyticsDB:
         finally:
             self._con.unregister("incoming_pstats")
         return len(stats)
+
+    # --- StatsBomb actions and expected threat -------------------------------
+
+    def load_actions(self, actions: list[Action]) -> int:
+        """Load ball-moving actions, replacing each match's set so re-ingest is idempotent."""
+        if not actions:
+            return 0
+        frame = pl.DataFrame([asdict(a) for a in actions])
+        match_ids = sorted({a.match_id for a in actions})
+        self._con.register("incoming_actions", frame)
+        try:
+            self._con.execute("BEGIN")
+            self._con.execute(
+                f"DELETE FROM actions WHERE match_id IN ({','.join('?' * len(match_ids))})",
+                match_ids,
+            )
+            self._con.execute("INSERT INTO actions BY NAME SELECT * FROM incoming_actions")
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        finally:
+            self._con.unregister("incoming_actions")
+        return len(actions)
+
+    def refresh_xt(self) -> int:
+        """Refit the xT grid on every loaded action and rebuild each player's xT per match.
+
+        Returns the number of actions the grid was fit on (0 = nothing loaded, tables
+        emptied). Open-play value only: successful passes and carries, set pieces excluded.
+        """
+        from soccer.models.xthreat import (
+            GRID_X,
+            GRID_Y,
+            KIND_CARRY,
+            KIND_PASS,
+            KIND_SHOT,
+            PITCH_LENGTH,
+            PITCH_WIDTH,
+            fit_xt,
+        )
+
+        arrays = self._con.execute(
+            f"SELECT CASE kind WHEN 'pass' THEN {KIND_PASS} WHEN 'carry' THEN {KIND_CARRY} "
+            f"ELSE {KIND_SHOT} END AS kind, x0, y0, x1, y1, ok, set_piece FROM actions"
+        ).fetchnumpy()
+        n = len(arrays["kind"])
+        grid: list[float] = []
+        if n:
+            import numpy as np
+
+            def col(name: str, dtype: type) -> Any:
+                return np.asarray(arrays[name], dtype=dtype)
+
+            grid = fit_xt(
+                col("kind", np.int64),
+                col("x0", np.float64),
+                col("y0", np.float64),
+                col("x1", np.float64),
+                col("y1", np.float64),
+                col("ok", np.bool_),
+                col("set_piece", np.bool_),
+            ).tolist()
+
+        def cell(x: str, y: str) -> str:  # SQL twin of xthreat.cell_index
+            return (
+                f"LEAST(GREATEST(CAST(FLOOR({x} / {PITCH_LENGTH} * {GRID_X}) AS INTEGER), 0), "
+                f"{GRID_X - 1}) * {GRID_Y} + LEAST(GREATEST(CAST(FLOOR({y} / {PITCH_WIDTH} * "
+                f"{GRID_Y}) AS INTEGER), 0), {GRID_Y - 1})"
+            )
+
+        self._con.execute("BEGIN")
+        try:
+            self._con.execute("DELETE FROM xt_grid")
+            self._con.execute("DELETE FROM player_match_xt")
+            if n:
+                self._con.executemany(
+                    "INSERT INTO xt_grid VALUES (?, ?)", [(i, float(v)) for i, v in enumerate(grid)]
+                )
+                self._con.execute(
+                    f"""
+                    INSERT INTO player_match_xt
+                    SELECT a.match_id, a.player, SUM(e.xt - s.xt)
+                    FROM actions a
+                    JOIN xt_grid s ON s.cell = {cell("a.x0", "a.y0")}
+                    JOIN xt_grid e ON e.cell = {cell("a.x1", "a.y1")}
+                    WHERE a.kind <> 'shot' AND a.ok AND NOT a.set_piece
+                    GROUP BY a.match_id, a.player
+                    """
+                )
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        return n
+
+    def xt_grid(self) -> list[float]:
+        """The fitted xT value of every grid cell (x-major), or [] before refresh_xt()."""
+        return [r[0] for r in self._con.execute("SELECT xt FROM xt_grid ORDER BY cell").fetchall()]
+
+    def event_match_ids(self) -> list[int]:
+        """Every StatsBomb match with event stats loaded."""
+        rows = self._con.execute(
+            "SELECT DISTINCT match_id FROM player_match_stats ORDER BY match_id"
+        ).fetchall()
+        return [int(r[0]) for r in rows]
 
     def player_stats_count(self) -> int:
         row = self._con.execute("SELECT COUNT(DISTINCT player) FROM player_match_stats").fetchone()

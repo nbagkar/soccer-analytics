@@ -896,14 +896,15 @@ class TestConfidentWrongAnswers:
     def test_relegation_question_ranks_by_relegation(self, tmp_path) -> None:
         reply = answer("who is going to get relegated", _seed(tmp_path))
         assert reply.intent == "title_odds"
-        assert "most likely for relegation" in reply.text
+        # the seeded season is finished, so it answers from the final table -- by relegation
+        assert "relegation places" in reply.text and "champions" not in reply.text
         assert reply.table
         pcts = [r["Relegation %"] for r in reply.table]
         assert pcts == sorted(pcts, reverse=True)
 
     def test_top_four_question_ranks_by_top_four(self, tmp_path) -> None:
         reply = answer("who will finish top four", _seed(tmp_path))
-        assert "top-four finish" in reply.text
+        assert "top 4:" in reply.text and "relegation" not in reply.text
 
     def test_one_surname_cannot_fill_both_sides_of_a_comparison(self, tmp_path) -> None:
         # "salah" matched Mohamed AND Ibrahim Salah, so "compare haaland and salah" compared
