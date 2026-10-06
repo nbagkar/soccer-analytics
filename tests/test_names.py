@@ -36,6 +36,14 @@ class TestMustMatch:
             # Affix position and case
             ("SSC Napoli", "Napoli"),
             ("AC Milan", "Milan"),
+            # Letters Unicode cannot decompose: these used to vanish and split the name
+            # ("Brøndby" -> "br ndby"), so the ASCII spelling other sources use never matched.
+            ("Brøndby", "Brondby"),
+            ("Strømsgodset", "Stromsgodset"),
+            ("Śląsk Wrocław", "Slask Wroclaw"),
+            ("Preußen Münster", "Preussen Munster"),
+            ("Kas\u0131mpa\u015fa", "Kasimpasa"),  # Turkish dotless i
+            ("Lillestrøm", "Lillestrom"),
         ],
     )
     def test_pairs_resolve_to_same_name(self, a: str, b: str) -> None:

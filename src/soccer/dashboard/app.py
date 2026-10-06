@@ -551,6 +551,44 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=False)
 
 
+def _render_name_audit(settings: Settings) -> None:
+    """How the sources' club names line up -- `soccer audit-names`, as a panel."""
+    from soccer.dashboard.data import name_audit
+
+    links = name_audit(settings.live_db, settings.analytics_db)
+    if not links:
+        return
+    problems = [link for link in links if not link.healthy]
+    label = (
+        f"Club names across sources — {len(problems)} link(s) need attention"
+        if problems
+        else f"Club names across sources — all {len(links)} links resolve"
+    )
+    with st.expander(label, icon=":material/link:", expanded=bool(problems)):
+        st.caption(
+            "The sources share no ids, so clubs are matched by name. A domestic league must "
+            "match every club; cup clubs from leagues that aren't loaded can't be rated."
+        )
+        rows = []
+        for link in links:
+            if link.collisions:
+                note = "; ".join(f"{c} ← {', '.join(n)}" for c, n in link.collisions.items())
+            elif link.unresolved:
+                prefix = "" if link.expected_complete else "league not loaded: "
+                note = prefix + ", ".join(link.unresolved)
+            else:
+                note = ""
+            rows.append(
+                {
+                    "Link": link.link,
+                    "Matched": f"{link.resolved}/{link.total}",
+                    "": "✓" if link.healthy else "✗",
+                    "Unmatched / clashes": note,
+                }
+            )
+        st.markdown(_html_table(rows), unsafe_allow_html=True)
+
+
 def _html_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
@@ -2756,6 +2794,7 @@ def main() -> None:
             _render_live(live_snapshot(db, competition=None if chosen == "All" else chosen))
         else:
             _render_health(health_snapshot(settings, db))
+            _render_name_audit(settings)
             st.divider()
             _render_data_manager(settings)
 

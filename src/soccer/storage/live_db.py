@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -199,7 +199,43 @@ class LiveDB:
         # Reconcile such columns explicitly (SQLite's ADD COLUMN has no IF NOT EXISTS).
         for table, column, ddl in _ADDED_COLUMNS:
             self._ensure_column(table, column, ddl)
+        if 0 < current < 11:
+            self._renormalize_names()
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _renormalize_names(self) -> None:
+        """v11: recompute stored name keys after normalization learned to transliterate.
+
+        Letters like ø, ß and ł used to be dropped ("Brøndby" -> "br ndby"), so keys stored
+        before v11 no longer equal what `normalize_name` produces now, and a fresh source
+        name would miss its own entity. Every key here is derived from a stored display
+        name, so it can be recomputed exactly. (entity_alias.alias_normalized cannot -- the
+        alias text is not stored -- so a mangled alias must be re-added by hand.)
+        """
+        from soccer.domain.names import normalize_name
+
+        updates = [
+            ("canonical_entity", "internal_id", "canonical_name", "normalized_name"),
+            ("player_availability", "rowid", "team", "team_norm"),
+        ]
+        with self.transaction():
+            for table, key, name, norm in updates:
+                rows = self._conn.execute(f"SELECT {key}, {name}, {norm} FROM {table}").fetchall()
+                for row_key, display, stored in rows:
+                    fresh = normalize_name(display or "")
+                    if fresh and fresh != stored:
+                        self._conn.execute(
+                            f"UPDATE {table} SET {norm}=? WHERE {key}=?", (fresh, row_key)
+                        )
+            for alias_key, canonical, stored in self._conn.execute(
+                "SELECT rowid, canonical_name, canonical_normalized FROM entity_alias"
+            ).fetchall():
+                fresh = normalize_name(canonical)
+                if fresh and fresh != stored:
+                    self._conn.execute(
+                        "UPDATE entity_alias SET canonical_normalized=? WHERE rowid=?",
+                        (fresh, alias_key),
+                    )
 
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1887,28 +1887,164 @@ _FDCOUK_ALIASES_RAW = {
 FDCOUK_ALIASES: dict[str, str] = {normalize_name(k): v for k, v in _FDCOUK_ALIASES_RAW.items()}
 
 
+def match_team(name: str, candidates: Collection[str]) -> str | None:
+    """The one cross-source name matcher: a source team name -> a normalized candidate, or None.
+
+    Every bridge between sources (fixtures -> league models, cup ties -> club ratings, squads
+    and injuries -> results) goes through here, in this order:
+    1. the curated FDCOUK_ALIASES -- a deliberate human decision, so it wins, but only when
+       its target is among `candidates` (a stale or other-league entry is inert);
+    2. an exact normalized match;
+    3. a UNIQUE token-subset ("Borussia Dortmund" -> "Dortmund"); ambiguous -> no match.
+    Callers should pass ONE league's names whenever the competition is known: across every
+    league at once, Portugal's "Vitória SC" exact-matched Brazil's "Vitoria" before the
+    alias to Guimaraes was ever consulted. `soccer audit-names` reports what this resolves.
+    """
+    n = normalize_name(name)
+    aliased = FDCOUK_ALIASES.get(n)
+    if aliased and normalize_name(aliased) in candidates:
+        return normalize_name(aliased)
+    if n in candidates:
+        return n
+    tokens = set(n.split())
+    subset = [c for c in candidates if set(c.split()) < tokens or tokens < set(c.split())]
+    return subset[0] if len(subset) == 1 else None
+
+
 def resolve_canonical_name(name: str, registry: dict[str, str]) -> tuple[str, str]:
     """Map a source team name to a loaded team's (display, norm), for cross-source bridging.
 
-    Tries an exact normalized match, then the curated FDCOUK_ALIASES, then a unique
-    token-subset (verbose "Borussia Dortmund" -> "Dortmund"). Falls back to the source name
-    when nothing matches, so a club from an unloaded league keeps its own name. `registry` is
-    {norm: display} of the canonical (football-data.co.uk) names to bridge to; aliases are
-    checked before the token-subset so a curated entry overrides a wrong subset hit.
+    `registry` is {norm: display} of the canonical (football-data.co.uk) names to bridge to
+    -- one league's where the competition is known (see `match_team`). Falls back to the
+    source name when nothing matches, so a club from an unloaded league keeps its own name.
     """
-    n = normalize_name(name)
-    if n in registry:
-        return registry[n], n
-    aliased = FDCOUK_ALIASES.get(n)
-    if aliased:
-        an = normalize_name(aliased)
-        if an in registry:
-            return registry[an], an
-    tokens = set(n.split())
-    subset = [norm for norm in registry if set(norm.split()) < tokens or tokens < set(norm.split())]
-    if len(subset) == 1:
-        return registry[subset[0]], subset[0]
-    return name, n
+    matched = match_team(name, registry)
+    if matched is not None:
+        return registry[matched], matched
+    return name, normalize_name(name)
+
+
+@dataclass(frozen=True)
+class NameLink:
+    """How well one cross-source bridge resolves club names (see `name_audit`)."""
+
+    link: str  # e.g. "Fixtures → Premier League model"
+    total: int  # distinct source names
+    resolved: int
+    unresolved: list[str]
+    collisions: dict[str, list[str]]  # loaded club -> the several source names matched to it
+    expected_complete: bool  # a domestic league: every club should resolve
+    """False for cups, whose clubs can come from leagues that are not loaded at all."""
+
+    @property
+    def healthy(self) -> bool:
+        return not self.collisions and (not self.expected_complete or not self.unresolved)
+
+
+def name_audit(live_db: Path, analytics_db: Path) -> list[NameLink]:
+    """Every cross-source name bridge, measured: coverage, misses and collisions.
+
+    Sources share no ids, so clubs are joined by name (`match_team`). Coverage alone can't
+    catch the worst failure -- two different clubs matched to one -- so collisions are
+    reported too, and a domestic league is only healthy when every club resolves. Cup
+    clubs from unloaded leagues are listed but expected. Also checks the curated aliases.
+    """
+    from soccer.dashboard.actions import SQUAD_DIVISIONS, _canonical_registry
+    from soccer.sources.football_data_co_uk import CUP_DIVISIONS
+
+    if not Path(analytics_db).exists():
+        return []
+    with AnalyticsDB(analytics_db) as adb:
+        divisions = {d for _s, d, _n in adb.seasons_loaded() if d not in CUP_DIVISIONS}
+        registries = {d: _canonical_registry(adb, d) for d in divisions}
+        squads = adb.squad_teams()
+        ratings = _club_ratings(adb)
+
+    def audit(link: str, names: set[str], candidates: Collection[str], complete: bool) -> NameLink:
+        hits: dict[str, list[str]] = {}
+        missing = []
+        for name in sorted(names):
+            matched = match_team(name, candidates)
+            if matched is None:
+                missing.append(name)
+            else:
+                hits.setdefault(matched, []).append(name)
+        return NameLink(
+            link=link,
+            total=len(names),
+            resolved=len(names) - len(missing),
+            unresolved=missing,
+            collisions={k: v for k, v in hits.items() if len(v) > 1},
+            expected_complete=complete,
+        )
+
+    links: list[NameLink] = []
+    fixtures: dict[str, set[str]] = {}
+    if Path(live_db).exists():
+        with LiveDB(live_db) as db:
+            for v in MatchStateStore(db).upcoming(limit=10_000):
+                fixtures.setdefault(v.competition, set()).update((v.home, v.away))
+    for competition, names in sorted(fixtures.items()):
+        division = COMPETITION_TO_DIVISION.get(competition)
+        if division in registries:
+            links.append(
+                audit(f"Fixtures → {competition} model", names, registries[division], True)
+            )
+        elif "champions league" in competition.lower():
+            links.append(audit(f"Fixtures → {competition} ratings", names, ratings, False))
+    # Squads are stored already bridged, so check the STORED key against that league's clubs
+    # -- re-resolving the stored name would let an alias mask a club filed under the wrong key.
+    by_competition: dict[str, dict[str, str]] = {}
+    for competition, team, norm in squads:
+        by_competition.setdefault(competition, {})[team] = norm
+    for code, stored in sorted(by_competition.items()):
+        division = SQUAD_DIVISIONS.get(code)
+        if division not in registries:
+            continue
+        clubs: dict[str, list[str]] = {}
+        for team, norm in stored.items():
+            clubs.setdefault(norm, []).append(team)
+        missing = sorted(t for t, n in stored.items() if n not in registries[division])
+        links.append(
+            NameLink(
+                link=f"Squads ({code}) → results",
+                total=len(stored),
+                resolved=len(stored) - len(missing),
+                unresolved=missing,
+                collisions={k: v for k, v in clubs.items() if len(v) > 1},
+                expected_complete=True,
+            )
+        )
+    if Path(live_db).exists() and "E0" in registries:
+        with LiveDB(live_db) as db:
+            teams = {r[0] for r in db.connection.execute("SELECT team FROM player_availability")}
+        if teams:
+            links.append(audit("Injuries (FPL) → Premier League", teams, registries["E0"], True))
+    return links
+
+
+def alias_audit(analytics_db: Path) -> tuple[list[str], list[str]]:
+    """(stale aliases, shadowing aliases) among the curated FDCOUK_ALIASES.
+
+    Stale: the target names no loaded club (harmless -- inert -- but worth pruning, or a
+    sign a league's spelling changed). Shadowing: the alias's own source name is itself a
+    loaded club in the same league as its target, so it would redirect a real club.
+    """
+    from soccer.dashboard.actions import _canonical_registry
+    from soccer.sources.football_data_co_uk import CUP_DIVISIONS
+
+    with AnalyticsDB(analytics_db) as adb:
+        divisions = {d for _s, d, _n in adb.seasons_loaded() if d not in CUP_DIVISIONS}
+        registries = {d: _canonical_registry(adb, d) for d in divisions}
+    stale, shadowing = [], []
+    for source, target in sorted(_FDCOUK_ALIASES_RAW.items()):
+        target_norm, source_norm = normalize_name(target), normalize_name(source)
+        homes = [d for d, reg in registries.items() if target_norm in reg]
+        if not homes:
+            stale.append(f"{source} → {target}")
+        elif any(source_norm in registries[d] and source_norm != target_norm for d in homes):
+            shadowing.append(f"{source} → {target}")
+    return stale, shadowing
 
 
 @dataclass(frozen=True)
@@ -2020,26 +2156,11 @@ def fixture_forecasts(
     Each division's model is fit on its most-recent loaded season -- a preseason
     projection (European "2526", Brazil's calendar-year "2026", ... resolved per league).
     """
-    from soccer.domain.names import normalize_name
     from soccer.models.markets import compute_markets
 
     def resolve(name: str, model: PoissonModel) -> str | None:
-        """Match a fixture team name to a model team: exact, curated alias, then fuzzy.
-
-        Bridges verbose football-data.org names ("GD Estoril Praia") to the terser
-        football-data.co.uk model names ("Estoril"): a token-subset match handles most,
-        and a small curated alias map covers clubs whose short name shares no token with
-        the verbose one ("Athletic Club" -> "Ath Bilbao").
-        """
-        n = normalize_name(name)
-        if n in model.strengths:
-            return n
-        aliased = FDCOUK_ALIASES.get(n)
-        if aliased and normalize_name(aliased) in model.strengths:
-            return normalize_name(aliased)
-        tokens = set(n.split())
-        subset = [t for t in model.strengths if set(t.split()) < tokens or tokens < set(t.split())]
-        return subset[0] if len(subset) == 1 else None  # unique match only, else skip
+        """A fixture team name -> a team in that league's model (`match_team`), else None."""
+        return match_team(name, model.strengths)
 
     if not Path(live_db).exists():
         return []
@@ -2071,12 +2192,7 @@ def fixture_forecasts(
         return models[division]
 
     def cup_resolve(name: str, ratings: dict[str, Any]) -> str | None:
-        n = _cup_norm(normalize_name(name))
-        if n in ratings:
-            return n
-        tokens = set(n.split())
-        subset = [t for t in ratings if set(t.split()) < tokens or tokens < set(t.split())]
-        return subset[0] if len(subset) == 1 else None
+        return match_team(name, ratings)
 
     out: list[FixtureForecast] = []
     for v in ups:
