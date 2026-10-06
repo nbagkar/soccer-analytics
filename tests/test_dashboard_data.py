@@ -1683,6 +1683,99 @@ class TestStabilizeThinSamplesPoisson:
         assert model.strengths["thin"].attack <= established_max_attack
 
 
+class TestNewcomerPriors:
+    """A club new to a middle division usually came DOWN from the one above, not up --
+    rating it as the division's weakest (the old prior for every newcomer) had League One
+    pre-season projections worse than no-skill: relegated clubs finished +17 points above
+    their projection on average."""
+
+    def _seed(self, path) -> None:
+        # Last season: E0 and E1 each a round robin, strongest club listed first.
+        seed_results(path, division="E0", teams=["Alpha", "Bravo", "Charlie", "Delta"])
+        seed_results(path, division="E1", teams=["Echo", "Foxtrot", "Golf", "Hotel"])
+
+    def test_relegated_club_rated_from_the_division_above(self, tmp_path) -> None:
+        from soccer.dashboard.data import _fit_season_ratings, _newcomer_priors
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "a.duckdb"
+        self._seed(path)
+        with AnalyticsDB(path) as adb:
+            # This season's E1: Delta came down from E0; Newco is from outside the loaded
+            # pyramid; Echo and Foxtrot stayed.
+            priors = _newcomer_priors(adb, "E1", "2526", ["delta", "echo", "foxtrot", "newco"])
+            old = _fit_season_ratings(adb.outcomes_for("2526", "E0")).strengths["delta"]
+
+        assert set(priors) == {"delta"}  # incumbents and unknown clubs keep the default
+        attack, defence = priors["delta"]
+        # Stronger in the lower division than it was in the top flight.
+        assert attack > old.attack
+        assert defence < old.defence
+
+    def test_promoted_club_rated_from_the_division_below(self, tmp_path) -> None:
+        from soccer.dashboard.data import _fit_season_ratings, _newcomer_priors
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "a.duckdb"
+        self._seed(path)
+        seed_results(path, division="E2", teams=["India", "Juliet", "Kilo", "Lima"])
+        with AnalyticsDB(path) as adb:
+            priors = _newcomer_priors(adb, "E1", "2526", ["echo", "foxtrot", "golf", "india"])
+            old = _fit_season_ratings(adb.outcomes_for("2526", "E2")).strengths["india"]
+
+        assert set(priors) == {"india"}
+        attack, defence = priors["india"]
+        assert attack < old.attack  # weaker against better opposition
+        assert defence > old.defence
+
+    def test_top_flight_promoted_keep_the_default_prior(self, tmp_path) -> None:
+        """Measured: the weakest-three prior already fits a top flight's promoted sides."""
+        from soccer.dashboard.data import _newcomer_priors
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "a.duckdb"
+        self._seed(path)
+        with AnalyticsDB(path) as adb:
+            assert _newcomer_priors(adb, "E0", "2526", ["alpha", "bravo", "echo"]) == {}
+
+    def test_division_outside_any_ladder_gets_no_priors(self, tmp_path) -> None:
+        from soccer.dashboard.data import _newcomer_priors
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        path = tmp_path / "a.duckdb"
+        seed_results(path, division="N1", teams=["Ajax", "PSV", "Feyenoord", "Twente"])
+        with AnalyticsDB(path) as adb:
+            assert _newcomer_priors(adb, "N1", "2526", ["ajax", "psv", "newco"]) == {}
+
+    def test_stabilize_uses_a_named_prior_instead_of_the_weakest_three(self) -> None:
+        from soccer.dashboard.data import SEASON_SIM_MIN_MATCHES, _stabilize_thin_samples
+        from soccer.models.poisson import PoissonModel, TeamStrength
+
+        model = PoissonModel(
+            strengths={
+                "a": TeamStrength(attack=1.3, defence=0.8),
+                "b": TeamStrength(attack=1.0, defence=1.0),
+                "c": TeamStrength(attack=0.7, defence=1.2),
+                "thin": TeamStrength(attack=0.5, defence=1.5),
+            },
+            home_avg=1.5,
+            away_avg=1.1,
+        )
+        counts = {"a": 10, "b": 10, "c": 10, "thin": 0}
+        priors = {"dropped": (1.2, 0.9), "thin": (1.2, 0.9)}
+
+        promoted = _stabilize_thin_samples(
+            model, ["a", "b", "c", "dropped", "fresh", "thin"], counts, priors
+        )
+
+        assert promoted == ["dropped", "fresh"]
+        assert model.strengths["dropped"] == TeamStrength(attack=1.2, defence=0.9)
+        assert model.strengths["fresh"].attack == pytest.approx((1.3 + 1.0 + 0.7) / 3)
+        # No matches yet: a thin-sample club sits entirely on its own prior.
+        assert counts["thin"] < SEASON_SIM_MIN_MATCHES
+        assert model.strengths["thin"].attack == pytest.approx(1.2)
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 

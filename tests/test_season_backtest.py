@@ -36,7 +36,7 @@ def season(start: date, teams: list[str] = TEAMS) -> list[Played]:
     return rows
 
 
-def fit(window: list[Played], teams: list[str]):  # type: ignore[no-untyped-def]
+def fit(window: list[Played], teams: list[str], code: str):  # type: ignore[no-untyped-def]
     return fit_poisson(window)
 
 
