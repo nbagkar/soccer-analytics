@@ -527,6 +527,30 @@ def fit_poisson_shots(
     )
 
 
+def calibrate_model(
+    model: PoissonModel, *, spread: float = 1.0, home_shift: float = 0.0, rho: float | None = None
+) -> PoissonModel:
+    """A copy of `model` with its expected goals recalibrated, so every market stays consistent.
+
+    ``spread`` raises each attack/defence strength (relative to the league's 1.0) to that
+    power -- above 1 widens the gaps between teams; ``home_shift`` moves log expected goals
+    toward the home side (home x e^h, away x e^-h, total roughly unchanged); ``rho`` replaces
+    the score grid's low-score correlation. Applied to the expected goals rather than to the
+    1X2, so the scorelines, totals and season simulations agree with the headline odds.
+    """
+    strengths = {
+        team: TeamStrength(attack=s.attack**spread, defence=s.defence**spread)
+        for team, s in model.strengths.items()
+    }
+    return PoissonModel(
+        strengths=strengths,
+        home_avg=model.home_avg * math.exp(home_shift),
+        away_avg=model.away_avg * math.exp(-home_shift),
+        rho=model.rho if rho is None else rho,
+        home_boost={t: b**spread for t, b in model.home_boost.items()} or None,
+    )
+
+
 def fit_poisson_xg(
     outcomes: Sequence[Outcome],
     *,

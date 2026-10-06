@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,7 @@ from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
 from soccer.models.markets import MarketSlate
-from soccer.models.poisson import DEFAULT_RHO, PoissonModel, fit_poisson_shots
+from soccer.models.poisson import DEFAULT_RHO, PoissonModel, calibrate_model, fit_poisson_shots
 from soccer.models.season_backtest import SeasonBacktest
 from soccer.models.simulation import (
     TeamProjection,
@@ -327,13 +327,7 @@ def analytics_snapshot(
     power = power_ranking(outcomes)
     fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
     projections = simulate_season(
-        fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        ),
+        _forecast_fit(outcomes),
         fixtures,
         teams=list(names),
         n_sims=sims,
@@ -541,13 +535,7 @@ def _season_model(window: list[ResultRow], teams: list[str]) -> tuple[PoissonMod
     """The season-projection rating model: the forecast model fit on `window`, with every
     thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`). Returns
     (model, the teams the fit never saw -- the newly promoted)."""
-    model = fit_poisson_shots(
-        window,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
+    model = _forecast_fit(window)
     match_counts: dict[str, int] = {}
     for o in window:
         match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
@@ -804,12 +792,41 @@ FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
 # the O/U equation 0.5x-3x changed nothing (the three prices fit near-exactly). Asian handicap
 # not added: with 1X2 + O/U both rates are already pinned and AH mostly restates supremacy.
 FORECAST_MARKET_WEIGHT = 1.0
+# Goal-space recalibration of the fitted model (`calibrate_model`). Walk-forward over 18
+# divisions, 2012/13-2026/27 (~95,000 matches), refitting the three numbers pooled on all
+# EARLIER seasons before scoring each season: the raw model was underconfident (a "0.64"
+# favourite won 0.68), short on home wins (~1.5-2.5 points in every league) and long on draws
+# (~1-2 points). Spreading strengths, nudging home advantage and easing the low-score
+# correlation together cut the gap to the closing line +0.0134 -> +0.0126; each alone was
+# worth ~0.0002. The fitted values barely moved across 15 seasons (spread 1.06-1.10, home
+# 0.012-0.025, rho -0.08 to -0.11), so they are fixed here. Fitting them per league scored no
+# better than pooled -- league-specific calibration is not worth its extra parameters.
+FORECAST_SPREAD = 1.08
+FORECAST_HOME_SHIFT = 0.02
+FORECAST_RHO = -0.09
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
 # title or relegation probability. Below the threshold the team's rating is blended toward the
 # "typical promoted side" prior in proportion to how little data it actually has.
 SEASON_SIM_MIN_MATCHES = 5
+
+
+def _forecast_fit(outcomes: Sequence[Any]) -> PoissonModel:
+    """The live forecast model: market-implied shots-blend ratings, then the measured
+    goal-space recalibration (`FORECAST_SPREAD`/`FORECAST_HOME_SHIFT`/`FORECAST_RHO`)."""
+    return calibrate_model(
+        fit_poisson_shots(
+            outcomes,
+            alpha=FORECAST_ALPHA,
+            shrinkage=FORECAST_SHRINKAGE,
+            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            market_weight=FORECAST_MARKET_WEIGHT,
+        ),
+        spread=FORECAST_SPREAD,
+        home_shift=FORECAST_HOME_SHIFT,
+        rho=FORECAST_RHO,
+    )
 
 
 def _decay(half_life_days: float) -> float:
@@ -856,13 +873,7 @@ def _expected_for(
         decay = _decay(FORECAST_HALF_LIFE_DAYS) if weighted else 0.0
         model = fit_dixon_coles(outcomes, time_decay=decay)
     else:
-        model = fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        )
+        model = _forecast_fit(outcomes)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -1053,13 +1064,7 @@ def forecast_explanation(
         outcomes = adb.recent_outcomes_through(division, season, n_seasons=FORECAST_SEASONS)
     if not outcomes:
         return None
-    model = fit_poisson_shots(
-        outcomes,
-        alpha=FORECAST_ALPHA,
-        shrinkage=FORECAST_SHRINKAGE,
-        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-        market_weight=FORECAST_MARKET_WEIGHT,
-    )
+    model = _forecast_fit(outcomes)
     hn, an = normalize_name(home), normalize_name(away)
     if hn not in model.strengths or an not in model.strengths:
         return None
@@ -1238,13 +1243,7 @@ def team_dossier(analytics_db: Path, division: str, season: str, team: str) -> T
         form = next((f for f in forms if f.team == row.team), None)
         streak = next((s for s in adb.team_streaks(season, division) if s.team == row.team), None)
         outcomes = adb.outcomes_for(season, division)
-        model = fit_poisson_shots(
-            outcomes,
-            alpha=FORECAST_ALPHA,
-            shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-            market_weight=FORECAST_MARKET_WEIGHT,
-        )
+        model = _forecast_fit(outcomes)
 
     strength = model.strengths.get(norm)
     attack = strength.attack if strength else 1.0
@@ -1524,6 +1523,11 @@ def forecast_report(
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
         market_weight=FORECAST_MARKET_WEIGHT,
+        calibration={
+            "spread": FORECAST_SPREAD,
+            "home_shift": FORECAST_HOME_SHIFT,
+            "rho": FORECAST_RHO,
+        },
         min_history=60,
     )
 
@@ -2032,13 +2036,7 @@ def fixture_forecasts(
                 if outcomes:
                     # Recency window (last few seasons), fit on the shots-on-target blend --
                     # measured to roughly halve the goals-only model's gap to the market.
-                    model = fit_poisson_shots(
-                        outcomes,
-                        alpha=FORECAST_ALPHA,
-                        shrinkage=FORECAST_SHRINKAGE,
-                        time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
-                        market_weight=FORECAST_MARKET_WEIGHT,
-                    )
+                    model = _forecast_fit(outcomes)
                     model_names[division] = {o.home_norm: o.home for o in outcomes} | {
                         o.away_norm: o.away for o in outcomes
                     }
