@@ -61,9 +61,38 @@ _LEADING_ORDINAL = re.compile(r"^\d+\.\s*")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
+# Letters Unicode does NOT decompose into base + accent, so NFKD alone cannot reduce them --
+# they used to fall through to the non-alphanumeric split and vanish, cutting the name in
+# two: "Brøndby" -> "br ndby", "Wrocław" -> "wroc aw", "Preußen" -> "preu en". Spelled the
+# way the ASCII-only sources write them (football-data.co.uk: "Brondby", "Bodo/Glimt").
+_TRANSLITERATE = str.maketrans(
+    {
+        "ø": "o",
+        "Ø": "O",
+        "æ": "ae",
+        "Æ": "Ae",
+        "œ": "oe",
+        "Œ": "Oe",
+        "ß": "ss",
+        "ł": "l",
+        "Ł": "L",
+        "đ": "d",
+        "Đ": "D",
+        "ð": "d",
+        "Ð": "D",
+        "þ": "th",
+        "Þ": "Th",
+        "\u0131": "i",  # Turkish dotless i
+        "ħ": "h",
+        "Ħ": "H",
+    }
+)
+
+
 def strip_diacritics(text: str) -> str:
-    """Köln -> Koln, Atlético -> Atletico. Decompose then drop combining marks."""
-    decomposed = unicodedata.normalize("NFKD", text)
+    """Köln -> Koln, Atlético -> Atletico, Brøndby -> Brondby. Transliterate the letters
+    Unicode cannot decompose, then decompose and drop combining marks."""
+    decomposed = unicodedata.normalize("NFKD", text.translate(_TRANSLITERATE))
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 

@@ -1209,6 +1209,51 @@ def ingest_events(
     console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
 
 
+@app.command("audit-names")
+def audit_names() -> None:
+    """How well club names bridge between sources: coverage, misses, collisions, aliases."""
+    from soccer.dashboard.data import alias_audit, name_audit
+
+    settings = get_settings()
+    links = name_audit(settings.live_db, settings.analytics_db)
+    if not links:
+        console.print("[yellow]Nothing to audit yet[/yellow] -- load results and fixtures first.")
+        raise typer.Exit(1)
+    tbl = Table(title="Cross-source club names", header_style="bold")
+    tbl.add_column("Link")
+    tbl.add_column("Resolved", justify="right")
+    tbl.add_column("Status")
+    tbl.add_column("Unresolved / collisions")
+    for link in links:
+        if link.collisions:
+            status, detail = (
+                "[red]collision[/red]",
+                "; ".join(
+                    f"{club} ← {', '.join(names)}" for club, names in link.collisions.items()
+                ),
+            )
+        elif link.unresolved and link.expected_complete:
+            status, detail = "[red]missing[/red]", ", ".join(link.unresolved)
+        elif link.unresolved:
+            status = "[dim]ok (cup)[/dim]"
+            detail = "league not loaded: " + ", ".join(link.unresolved)
+        else:
+            status, detail = "[green]ok[/green]", ""
+        tbl.add_row(link.link, f"{link.resolved}/{link.total}", status, detail)
+    console.print(tbl)
+    stale, shadowing = alias_audit(settings.analytics_db)
+    if shadowing:
+        console.print("[red]Aliases redirecting a real club:[/red] " + "; ".join(shadowing))
+    if stale:
+        console.print(
+            f"[dim]{len(stale)} curated aliases point at no loaded club (inert): "
+            + "; ".join(stale)
+            + "[/dim]"
+        )
+    if any(not link.healthy for link in links) or shadowing:
+        raise typer.Exit(1)
+
+
 @app.command("rebuild-xt")
 def rebuild_xt() -> None:
     """Rebuild passes/carries/shots from cached StatsBomb events (offline) and refit xT."""

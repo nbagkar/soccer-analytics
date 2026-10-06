@@ -388,16 +388,21 @@ def _fdorg_result(
     )
 
 
-def _canonical_registry(adb: AnalyticsDB) -> dict[str, str]:
-    """{norm: display} of loaded domestic team names (latest season each), to bridge to."""
+def _canonical_registry(adb: AnalyticsDB, division: str | None = None) -> dict[str, str]:
+    """{norm: display} of loaded domestic team names (latest season each), to bridge to.
+
+    Pass `division` whenever the source's league is known: one league's names keep a club
+    from matching a namesake elsewhere (see `match_team`). Every league at once is only for
+    cups, where clubs genuinely come from anywhere. An unloaded division gives {}.
+    """
     from soccer.sources.football_data_co_uk import CUP_DIVISIONS, season_sort_key
 
     latest: dict[str, str] = {}
-    for season, division, _n in adb.seasons_loaded():
-        if division in CUP_DIVISIONS:
+    for season, div, _n in adb.seasons_loaded():
+        if div in CUP_DIVISIONS or (division is not None and div != division):
             continue
-        if division not in latest or season_sort_key(season) > season_sort_key(latest[division]):
-            latest[division] = season
+        if div not in latest or season_sort_key(season) > season_sort_key(latest[div]):
+            latest[div] = season
     registry: dict[str, str] = {}
     for division, season in latest.items():
         for o in adb.outcomes_for(season, division):
@@ -468,6 +473,18 @@ def load_champions_league(
 # League club's roster is already covered by its domestic league. Nine requests against the
 # 10/min budget, so this is a deliberate button press, not part of a routine refresh.
 SQUAD_COMPETITIONS = ["PL", "ELC", "FL1", "BL1", "SA", "DED", "PPL", "PD", "BSA"]
+# football-data.org competition code -> the loaded division its clubs are named against.
+SQUAD_DIVISIONS = {
+    "PL": "E0",
+    "ELC": "E1",
+    "FL1": "F1",
+    "BL1": "D1",
+    "SA": "I1",
+    "DED": "N1",
+    "PPL": "P1",
+    "PD": "SP1",
+    "BSA": "BRA",
+}
 
 
 def update_squads(
@@ -490,7 +507,8 @@ def update_squads(
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
     with AnalyticsDB(settings.analytics_db) as adb:
-        registry = _canonical_registry(adb)
+        registries = {code: _canonical_registry(adb, div) for code, div in SQUAD_DIVISIONS.items()}
+        everywhere = _canonical_registry(adb)
 
     async def run() -> list[SquadMember]:
         from dataclasses import replace
@@ -512,6 +530,8 @@ def update_squads(
                     res = await fd.competition_teams(code)
                 except httpx.HTTPStatusError:
                     continue  # competition not reachable on the free tier
+                # name clubs against their own league; all leagues only if it isn't loaded
+                registry = registries.get(code) or everywhere
                 for member in map_football_data_squad(code, res.payload):
                     display, norm = resolve_canonical_name(member.team, registry)
                     members.append(replace(member, team=display, team_norm=norm))
@@ -552,7 +572,7 @@ def update_availability(settings: Settings) -> str:
     settings.ensure_dirs()
     raw = RawStore(settings.raw_dir)
     with AnalyticsDB(settings.analytics_db) as adb:
-        registry = _canonical_registry(adb)
+        registry = _canonical_registry(adb, "E0") or _canonical_registry(adb)
 
     async def run() -> tuple[list[PlayerAvailability], bool]:
         from dataclasses import replace

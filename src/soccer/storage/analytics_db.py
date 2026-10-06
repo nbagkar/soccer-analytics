@@ -228,6 +228,11 @@ def _profile_select(competition: str | None, season: str | None = None) -> tuple
     return sql, params
 
 
+# Bump when `normalize_name` changes how a name reduces, so stored keys get recomputed on
+# the next open. 2: transliterate letters Unicode cannot decompose (ø, ß, ł, ...).
+NAMES_VERSION = 2
+
+
 @dataclass(frozen=True)
 class TableRow:
     position: int
@@ -640,6 +645,16 @@ class AnalyticsDB:
 
     def _migrate(self) -> None:
         """Idempotent column additions for databases created before a column existed."""
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS store_meta (key VARCHAR PRIMARY KEY, value VARCHAR)"
+        )
+        row = self._con.execute("SELECT value FROM store_meta WHERE key='names_version'").fetchone()
+        if row is None or int(row[0]) < NAMES_VERSION:
+            self._renormalize_names()
+            self._con.execute(
+                "INSERT OR REPLACE INTO store_meta VALUES ('names_version', ?)",
+                [str(NAMES_VERSION)],
+            )
         for column in (
             "close_home_odds",
             "close_draw_odds",
@@ -648,6 +663,30 @@ class AnalyticsDB:
             "close_under25_odds",
         ):
             self._con.execute(f"ALTER TABLE results ADD COLUMN IF NOT EXISTS {column} DOUBLE")
+
+    def _renormalize_names(self) -> None:
+        """Recompute stored name keys after a change to `normalize_name` (see NAMES_VERSION).
+
+        Only names with non-ASCII letters can have changed, so only those are touched; each
+        key is recomputed from its stored display name.
+        """
+        from soccer.domain.names import normalize_name
+
+        for table, name, norm in (
+            ("results", "home", "home_norm"),
+            ("results", "away", "away_norm"),
+            ("squads", "team", "team_norm"),
+        ):
+            rows = self._con.execute(
+                f"SELECT DISTINCT {name}, {norm} FROM {table} "
+                f"WHERE regexp_matches({name}, '[^\\x00-\\x7F]')"
+            ).fetchall()
+            for display, stored in rows:
+                fresh = normalize_name(display)
+                if fresh and fresh != stored:
+                    self._con.execute(
+                        f"UPDATE {table} SET {norm}=? WHERE {name}=?", [fresh, display]
+                    )
 
     def close(self) -> None:
         self._con.close()
@@ -1297,6 +1336,13 @@ class AnalyticsDB:
     def xt_grid(self) -> list[float]:
         """The fitted xT value of every grid cell (x-major), or [] before refresh_xt()."""
         return [r[0] for r in self._con.execute("SELECT xt FROM xt_grid ORDER BY cell").fetchall()]
+
+    def squad_teams(self) -> list[tuple[str, str, str]]:
+        """(competition code, club, stored club key) for every club with a loaded squad."""
+        rows = self._con.execute(
+            "SELECT DISTINCT competition, team, team_norm FROM squads"
+        ).fetchall()
+        return [(str(c), str(t), str(n)) for c, t, n in rows]
 
     def event_match_ids(self) -> list[int]:
         """Every StatsBomb match with event stats loaded."""
