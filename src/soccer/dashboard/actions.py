@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from soccer.config import Settings
@@ -635,6 +636,7 @@ def load_event_pack(
     from soccer.sources.registry import SourceId
     from soccer.sources.statsbomb import (
         StatsBomb,
+        parse_actions,
         parse_match_meta,
         parse_player_stats,
         parse_shots,
@@ -660,11 +662,50 @@ def load_event_pack(
                 if stats:
                     adb.load_player_stats(stats)
                     players_total += len(stats)
+                adb.load_actions(parse_actions(events, match_id))
             if on_progress:
                 on_progress(i, len(match_ids))
+        adb.refresh_xt()  # the threat grid is fit on every loaded match, so refit once here
     return (
         f"Loaded {shots_total} shots and {players_total} player rows from {len(match_ids)} matches."
     )
+
+
+def _actions_from_snapshot(args: tuple[str, int]) -> list[Any]:
+    """Parse one cached events snapshot into actions (a top-level function, so it pickles
+    into a worker process)."""
+    from soccer.sources.registry import SourceId
+    from soccer.sources.statsbomb import parse_actions
+
+    raw_dir, match_id = args
+    snapshot = RawStore(Path(raw_dir)).latest(SourceId.STATSBOMB, f"events_{match_id}")
+    return parse_actions(snapshot.payload, match_id) if snapshot and snapshot.payload else []
+
+
+def rebuild_expected_threat(
+    settings: Settings, *, on_progress: Callable[[int, int], None] | None = None
+) -> str:
+    """Rebuild the action table from cached event snapshots (no network) and refit xT.
+
+    For a store whose events were loaded before actions were kept. Parsing is spread over
+    worker processes; loading is batched so DuckDB sees a few large inserts.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    with AnalyticsDB(settings.analytics_db) as adb:
+        match_ids = adb.event_match_ids()
+    total, batch = 0, []
+    with ProcessPoolExecutor() as pool, AnalyticsDB(settings.analytics_db) as adb:
+        jobs = [(str(settings.raw_dir), m) for m in match_ids]
+        for i, parsed in enumerate(pool.map(_actions_from_snapshot, jobs, chunksize=16), 1):
+            batch.extend(parsed)
+            if len(batch) >= 200_000 or i == len(jobs):
+                total += adb.load_actions(batch)
+                batch = []
+            if on_progress:
+                on_progress(i, len(jobs))
+        fitted = adb.refresh_xt()
+    return f"Rebuilt {total:,} actions from {len(match_ids):,} matches; xT fit on {fitted:,}."
 
 
 def load_all_events(

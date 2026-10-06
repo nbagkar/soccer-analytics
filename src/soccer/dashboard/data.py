@@ -1634,6 +1634,10 @@ _PERCENTILE_METRICS = [
     ("Possession", "Prog. passes", "progressive_passes", True),
     ("Possession", "Prog. carries", "progressive_carries", True),
     ("Possession", "Dribbles", "dribbles_completed", True),
+    # Open-play expected threat added by passes and carries -- see models/xthreat.py for why
+    # it earns a place: as repeatable as progressive passes, barely correlated with them,
+    # and the best of these at predicting a team's future goals.
+    ("Possession", "Threat added (xT)", "xt", True),
     ("Defending", "Tackles", "tackles", True),
     ("Defending", "Interceptions", "interceptions", True),
     ("Defending", "Blocks", "blocks", True),

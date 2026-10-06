@@ -107,7 +107,7 @@ calculators or bet tracker, since the model has no demonstrated edge to bet on.
 
 ## Quickstart
 
-Requires **Python 3.12** (capped below 3.13 by the `socceraction` dependency).
+Requires **Python 3.12+** (CI tests 3.12).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
