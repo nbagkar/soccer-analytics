@@ -2273,9 +2273,15 @@ def _render_freshness(settings: Settings, page: str) -> None:
     fresh = data_freshness(settings)
     d, pl = fresh.results_through, fresh.headline_through
     through = f"{d.day} {d:%b %Y}" if d else "none loaded"
-    # Leagues publish on different cadences: name the PL's own date when it lags the store.
-    if d and pl and (d - pl).days > 2:
-        through += f" (Premier League: {pl.day} {pl:%b})"
+    # Leagues publish on different cadences: name the PL's own date when it lags the store --
+    # but only when PL matches have actually been played since. A gap in the schedule (an
+    # international break) used to read as a stale feed: "Premier League: 20 Sep" for weeks.
+    if d and pl and (d - pl).days > 2 and fresh.headline_missing:
+        n = fresh.headline_missing
+        through += (
+            f" (Premier League: {pl.day} {pl:%b} — {n} match{'es' if n != 1 else ''} since "
+            "not in yet)"
+        )
     news = fresh.injuries_as_of
     news_date = f"{news.day} {news:%b}" if news else "never fetched"
     news_stale = settings.enable_fpl and fresh.injuries_stale

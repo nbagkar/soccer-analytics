@@ -93,6 +93,10 @@ class Freshness:
     """The newest Premier League result. Shown beside the store-wide date when it lags, so
     a busy MLS/Brazil calendar can't make the headline league look more current than it is
     (football-data.co.uk publishes the European files on its own, sometimes slower, cadence)."""
+    headline_missing: int = 0
+    """Premier League fixtures that kicked off after `headline_through` and should be over by
+    now -- played but not yet in the results. Zero during a break in the schedule (an
+    international window), when a lagging date is no sign of a stale feed at all."""
 
     @property
     def is_stale(self) -> bool:
@@ -144,6 +148,7 @@ def freshness(
     headline_through: date | None = None,
     now: datetime | None = None,
 ) -> Freshness:
+    now = now or datetime.now(UTC)
     log = RefreshLog(live_db)
     errors = [r.message for r in (log.last(j) for j in JOBS) if r is not None and not r.ok]
     return Freshness(
@@ -154,9 +159,34 @@ def freshness(
         injuries_as_of=injuries_as_of(live_db),
         squads_as_of=squads_as_of,
         headline_through=headline_through,
+        headline_missing=(
+            played_since(live_db, HEADLINE_COMPETITION, headline_through, now)
+            if headline_through
+            else 0
+        ),
         live_checked_at=log.last_success(LIVE),
-        now=now or datetime.now(UTC),
+        now=now,
     )
+
+
+HEADLINE_COMPETITION = "Premier League"
+# A fixture this long after kickoff is over (allowing for extra time and stoppages).
+MATCH_OVER_AFTER = timedelta(hours=3)
+
+
+def played_since(live_db: LiveDB, competition: str, after: date, now: datetime) -> int:
+    """Fixtures of `competition` that kicked off after `after` (a date) and are over by `now`."""
+    from soccer.domain.names import normalize_name
+
+    start = datetime.combine(after + timedelta(days=1), datetime.min.time(), UTC)
+    end = now - MATCH_OVER_AFTER
+    row = live_db.connection.execute(
+        "SELECT COUNT(*) FROM canonical_match m "
+        "JOIN canonical_entity c ON c.internal_id = m.competition_id "
+        "WHERE c.normalized_name = ? AND m.kickoff_utc >= ? AND m.kickoff_utc <= ?",
+        (normalize_name(competition), start.isoformat(), end.isoformat()),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def injuries_as_of(live_db: LiveDB) -> datetime | None:

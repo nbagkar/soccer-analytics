@@ -423,3 +423,45 @@ class TestWarmCaches:
         warmed.clear()
         autorefresh.start_if_stale(settings)
         assert not warmed.wait(0.3)  # only once per process
+
+
+class TestHeadlineGapOrLag:
+    """A lagging Premier League date is only news when PL matches were played since --
+    during an international break it is just the calendar, not a stale feed."""
+
+    def _db(self, tmp_path, kickoffs: list[datetime]):
+        from soccer.domain.match_state import MatchStatus
+        from soccer.storage.live_db import LiveDB
+        from tests.test_dashboard_data import add_match
+
+        db = LiveDB(tmp_path / "live.sqlite")
+        for i, kickoff in enumerate(kickoffs):
+            add_match(
+                db,
+                match_id=str(i),
+                home=f"Home {i}",
+                away=f"Away {i}",
+                competition="Premier League",
+                status=MatchStatus.FINISHED,
+                observed_at=kickoff,
+            )
+        return db
+
+    def test_played_matches_after_the_latest_result_count(self, tmp_path) -> None:
+        now = datetime(2026, 10, 14, 12, tzinfo=UTC)
+        db = self._db(tmp_path, [datetime(2026, 10, 11, 14, tzinfo=UTC)])
+        fresh = freshness(db, date(2026, 10, 12), headline_through=date(2026, 9, 20), now=now)
+        assert fresh.headline_missing == 1
+
+    def test_a_break_in_the_schedule_is_not_a_lag(self, tmp_path) -> None:
+        now = datetime(2026, 10, 8, 12, tzinfo=UTC)
+        # the next PL fixture is after "now" (the break), and nothing was played since 20 Sep
+        db = self._db(tmp_path, [datetime(2026, 10, 10, 14, tzinfo=UTC)])
+        fresh = freshness(db, date(2026, 10, 6), headline_through=date(2026, 9, 20), now=now)
+        assert fresh.headline_missing == 0
+
+    def test_a_match_still_in_progress_is_not_missing(self, tmp_path) -> None:
+        now = datetime(2026, 10, 11, 15, tzinfo=UTC)
+        db = self._db(tmp_path, [datetime(2026, 10, 11, 14, tzinfo=UTC)])  # kicked off 1h ago
+        fresh = freshness(db, date(2026, 10, 10), headline_through=date(2026, 10, 5), now=now)
+        assert fresh.headline_missing == 0
