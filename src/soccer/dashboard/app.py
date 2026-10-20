@@ -44,7 +44,7 @@ from soccer.dashboard.data import (
     availability_adjusted_slate,
     fixture_forecasts,
     forecast_explanation,
-    forecast_report,
+    forecast_report_if_ready,
     forecast_slate,
     forecast_teams,
     format_missing,
@@ -625,15 +625,6 @@ def _cached_market_edge(
     from pathlib import Path
 
     return market_edge(Path(db_path), season, division)
-
-
-@st.cache_data(show_spinner="Scoring the model against the market over recent seasons…")
-def _cached_forecast_report(
-    db_path: str, db_version: float, division: str, n_seasons: int
-) -> ForecastReport | None:
-    from pathlib import Path
-
-    return forecast_report(Path(db_path), division, n_seasons=n_seasons)
 
 
 @st.cache_data(show_spinner="Building the team dossier…")
@@ -2672,13 +2663,18 @@ def main() -> None:
                     league_names.index("Premier League") if "Premier League" in league_names else 0
                 )
                 league = st.selectbox("League", league_names, index=default_idx, key="card_league")
-                fc_report = _cached_forecast_report(
-                    str(settings.analytics_db),
-                    _db_version(settings.analytics_db),
-                    by_league[league],
-                    6,
+                ready, fc_report = forecast_report_if_ready(
+                    settings.analytics_db, by_league[league], n_seasons=6
                 )
-                if fc_report is None:
+                if not ready:
+                    st.info(
+                        "Scoring the last six seasons against the closing line — this takes "
+                        "about 20 seconds after new results arrive, and runs in the background "
+                        "so the rest of the page doesn't wait.",
+                        icon=":material/hourglass_top:",
+                    )
+                    st.button("Show it now", key="card_refresh", icon=":material/refresh:")
+                elif fc_report is None:
                     st.info("No closing odds loaded for that league yet.")
                 else:
                     _render_report_card(fc_report, by_league[league])

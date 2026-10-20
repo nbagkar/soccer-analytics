@@ -417,6 +417,104 @@ class TestCachedUntilDataChanges:
         os.utime(db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # a refresh wrote it
         assert expensive(db, "E0") == 3
 
+    def test_concurrent_callers_share_one_computation(self, tmp_path) -> None:
+        # The startup warm-up and the first page visit used to compute the same thing twice.
+        from soccer.dashboard.data import _cached_until_data_changes
+
+        db = tmp_path / "store.db"
+        db.write_text("v1")
+        calls: list[int] = []
+        started = threading.Event()
+
+        @_cached_until_data_changes()
+        def slow(path) -> int:
+            calls.append(1)
+            started.set()
+            time.sleep(0.3)
+            return 42
+
+        results: list[int] = []
+        first = threading.Thread(target=lambda: results.append(slow(db)))
+        first.start()
+        started.wait(2)
+        results.append(slow(db))  # arrives mid-computation: waits instead of recomputing
+        first.join()
+        assert results == [42, 42] and len(calls) == 1
+
+    def test_persisted_results_survive_a_restart_but_not_a_data_change(self, tmp_path) -> None:
+        import os
+
+        from soccer.dashboard.data import _cached_until_data_changes
+
+        db = tmp_path / "store.db"
+        db.write_text("v1")
+        calls: list[int] = []
+
+        def make():  # a fresh decorator = a fresh process's empty in-memory cache
+            @_cached_until_data_changes(persist=True)
+            def expensive(path, division: str) -> dict[str, int]:
+                calls.append(1)
+                return {"value": len(calls)}
+
+            return expensive
+
+        assert make()(db, "E0") == {"value": 1}
+        assert make()(db, "E0") == {"value": 1}  # read back from disk, not recomputed
+        assert len(calls) == 1
+        assert list((tmp_path / "cache").glob("expensive-*.pkl"))
+        stat = db.stat()
+        os.utime(db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        assert make()(db, "E0") == {"value": 2}  # the data changed: computed afresh
+
+    def test_a_corrupt_cache_file_is_recomputed(self, tmp_path) -> None:
+        from soccer.dashboard.data import _cached_until_data_changes
+
+        db = tmp_path / "store.db"
+        db.write_text("v1")
+
+        def make():
+            @_cached_until_data_changes(persist=True)
+            def expensive(path) -> str:
+                return "fresh"
+
+            return expensive
+
+        assert make()(db) == "fresh"
+        for f in (tmp_path / "cache").glob("*.pkl"):
+            f.write_bytes(b"not a pickle")
+        assert make()(db) == "fresh"
+
+
+def test_scorecard_is_computed_in_the_background_not_on_the_page(tmp_path, monkeypatch) -> None:
+    from soccer.dashboard import data as dash
+
+    settings = _settings(tmp_path)
+    seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea"])
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    @dash._cached_until_data_changes()
+    def fake_report(path, division: str, *, n_seasons: int = 6):
+        calls.append(1)
+        started.set()
+        release.wait(5)
+        return "report"
+
+    monkeypatch.setattr(dash, "forecast_report", fake_report)
+    ready, report = dash.forecast_report_if_ready(settings.analytics_db, "E0")
+    assert (ready, report) == (False, None)  # returned at once; computing in the background
+    assert started.wait(2)
+    assert dash.forecast_report_if_ready(settings.analytics_db, "E0") == (False, None)
+    release.set()
+    for _ in range(50):
+        ready, report = dash.forecast_report_if_ready(settings.analytics_db, "E0")
+        if ready:
+            break
+        time.sleep(0.05)
+    assert (ready, report) == (True, "report")
+    assert len(calls) == 1  # one background job, however many page visits asked
+
 
 class TestLiveAutoRefresh:
     @pytest.fixture(autouse=True)

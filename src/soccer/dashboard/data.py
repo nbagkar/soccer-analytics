@@ -10,7 +10,11 @@ job). A view that cannot be filled by the data we actually have is simply not pr
 from __future__ import annotations
 
 import functools
+import hashlib
 import itertools
+import logging
+import pickle
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -143,21 +147,41 @@ def live_snapshot(
     return LiveSnapshot(kpis=kpis, matches=shown, competition_counts=competition_counts, mode=mode)
 
 
+logger = logging.getLogger(__name__)
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 
-def _cached_until_data_changes(maxsize: int = 32) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+@functools.cache
+def _code_version() -> float:
+    """Newest modification time of the package's own source: part of every on-disk cache key,
+    so a code change can never be answered from a result computed by older code."""
+    root = Path(__file__).resolve().parents[1]
+    return max((f.stat().st_mtime for f in root.rglob("*.py")), default=0.0)
+
+
+def _cached_until_data_changes(
+    maxsize: int = 32, *, persist: bool = False
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Memoize an expensive read until any database file it was given changes.
 
     The pages cache through Streamlit (keyed on the DB's mtime); the assistant calls these
     same functions directly and was recomputing a walk-forward evaluation (~7s) or a Monte
     Carlo season (~2s) on every question. The key adds the mtime of every Path argument,
     so a data refresh invalidates it exactly as it does the pages' caches.
+
+    Concurrent callers of the same key wait for the one computation in flight: the startup
+    warm-up thread and the first page visit used to compute the same thing twice, side by
+    side, which is how the first Predictions visit took ~30s. `persist=True` also keeps the
+    result on disk (`cache/` beside the first database argument), keyed by the same mtimes
+    plus the code version, so a restart with unchanged data is a file read, not a recompute.
     """
 
     def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
         cache: OrderedDict[tuple[Any, ...], _R] = OrderedDict()
+        guard = threading.Lock()
+        in_flight: dict[tuple[Any, ...], threading.Lock] = {}
 
         def mtime(p: Path) -> float:
             try:
@@ -165,21 +189,80 @@ def _cached_until_data_changes(maxsize: int = 32) -> Callable[[Callable[_P, _R]]
             except OSError:
                 return 0.0
 
+        def disk_path(key: tuple[Any, ...], paths: list[Path]) -> Path:
+            digest = hashlib.sha256(repr((key, _code_version())).encode()).hexdigest()[:24]
+            return paths[0].parent / "cache" / f"{fn.__name__}-{digest}.pkl"
+
+        def load(path: Path) -> tuple[bool, Any]:
+            try:
+                with path.open("rb") as fh:
+                    return True, pickle.load(fh)  # our own file, written below
+            except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ImportError):
+                return False, None
+
+        def save(path: Path, result: Any) -> None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                with tmp.open("wb") as fh:
+                    pickle.dump(result, fh)
+                tmp.replace(path)
+                # keep only the newest few results per function
+                old = sorted(path.parent.glob(f"{fn.__name__}-*.pkl"), key=mtime)[:-4]
+                for stale in old:
+                    stale.unlink(missing_ok=True)
+            except (OSError, pickle.PicklingError, TypeError) as exc:
+                logger.warning("could not persist %s: %s", fn.__name__, exc)
+
+        def key_of(args: Any, kwargs: Any) -> tuple[tuple[Any, ...], list[Path]]:
+            values = [*args, *kwargs.values()]
+            paths = [Path(v) for v in values if isinstance(v, Path)]
+            stamps = tuple(mtime(v) for v in paths)
+            return (tuple(str(a) for a in args), tuple(sorted(kwargs.items())), stamps), paths
+
+        def peek(*args: Any, **kwargs: Any) -> tuple[bool, Any]:
+            """(True, result) if already computed -- in memory or on disk -- else (False,
+            None). Never computes, so a page can show a slow result only once it is ready."""
+            key, paths = key_of(args, kwargs)
+            with guard:
+                if key in cache:
+                    return True, cache[key]
+            if persist and paths:
+                found, stored = load(disk_path(key, paths))
+                if found:
+                    with guard:
+                        cache[key] = stored
+                    return True, stored
+            return False, None
+
         @functools.wraps(fn)
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-            values = [*args, *kwargs.values()]
-            stamps = tuple(mtime(v) for v in values if isinstance(v, Path))
-            key = (tuple(str(a) for a in args), tuple(sorted(kwargs.items())), stamps)
-            if key in cache:
-                cache.move_to_end(key)
-                return cache[key]
-            result = fn(*args, **kwargs)
-            cache[key] = result
-            if len(cache) > maxsize:
-                cache.popitem(last=False)
-            return result
+            key, paths = key_of(args, kwargs)
+            with guard:
+                if key in cache:
+                    cache.move_to_end(key)
+                    return cache[key]
+                lock = in_flight.setdefault(key, threading.Lock())
+            with lock:  # a second caller waits here for the first one's result
+                with guard:
+                    if key in cache:
+                        return cache[key]
+                found, stored = load(disk_path(key, paths)) if persist and paths else (False, None)
+                if found:
+                    result = cast(_R, stored)
+                else:
+                    result = fn(*args, **kwargs)
+                    if persist and paths:
+                        save(disk_path(key, paths), result)
+                with guard:
+                    cache[key] = result
+                    in_flight.pop(key, None)
+                    if len(cache) > maxsize:
+                        cache.popitem(last=False)
+                return result
 
         wrapper.cache_clear = cache.clear  # type: ignore[attr-defined]
+        wrapper.peek = peek  # type: ignore[attr-defined]
         return wrapper
 
     return decorate
@@ -1644,7 +1727,44 @@ def season_backtest(
     )
 
 
-@_cached_until_data_changes()
+_scorecards_running: set[tuple[str, str, int]] = set()
+_scorecards_lock = threading.Lock()
+
+
+def forecast_report_if_ready(
+    analytics_db: Path, division: str, *, n_seasons: int = 6
+) -> tuple[bool, ForecastReport | None]:
+    """The scorecard if it is already computed; otherwise start computing it in the
+    background and return (False, None) at once.
+
+    The walk-forward refits the model before every match (~18s for six Premier League
+    seasons), and Streamlit runs every tab's body on every visit -- so a blocking scorecard
+    made the whole Predictions page wait for it, even for someone who only wanted the
+    fixtures. The page now shows it once ready.
+    """
+    ready, report = forecast_report.peek(analytics_db, division, n_seasons=n_seasons)  # type: ignore[attr-defined]
+    if ready:
+        return True, report
+    job = (str(analytics_db), division, n_seasons)
+    with _scorecards_lock:
+        if job in _scorecards_running:
+            return False, None
+        _scorecards_running.add(job)
+
+    def run() -> None:
+        try:
+            forecast_report(analytics_db, division, n_seasons=n_seasons)
+        except Exception:  # shown as "not ready"; the next visit retries
+            logger.exception("scorecard for %s failed", division)
+        finally:
+            with _scorecards_lock:
+                _scorecards_running.discard(job)
+
+    threading.Thread(target=run, name=f"scorecard-{division}", daemon=True).start()
+    return False, None
+
+
+@_cached_until_data_changes(persist=True)
 def forecast_report(
     analytics_db: Path, division: str, *, n_seasons: int = 6, model: str = "shots"
 ) -> ForecastReport | None:
@@ -2278,7 +2398,7 @@ def cup_model(analytics_db: Path, division: str = "UCL") -> tuple[Any, dict[str,
     return fit_cross_league(matches, ridge=CUP_RIDGE), current
 
 
-@_cached_until_data_changes()
+@_cached_until_data_changes(persist=True)
 def fixture_forecasts(
     live_db: Path, analytics_db: Path, *, limit: int = 60
 ) -> list[FixtureForecast]:

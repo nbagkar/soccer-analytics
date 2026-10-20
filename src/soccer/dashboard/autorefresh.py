@@ -83,8 +83,10 @@ def _run(settings: Settings) -> None:
 def warm_caches(settings: Settings) -> None:
     """Compute the Predictions page's heaviest reads before anyone opens it.
 
-    Its first visit after a refresh cost ~12s (fixture forecasts ~3s, the season projection
-    ~1s, the scorecard's walk-forward ~8s). These are memoized on the data's mtime
+    Its first visit after a refresh cost ~26s by 2026-10 (fixture forecasts ~8s, the season
+    projection ~1s, the scorecard's walk-forward ~18s); the page no longer waits for the
+    scorecard (`forecast_report_if_ready`), and both slow results persist to disk. These are
+    memoized on the data's mtime
     (data._cached_until_data_changes) and called here with exactly the arguments the page
     uses, so the page's own first call is a cache hit. Premier League only -- the page's
     default league -- to keep the background work bounded.
