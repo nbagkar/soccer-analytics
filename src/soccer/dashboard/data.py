@@ -1941,6 +1941,11 @@ COMPETITION_TO_DIVISION = {
     "Campeonato Brasileiro Serie A": "BRA",
 }
 
+# Every live-store competition whose results we keep, -> its results division: the leagues
+# above plus the cup stored under "UCL". For freshness checks only -- forecasting must not
+# treat the cup as a league (fixture_forecasts has its own cup path).
+RESULTS_COMPETITIONS = {**COMPETITION_TO_DIVISION, "UEFA Champions League": "UCL"}
+
 # football-data.org (verbose) fixture names -> football-data.co.uk (terse) model names,
 # for the handful of clubs whose short names are not a token-subset of the verbose ones
 # ("Athletic Club" vs "Ath Bilbao"). Keyed and valued by normalized name; only entries

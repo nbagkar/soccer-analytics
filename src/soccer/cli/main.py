@@ -165,7 +165,8 @@ def check() -> None:
 
     Exits non-zero on any error, so it can gate a script or scheduled job.
     """
-    from soccer.storage.integrity import ERROR, run_checks
+    from soccer.dashboard.data import RESULTS_COMPETITIONS
+    from soccer.storage.integrity import ERROR, behind_fixtures, run_checks
 
     settings = get_settings()
     if not settings.analytics_db.exists():
@@ -173,6 +174,9 @@ def check() -> None:
         raise typer.Exit(code=1)
     with AnalyticsDB(settings.analytics_db) as adb:
         findings = run_checks(adb)
+        if settings.live_db.exists():
+            with LiveDB(settings.live_db) as db:
+                findings += behind_fixtures(adb, db, RESULTS_COMPETITIONS)
     if not findings:
         console.print("[green]All data checks passed.[/green]")
         return

@@ -172,6 +172,76 @@ class TestRefreshResults:
     def test_no_store_yet_is_a_quiet_skip(self, tmp_path) -> None:
         assert "skipped" in actions.refresh_results(_settings(tmp_path))
 
+    def test_the_champions_league_is_refreshed_from_its_own_source(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Asking football-data.co.uk for "UCL" quietly found nothing, so the cup froze. It now
+        # goes to the cup loader -- the current season only -- and never to the CSV source.
+        settings = _settings(tmp_path, football_data_org_token="test-token")
+        seed_results(settings.analytics_db, division="E0", teams=["Arsenal", "Chelsea"])
+        seed_results(settings.analytics_db, division="UCL", teams=["Arsenal", "Inter"])
+        _FakeSource.calls = []
+        monkeypatch.setattr(actions, "FootballDataCoUk", _FakeSource)
+        asked: list[tuple[int, ...] | None] = []
+
+        def fake_cup(settings, *, seasons=None, on_progress=None):
+            asked.append(seasons)
+            return "Loaded 2 Champions League matches (division UCL)."
+
+        monkeypatch.setattr(actions, "load_champions_league", fake_cup)
+        message = actions.refresh_results(settings)
+        assert [c.split("/")[1] for c in _FakeSource.calls] == ["E0"]
+        assert asked == [actions.champions_league_seasons(1)]
+        assert "Champions League" in message
+
+    def test_a_cup_failure_does_not_sink_the_league_refresh(self, tmp_path, monkeypatch) -> None:
+        settings = _settings(tmp_path, football_data_org_token="test-token")
+        seed_results(settings.analytics_db, division="UCL", teams=["Arsenal", "Inter"])
+        monkeypatch.setattr(actions, "FootballDataCoUk", _FakeSource)
+
+        def broken(settings, *, seasons=None, on_progress=None):
+            raise RuntimeError("rate limited")
+
+        monkeypatch.setattr(actions, "load_champions_league", broken)
+        assert "Champions League refresh failed" in actions.refresh_results(settings)
+
+
+def test_champions_league_seasons_follow_the_calendar() -> None:
+    assert actions.champions_league_seasons(3, date(2026, 10, 20)) == (2024, 2025, 2026)
+    assert actions.champions_league_seasons(1, date(2027, 3, 1)) == (2026,)  # same season
+
+
+class TestBehindFixtures:
+    def test_flags_a_division_missing_played_fixtures(self, tmp_path) -> None:
+        from soccer.domain.match_state import MatchStatus
+        from soccer.storage.analytics_db import AnalyticsDB
+        from soccer.storage.integrity import behind_fixtures
+        from tests.test_dashboard_data import add_match
+
+        settings = _settings(tmp_path)
+        seed_results(settings.analytics_db, division="UCL", teams=["Arsenal", "Inter"])
+        with AnalyticsDB(settings.analytics_db) as adb:
+            latest = adb.latest_result_date("UCL")
+        assert latest is not None
+        db = LiveDB(settings.live_db)
+        kickoff = datetime.combine(latest + timedelta(days=30), datetime.min.time(), UTC)
+        add_match(
+            db,
+            match_id="1",
+            home="Real Madrid",
+            away="Inter",
+            competition="UEFA Champions League",
+            status=MatchStatus.FINISHED,
+            observed_at=kickoff,
+        )
+        competitions = {"UEFA Champions League": "UCL", "Premier League": "E0"}
+        with AnalyticsDB(settings.analytics_db) as adb:
+            late = behind_fixtures(adb, db, competitions, now=kickoff + timedelta(days=10))
+            early = behind_fixtures(adb, db, competitions, now=kickoff + timedelta(days=1))
+        db.close()
+        assert [(f.division, f.check) for f in late] == [("UCL", "behind")]
+        assert early == []  # inside the grace period: the source may simply not have it yet
+
 
 @pytest.fixture
 def fresh_autorefresh(monkeypatch):

@@ -12,11 +12,13 @@ only a few end-of-season games) -- worth a look, not a stop.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 from soccer.sources.football_data_co_uk import division_name, season_sort_key
 from soccer.storage.analytics_db import AnalyticsDB
+from soccer.storage.live_db import LiveDB
 
 ERROR = "error"
 WARNING = "warning"
@@ -106,6 +108,48 @@ def run_checks(adb: AnalyticsDB, *, today: date | None = None) -> list[Finding]:
         findings.append(Finding(ERROR, "self match", division, f"{home} v {home} on {d}"))
 
     return sorted(findings, key=lambda f: (f.level != ERROR, f.division, f.check))
+
+
+# football-data.co.uk usually publishes a round within a day or two; give it this long before
+# calling a division behind.
+BEHIND_GRACE = timedelta(days=3)
+
+
+def behind_fixtures(
+    adb: AnalyticsDB,
+    live_db: LiveDB,
+    competitions: Mapping[str, str],
+    *,
+    now: datetime | None = None,
+) -> list[Finding]:
+    """Divisions whose results are missing matches the fixture list says were played.
+
+    `competitions` maps a live-store competition name to its results division. A division
+    is behind when fixtures of its competition kicked off after its newest stored result and
+    more than BEHIND_GRACE ago -- the fixture list, not a day count, so an international
+    break is not a false alarm. Caught the Champions League frozen at 10 Sep for five weeks
+    while every other check passed.
+    """
+    from soccer.domain.freshness import played_since
+
+    now = now or datetime.now(UTC)
+    findings: list[Finding] = []
+    for competition, division in sorted(competitions.items(), key=lambda kv: kv[1]):
+        latest = adb.latest_result_date(division)
+        if latest is None:
+            continue  # not loaded: nothing to be behind
+        missing = played_since(live_db, competition, latest, now - BEHIND_GRACE)
+        if missing:
+            findings.append(
+                Finding(
+                    WARNING,
+                    "behind",
+                    division,
+                    f"{division_name(division)}: {missing} {competition} match(es) played since "
+                    f"its newest stored result ({latest}) are not in the results",
+                )
+            )
+    return findings
 
 
 def _team_games(adb: AnalyticsDB, division: str, season: str) -> dict[str, int]:

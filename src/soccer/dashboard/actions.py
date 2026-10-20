@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from soccer.domain.availability import PlayerAvailability
 from soccer.domain.freshness import FIXTURES, INJURIES, LIVE, RESULTS, SQUADS, RefreshLog
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
+    CUP_DIVISIONS,
     NEW_LEAGUE_CODES,
     FootballDataCoUk,
     MatchResult,
@@ -238,7 +239,9 @@ def refresh_results(settings: Settings) -> str:
         if not divisions:
             return "skipped (no leagues loaded)"
         season = current_season_code(datetime.now(UTC).date())
-        european = [d for d in divisions if d not in NEW_LEAGUE_CODES]
+        # Cups are not football-data.co.uk files: asking it for "UCL" quietly found nothing,
+        # so Champions League results froze at whatever the manual backfill last loaded.
+        european = [d for d in divisions if d not in NEW_LEAGUE_CODES and d not in CUP_DIVISIONS]
         countries = [d for d in divisions if d in NEW_LEAGUE_CODES]
         slices, total = 0, 0
         with FootballDataCoUk(raw) as source, AnalyticsDB(settings.analytics_db) as adb:
@@ -254,9 +257,18 @@ def refresh_results(settings: Settings) -> str:
                     adb.load_results(results)
                     slices += 1
                     total += len(results)
+        cup = ""
+        if "UCL" in divisions and settings.football_data_org_token:
+            # One request for the season in play; a cup failure must not sink the leagues.
+            try:
+                cup = "; " + load_champions_league(settings, seasons=champions_league_seasons(1))
+            except Exception as exc:  # network, rate limit, schema -- reported, not raised
+                cup = f"; Champions League refresh failed: {type(exc).__name__}: {exc}"
         if not slices:
-            return f"no new results (European season {season} not started, no in-season extras)"
-        return f"refreshed {total} results across {slices} league slice(s) (season {season})"
+            return (
+                f"no new results (European season {season} not started, no in-season extras)" + cup
+            )
+        return f"refreshed {total} results across {slices} league slice(s) (season {season})" + cup
 
     return _logged(settings, RESULTS, run)
 
@@ -331,7 +343,16 @@ def load_full_history(
 # football-data.org's free tier serves only recent seasons of the Champions League (older
 # ones 403); its competition endpoint returns a whole season, sidestepping the 10-day
 # /matches cap. Europa and Conference League are above the free tier -- not reachable at $0.
-CHAMPIONS_LEAGUE_SEASONS = (2023, 2024, 2025)  # start years -> 2023/24, 2024/25, 2025/26
+def champions_league_seasons(n: int = 3, today: date | None = None) -> tuple[int, ...]:
+    """Start years of the `n` most recent Champions League seasons, newest last.
+
+    Computed, not a frozen tuple: the old (2023, 2024, 2025) never asked for 2026/27, so
+    even the manual backfill could not fetch the season in play. A season the free tier no
+    longer serves 403s and is skipped.
+    """
+    today = today or datetime.now(UTC).date()
+    start = today.year if today.month >= 7 else today.year - 1
+    return tuple(range(start - n + 1, start + 1))
 
 
 def _fdorg_result(
@@ -414,7 +435,7 @@ def _canonical_registry(adb: AnalyticsDB, division: str | None = None) -> dict[s
 def load_champions_league(
     settings: Settings,
     *,
-    seasons: tuple[int, ...] = CHAMPIONS_LEAGUE_SEASONS,
+    seasons: tuple[int, ...] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Backfill Champions League results (football-data.org) into the analytics store.
@@ -423,6 +444,7 @@ def load_champions_league(
     skipped. Stored under division "UCL" so head-to-head and records pick them up without
     disturbing the domestic-league tables.
     """
+    seasons = seasons or champions_league_seasons()
     token = settings.football_data_org_token
     if not token:
         return (
