@@ -299,6 +299,8 @@ class AnalyticsSnapshot:
     power: list[EloRating]
     title_odds: list[TeamProjection]
     names: dict[str, str]
+    played: int = 0  # matches already banked in the table the title odds start from
+    total: int = 0  # matches in the full season
 
 
 def analytics_available(analytics_db: Path) -> list[tuple[str, str, int]]:
@@ -310,12 +312,15 @@ def analytics_available(analytics_db: Path) -> list[tuple[str, str, int]]:
 
 
 def analytics_snapshot(
-    analytics_db: Path, season: str, division: str, *, sims: int = 3000, seed: int = 1
+    analytics_db: Path, season: str, division: str, *, sims: int = 10_000, seed: int = 1
 ) -> AnalyticsSnapshot | None:
     """League table, Elo ranking and title odds for one (season, division).
 
-    Opens its own connection so the caller can cache on plain (path, season, division)
-    arguments. Returns None if that slice has no results.
+    The title odds are `season_briefing`'s -- the backtested projection from the current
+    table that the Season tab and the assistant use -- so the app shows one number per club.
+    They used to be a separate replay of the whole season from zero points, which put Arsenal
+    on 29% here and 42% on the Season tab at the same moment. Opens its own connection so the
+    caller can cache on plain (path, season, division) arguments. None if no results.
     """
     with AnalyticsDB(analytics_db) as adb:
         available = adb.seasons_loaded()
@@ -327,14 +332,12 @@ def analytics_snapshot(
 
     names = {o.home_norm: o.home for o in outcomes} | {o.away_norm: o.away for o in outcomes}
     power = power_ranking(outcomes)
-    fixtures = [(o.home_norm, o.away_norm) for o in outcomes]
-    projections = simulate_season(
-        _forecast_fit(outcomes),
-        fixtures,
-        teams=list(names),
-        n_sims=sims,
-        seed=seed,
-    ).projections
+    briefing = season_briefing(analytics_db, season, division, n_sims=sims, seed=seed)
+    projections = (
+        sorted(briefing.projections, key=lambda p: (-p.title_pct, p.avg_position))
+        if briefing
+        else []
+    )
 
     return AnalyticsSnapshot(
         season=season,
@@ -344,6 +347,8 @@ def analytics_snapshot(
         power=power,
         title_odds=projections,
         names=names,
+        played=briefing.played if briefing else 0,
+        total=briefing.total if briefing else 0,
     )
 
 

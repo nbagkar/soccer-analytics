@@ -986,7 +986,13 @@ def _render_analytics(
         st.markdown(_html_table(rows), unsafe_allow_html=True)
 
     with right:
-        st.markdown("**Title odds** (Monte Carlo, full-season replay)")
+        if snap.total and snap.played >= snap.total:
+            st.markdown("**Title** (season complete)")
+        else:
+            st.markdown(
+                f"**Title odds** (from the current table, {snap.played} of {snap.total} "
+                "matches played)"
+            )
         contenders = [p for p in snap.title_odds if p.title_pct >= 0.005][:8]
         if contenders:
             _render_title_odds(contenders, snap.names)

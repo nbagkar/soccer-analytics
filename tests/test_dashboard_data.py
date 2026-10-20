@@ -407,6 +407,31 @@ class TestAnalyticsSnapshot:
         assert sum(p.title_pct for p in snap.title_odds) == pytest.approx(1.0, abs=1e-6)
         assert snap.title_odds[0].team == "arsenal"
 
+    def test_title_odds_are_the_season_tabs_odds(self, tmp_path) -> None:
+        # One number per club across the app: the League tables panel used to replay the
+        # whole season from zero (Arsenal 29%) while the Season tab started from the table
+        # (Arsenal 42%).
+        from soccer.dashboard.data import analytics_snapshot, season_briefing
+
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford"]
+        seed_results(path, division="E0", teams=teams, season="2526")
+        seed_results(path, division="E0", teams=teams, season="2627")
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        with AnalyticsDB(path) as adb:  # leave 2627 unfinished
+            adb._con.execute(
+                "DELETE FROM results WHERE season='2627' AND match_date > DATE '2026-01-04'"
+            )
+        snap = analytics_snapshot(path, "2627", "E0", sims=800, seed=3)
+        briefing = season_briefing(path, "2627", "E0", n_sims=800, seed=3)
+        assert snap is not None and briefing is not None
+        assert {p.team: p.title_pct for p in snap.title_odds} == {
+            p.team: p.title_pct for p in briefing.projections
+        }
+        assert (snap.played, snap.total) == (briefing.played, briefing.total)
+        assert 0 < snap.played < snap.total
+
     def test_missing_slice_returns_none(self, tmp_path) -> None:
         from soccer.dashboard.data import analytics_snapshot
 
