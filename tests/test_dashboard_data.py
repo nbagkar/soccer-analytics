@@ -2102,3 +2102,17 @@ class TestPreviousSeason:
 
         available = [("2526", "E0", 380), ("2425", "SP1", 380)]
         assert previous_season(available, "E0", "2526") is None
+
+
+class TestDefaultLeague:
+    def test_pickers_open_on_the_premier_league(self) -> None:
+        pytest.importorskip("streamlit")
+        from soccer.dashboard.app import _default_index
+
+        assert _default_index(["2. Bundesliga", "La Liga", "Premier League"]) == 2
+        assert _default_index(["All competitions", "La Liga", "Premier League"]) == 2
+        assert _default_index(["La Liga (34)", "Premier League (380)"]) == 1
+        assert _default_index(["All competitions", "Premier League  (12)"]) == 1
+        # Not a prefix match on another league, and no Premier League -> first option.
+        assert _default_index(["Premier League 2", "Serie A"]) == 0
+        assert _default_index(["La Liga", "Serie A"]) == 0

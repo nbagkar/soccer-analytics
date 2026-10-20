@@ -786,6 +786,19 @@ def _on_tab_change(page: str, key: str) -> None:
     _track(usage.TAB, f"{page}/{st.session_state[key]}")
 
 
+DEFAULT_LEAGUE = "Premier League"
+
+
+def _default_index(labels: list[str]) -> int:
+    """Where the Premier League sits in a picker's options -- every league/competition picker
+    opens on it -- matching a bare name or one with a count suffix ("Premier League (380)")."""
+    for i, label in enumerate(labels):
+        rest = label.removeprefix(DEFAULT_LEAGUE)
+        if rest != label and (not rest or rest.lstrip().startswith("(")):
+            return i
+    return 0
+
+
 @overload
 def _league_season_pickers(
     available: list[tuple[str, str, int]],
@@ -832,7 +845,10 @@ def _league_season_pickers(
         entry[1].append(season)
 
     cols = st.columns(2 + extra)
-    league = cols[0].selectbox("League", sorted(by_league), key=f"{key}_league")
+    leagues = sorted(by_league)
+    league = cols[0].selectbox(
+        "League", leagues, index=_default_index(leagues), key=f"{key}_league"
+    )
     if visible:
         _track_view(f"league:{key}", usage.LEAGUE, league, key)
     division, seasons = by_league[league]
@@ -2175,8 +2191,9 @@ def _render_player_profile(
 def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
     comps = sorted({f.competition for f in fixtures})
     if len(comps) > 1:
+        options = ["All competitions", *comps]
         choice = st.selectbox(
-            "Competition", ["All competitions", *comps], key="fixtures_competition"
+            "Competition", options, index=_default_index(options), key="fixtures_competition"
         )
         if choice != "All competitions":
             fixtures = [f for f in fixtures if f.competition == choice]
@@ -2374,7 +2391,10 @@ def _render_match_analysis(settings: Settings) -> None:
     fcols = st.columns([1, 1, 2])
     if len(comps) > 1:
         clabels = {f"{c} ({comp_counts[c]})": c for c in comps}
-        chosen = clabels[fcols[0].selectbox("Competition", list(clabels), key="ma_comp")]
+        options = list(clabels)
+        chosen = clabels[
+            fcols[0].selectbox("Competition", options, index=_default_index(options), key="ma_comp")
+        ]
         matches = [m for m in matches if m[2] == chosen]
     season_counts = Counter(s for _mid, _lbl, _c, s in matches if s)
     seasons = sorted(season_counts, key=lambda s: (season_counts[s], s), reverse=True)
@@ -2411,7 +2431,10 @@ def _render_players_page(settings: Settings) -> None:
     slot = 0
     if len(comps) > 1:
         clabels = {"All competitions": None} | {f"{c}  ({n})": c for c, n in comps}
-        comp_choice = row[slot].selectbox("Competition", list(clabels), key="pl_comp")
+        options = list(clabels)
+        comp_choice = row[slot].selectbox(
+            "Competition", options, index=_default_index(options), key="pl_comp"
+        )
         slot += 1
         competition = clabels[comp_choice]
         if competition:
@@ -2643,9 +2666,7 @@ def main() -> None:
                 # The projection is always for the UPCOMING season, so pick a league only.
                 by_league = {division_name(d): d for _s, d, _n in available}
                 league_names = sorted(by_league)
-                default_idx = (
-                    league_names.index("Premier League") if "Premier League" in league_names else 0
-                )
+                default_idx = _default_index(league_names)
                 league = st.selectbox(
                     "League", league_names, index=default_idx, key="pred_season_league"
                 )
@@ -2705,9 +2726,7 @@ def main() -> None:
                 )
                 by_league = {division_name(d): d for _s, d, _n in available}
                 league_names = sorted(by_league)
-                default_idx = (
-                    league_names.index("Premier League") if "Premier League" in league_names else 0
-                )
+                default_idx = _default_index(league_names)
                 league = st.selectbox("League", league_names, index=default_idx, key="card_league")
                 if card_tab.open:
                     _track_view("league:card", usage.LEAGUE, league, "card")
