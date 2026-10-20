@@ -486,6 +486,20 @@ class TestSeasonBriefing:
         favourite = max(briefing.projections, key=lambda p: p.title_pct)
         assert briefing.names[favourite.team] == "Arsenal"
 
+    def test_relegation_follows_the_division(self, tmp_path) -> None:
+        # League Two relegates 2, League One 4, MLS nobody -- not a flat bottom three. On a
+        # finished season the projection is the final table, so exactly that many go down.
+        from soccer.dashboard.data import season_briefing
+
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford", "Burnley", "Luton"]
+        for division, places in (("E3", 2), ("E2", 4), ("USA", 0)):
+            seed_results(path, division=division, teams=teams)
+            briefing = season_briefing(path, "2526", division, n_sims=200, seed=1)
+            assert briefing is not None and briefing.relegation == places
+            down = sorted(briefing.names[p.team] for p in briefing.projections if p.relegation_pct)
+            assert down == sorted(teams[len(teams) - places :])
+
     def test_none_for_unknown_slice(self, tmp_path) -> None:
         from soccer.dashboard.data import season_briefing
 
@@ -2122,3 +2136,18 @@ class TestDefaultLeague:
         # Not a prefix match on another league, and no Premier League -> first option.
         assert _default_index(["Premier League 2", "Serie A"]) == 0
         assert _default_index(["La Liga", "Serie A"]) == 0
+
+
+class TestRelegationPlaces:
+    def test_known_divisions_and_default(self) -> None:
+        from soccer.sources.football_data_co_uk import relegation_places
+
+        assert [relegation_places(d) for d in ("E0", "E2", "E3", "D1", "SP2", "USA")] == [
+            3,
+            4,
+            2,
+            2,
+            4,
+            0,
+        ]
+        assert relegation_places("B1") == 3  # split-format league: the bottom-three default

@@ -902,6 +902,22 @@ class TestConfidentWrongAnswers:
         pcts = [r["Relegation %"] for r in reply.table]
         assert pcts == sorted(pcts, reverse=True)
 
+    def test_relegation_places_follow_the_league(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        teams = ["Arsenal", "Chelsea", "Fulham", "Brentford", "Burnley", "Luton"]
+        seed_results(path, division="E3", teams=teams)  # League Two: bottom two go down
+        zone = answer("which teams are in the relegation zone", path)
+        assert "bottom 2" in zone.text and "**Burnley**" in zone.text and "**Luton**" in zone.text
+        assert "**Brentford**" not in zone.text  # 4th of 6: safe with two going down
+        odds = answer("who is going to get relegated", path)
+        assert {r["Team"] for r in odds.table if r["Relegation %"] == 100} == {"Burnley", "Luton"}
+
+    def test_no_relegation_league_says_so(self, tmp_path) -> None:
+        path = tmp_path / "analytics.duckdb"
+        seed_results(path, division="USA", teams=["Arsenal", "Chelsea", "Fulham", "Brentford"])
+        reply = answer("who is going to get relegated", path)
+        assert "no relegation" in reply.text and not reply.table
+
     def test_top_four_question_ranks_by_top_four(self, tmp_path) -> None:
         reply = answer("who will finish top four", _seed(tmp_path))
         assert "top 4:" in reply.text and "relegation" not in reply.text

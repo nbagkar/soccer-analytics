@@ -725,17 +725,18 @@ def _render_season(briefing: SeasonBriefing) -> None:
     fav = projs[0]
     drop = max(projs, key=lambda p: p.relegation_pct)
     tightest = min(projs, key=lambda p: abs(p.title_pct - 0.5))
-    k = st.columns(3)
+    k = st.columns(3 if briefing.relegation else 2)
     k[0].metric(
         "Title favourite", names.get(fav.team, fav.team), f"{fav.title_pct:.0%}", border=True
     )
-    k[1].metric(
-        "Most at risk",
-        names.get(drop.team, drop.team),
-        f"{drop.relegation_pct:.0%} down",
-        border=True,
-    )
-    k[2].metric(
+    if briefing.relegation:
+        k[1].metric(
+            "Most at risk",
+            names.get(drop.team, drop.team),
+            f"{drop.relegation_pct:.0%} down",
+            border=True,
+        )
+    k[-1].metric(
         "On the bubble",
         names.get(tightest.team, tightest.team),
         f"{tightest.title_pct:.0%} title",
@@ -753,6 +754,8 @@ def _render_season(briefing: SeasonBriefing) -> None:
             "Relegation %": [round(100 * p.relegation_pct, 1) for p in projs],
         }
     ).to_pandas()
+    if not briefing.relegation:  # MLS, Liga MX: nobody goes down
+        frame = frame.drop(columns="Relegation %")
 
     st.dataframe(
         frame,
@@ -768,11 +771,23 @@ def _render_season(briefing: SeasonBriefing) -> None:
                 f"Top {briefing.top_n} %", format="%.0f%%", min_value=0, max_value=100
             ),
             "Relegation %": st.column_config.ProgressColumn(
-                "Relegation %", format="%.0f%%", min_value=0, max_value=100
+                "Relegation %",
+                format="%.0f%%",
+                min_value=0,
+                max_value=100,
+                help=f"Finishing in the bottom {briefing.relegation} -- the places that go "
+                "straight down (play-off places not counted)",
             ),
         },
     )
-    st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
+    drop_note = (
+        f" Relegation = the bottom {briefing.relegation}, the places that go straight down."
+        if briefing.relegation
+        else " No relegation in this league."
+    )
+    st.caption(
+        "xPts = expected final points. Probabilities are Monte Carlo frequencies." + drop_note
+    )
 
 
 # Open the dashboard at ?notrack (automated checks, demos) and that session logs nothing --

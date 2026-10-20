@@ -26,6 +26,7 @@ from soccer.domain.names import normalize_name
 from soccer.sources.football_data_co_uk import (
     CUP_DIVISIONS,
     division_name,
+    relegation_places,
     season_label,
     season_sort_key,
 )
@@ -1555,10 +1556,11 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
                 behind = leader.expected_points - proj.expected_points
                 gap = f"{behind:.0f} behind {names.get(leader.team, leader.team)}"
             rank = by_points.index(proj) + 1
+            drop = f", **{proj.relegation_pct:.0%}** relegation" if briefing.relegation else ""
             return Reply(
                 f"**{name}** — {division_name(division)} "
                 f"{season_label(briefing.season)}: **{proj.title_pct:.0%}** to win the title, "
-                f"**{proj.top_pct:.0%}** top four, **{proj.relegation_pct:.0%}** relegation.\n\n"
+                f"**{proj.top_pct:.0%}** top four{drop}.\n\n"
                 f"- Projected **{proj.expected_points:.0f} pts** (range "
                 f"{proj.points_low:.0f}–{proj.points_high:.0f}), {_ordinal(rank)} — {gap}\n"
                 f"- Top four looks like about {fourth.expected_points:.0f} pts\n\n{basis}",
@@ -1568,6 +1570,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
     # Rank and headline by what was actually asked -- a relegation question answered with the
     # title favourites is a confident wrong answer, worse than none.
     if re.search(r"relegat|go(ing)? down|drop(ped)? down|bottom (three|3)|the drop", q):
+        if not briefing.relegation:
+            return Reply(f"There's no relegation from the {division_name(division)}.")
         focus, label = "relegation_pct", "relegation"
     elif re.search(r"top (four|4)|champions league (places|spots)", q):
         focus, label = "top_pct", "a top-four finish"
@@ -1581,8 +1585,8 @@ def _intent_title_odds(q: str, analytics_db: Path, live_db: Path | None) -> Repl
             "Pts range": f"{p.points_low:.0f}–{p.points_high:.0f}",
             "Title %": round(100 * p.title_pct, 1),
             "Top 4 %": round(100 * p.top_pct),
-            "Relegation %": round(100 * p.relegation_pct),
         }
+        | ({"Relegation %": round(100 * p.relegation_pct)} if briefing.relegation else {})
         for p in projs
     ]
     lead = ", ".join(
@@ -1697,9 +1701,13 @@ def _intent_standings(q: str, analytics_db: Path, live_db: Path | None) -> Reply
         return None
     named = _resolve_teams(q, index)
     if not named and re.search(r"relegation zone|drop zone|bottom (three|3)", q):
-        bottom = table[-3:]
+        places = relegation_places(division)
+        if places == 0:
+            return Reply(f"There's no relegation from the {division_name(division)}.")
+        bottom = table[-places:]
         return Reply(
-            f"**{division_name(division)} {season_label(season)} relegation zone:** "
+            f"**{division_name(division)} {season_label(season)} relegation zone** "
+            f"(bottom {places}): "
             + ", ".join(f"**{r.team}** ({r.points} pts)" for r in bottom)
             + ". That's the table as it stands; ask *who is going down?* for projected odds.",
             table=[

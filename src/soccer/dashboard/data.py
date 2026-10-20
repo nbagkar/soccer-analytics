@@ -43,6 +43,7 @@ from soccer.models.simulation import (
     standings,
 )
 from soccer.models.value import ValueReport
+from soccer.sources.football_data_co_uk import relegation_places
 from soccer.sources.registry import SOURCES, Capability, attributions, sources_for
 from soccer.storage.analytics_db import (
     AnalyticsDB,
@@ -744,10 +745,12 @@ def season_briefing(
     *,
     n_sims: int = 10_000,
     top_n: int = 4,
-    relegation: int = 3,
+    relegation: int | None = None,
     seed: int = 1,
 ) -> SeasonBriefing | None:
     """Project `season`'s final table from its current standings, using the recency-weighted model.
+
+    `relegation` defaults to the division's automatic relegation places (`relegation_places`).
 
     The points already banked stand; only the fixtures not yet played (of the double
     round-robin) are simulated, with the same multi-season rating model the single-match
@@ -766,6 +769,8 @@ def season_briefing(
         priors = _newcomer_priors(adb, division, last, teams) if last and anchor else {}
     if not anchor:
         return None
+    if relegation is None:
+        relegation = relegation_places(division)
 
     model, _promoted = _season_model(window, teams, priors)
     projections, played, total = _project_from_table(
@@ -823,7 +828,7 @@ def upcoming_season_briefing(
     *,
     n_sims: int = 10_000,
     top_n: int = 4,
-    relegation: int = 3,
+    relegation: int | None = None,
     seed: int = 1,
 ) -> tuple[SeasonBriefing, list[str]] | None:
     """Monte Carlo the UPCOMING season for a division from its real loaded fixtures.
@@ -857,6 +862,8 @@ def upcoming_season_briefing(
     if not window:
         return None
     assert anchor_season is not None  # window is only non-empty when anchor_season was truthy
+    if relegation is None:
+        relegation = relegation_places(division)
     model_names = {o.home_norm: o.home for o in window} | {o.away_norm: o.away for o in window}
 
     comps = {c for c, d in COMPETITION_TO_DIVISION.items() if d == division}
@@ -1724,6 +1731,7 @@ def season_backtest(
         checkpoints=checkpoints,
         history_seasons=FORECAST_SEASONS - 1,
         n_sims=n_sims,
+        relegation=relegation_places(division),
     )
 
 

@@ -24,6 +24,7 @@ from soccer.sources.errors import SourceUnavailableError
 from soccer.sources.football_data_co_uk import (
     FootballDataCoUk,
     division_name,
+    relegation_places,
     season_label,
     season_sort_key,
 )
@@ -1057,6 +1058,7 @@ def simulate(
         teams=list(names),
         n_sims=sims,
         top_n=top,
+        relegation=relegation_places(division),
         seed=seed,
     )
 

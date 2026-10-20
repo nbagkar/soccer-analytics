@@ -82,6 +82,50 @@ DIVISION_NAMES = {
 # kept out of domestic team resolution and league-title projections.
 CUP_DIVISIONS = frozenset({"UCL", "UEL", "UECL"})
 
+# Automatic relegation places per division under the current rules: the bottom N that go
+# straight down. Play-off and play-out places are not counted -- the season simulation doesn't
+# play them, so "relegation %" means finishing in the places that go down outright (2.
+# Bundesliga's 16th, say, is a play-off, not counted). 0 = no relegation (MLS, Liga MX).
+# Leagues not listed decide the drop after a split or by points averages (Belgium, Greece,
+# Austria, Denmark, Romania, Finland, Argentina), which the projection doesn't model; they
+# keep the bottom-three default as a rough stand-in.
+RELEGATION_PLACES = {
+    "E0": 3,
+    "E1": 3,
+    "E2": 4,
+    "E3": 2,
+    "SC0": 1,
+    "SC1": 1,
+    "SC2": 1,
+    "SC3": 1,
+    "D1": 2,
+    "D2": 2,
+    "I1": 3,
+    "I2": 3,
+    "SP1": 3,
+    "SP2": 4,
+    "F1": 2,
+    "F2": 2,
+    "N1": 2,
+    "P1": 2,
+    "T1": 3,
+    "BRA": 4,
+    "JPN": 3,
+    "POL": 3,
+    "CHN": 2,
+    "NOR": 2,
+    "SWE": 2,
+    "IRL": 1,
+    "USA": 0,
+    "MEX": 0,
+}
+DEFAULT_RELEGATION_PLACES = 3
+
+
+def relegation_places(code: str) -> int:
+    """How many clubs go straight down from a division (RELEGATION_PLACES)."""
+    return RELEGATION_PLACES.get(code, DEFAULT_RELEGATION_PLACES)
+
 
 def division_name(code: str) -> str:
     """Human league name for a division code, or the code itself if unmapped."""
