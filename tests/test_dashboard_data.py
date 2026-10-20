@@ -1893,11 +1893,14 @@ class TestAppSmoke:
             at = AppTest.from_file(app_path, default_timeout=120).run()
             assert not at.exception, f"Home (default) raised: {at.exception}"
 
-            # A Home call-to-action button (_go) navigates without a session_state error.
-            cta = [b for b in at.button if "assistant" in b.label.lower()]
-            if cta:
-                cta[0].click().run()
-                assert not at.exception, f"Home navigation raised: {at.exception}"
+            # Asking on Home hands the question to the assistant page, answered on arrival
+            # (this also exercises _go's navigation without a session_state error).
+            at.chat_input(key="home_ask").set_value("who is top of the premier league?").run()
+            assert not at.exception, f"Home ask raised: {at.exception}"
+            assert at.radio[0].value == "Ask a question"
+            said = [m.markdown[0].value for m in at.chat_message if m.markdown]
+            assert "who is top of the premier league?" in said
+            assert len(said) >= 3  # greeting, the question, and an answer
 
             # Live scores is archived (nav.ARCHIVED): no longer in the sidebar.
             assert "Live scores" not in at.radio[0].options
@@ -1967,10 +1970,13 @@ class TestAppSmoke:
                 ).fetchall()
             pages = [e["name"] for e in events if e["kind"] == "page"]
             asks = [e["name"] for e in events if e["kind"] == "ask"]
+            actions = [e["name"] for e in events if e["kind"] == "action"]
             assert pages[0] == "Home"
             assert {"Assistant", "Predictor", "Analysis"} <= set(pages)
             assert pages.count("Analysis") == 1  # the profile toggle rerun isn't a new visit
-            assert asks == ["standings", "team"]
+            # The Home question is logged as asked from Home, then answered like any other.
+            assert asks == ["standings", "standings", "team"]
+            assert actions == ["ask_from_home"]
         finally:
             config._settings = None
 

@@ -172,6 +172,7 @@ def _render_home(settings: Settings) -> None:
         "player stats. It sets itself up on first launch; top up any time below. "
         "**No terminal needed.**"
     )
+    _render_home_ask()
     c = st.columns(6)
     c[0].metric("Leagues", status["leagues"], border=True)
     c[1].metric("History matches", f"{status['history_matches']:,}", border=True)
@@ -183,9 +184,12 @@ def _render_home(settings: Settings) -> None:
     left, right = st.columns(2)
     with left, st.container(border=True):
         st.markdown("#### :material/rocket_launch: Start here")
-        if st.button("Ask the assistant", icon=":material/chat:", width="stretch", type="primary"):
-            _go("Assistant")
-        if st.button("See predictions & fixtures", icon=":material/insights:", width="stretch"):
+        if st.button(
+            "See predictions & fixtures",
+            icon=":material/insights:",
+            width="stretch",
+            type="primary",
+        ):
             _go("Predictor")
         if st.button(
             "How accurate are our predictions?", icon=":material/fact_check:", width="stretch"
@@ -220,6 +224,29 @@ def _render_home(settings: Settings) -> None:
         "Everything's loaded and ready — nothing to add. To pull in an extra league or "
         "more player data later, see **About & sources**."
     )
+
+
+HOME_EXAMPLES = (
+    "Who's top of the Premier League?",
+    "Arsenal vs Chelsea, who wins?",
+    "Who will win the title?",
+)
+
+
+def _render_home_ask() -> None:
+    """The assistant's input on Home, where people land -- the question is handed to the
+    Ask a question page, which answers it on arrival (as if typed there)."""
+    with st.container(border=True):
+        st.markdown("#### :material/chat: Ask anything")
+        prompt = st.chat_input("Ask about tables, forecasts, players, form…", key="home_ask")
+        with st.container(horizontal=True):
+            for example in HOME_EXAMPLES:
+                if st.button(example, key=f"home_ex_{example}", type="tertiary"):
+                    prompt = example
+    if prompt:
+        _track(usage.ACTION, "ask_from_home")
+        st.session_state._suggestion = prompt
+        _go("Assistant")
 
 
 def _render_data_manager(settings: Settings) -> None:

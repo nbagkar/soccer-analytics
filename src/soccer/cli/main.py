@@ -1557,7 +1557,7 @@ def usage(
     show("Tabs opened", "Opens", summary.for_kind(TAB), tab_labels)
     show("Leagues viewed", "Views", summary.for_kind(LEAGUE), {})
 
-    show("Data actions", "Runs", summary.for_kind(ACTION), {})
+    show("Actions", "Runs", summary.for_kind(ACTION), {})  # data top-ups, Home asks
 
     show("Assistant questions by intent", "Asked", summary.for_kind(ASK), {})
     unused_intents = summary.unused(ASK, [n for n in intent_names() if n != "fallback"])
