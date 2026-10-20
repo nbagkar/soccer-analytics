@@ -194,24 +194,24 @@ def _render_home(settings: Settings) -> None:
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
         if st.button("Update results", icon=":material/scoreboard:", width="stretch"):
-            usage.track(settings, usage.ACTION, "refresh_results")
+            _track(usage.ACTION, "refresh_results")
             with st.spinner("Fetching the latest results for every loaded league…"):
                 st.toast(actions.refresh_results(settings), icon="✅")
             _go("Home")
         if st.button("Update fixtures", icon=":material/event:", width="stretch"):
-            usage.track(settings, usage.ACTION, "update_fixtures")
+            _track(usage.ACTION, "update_fixtures")
             with st.spinner("Fetching upcoming fixtures…"):
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
             _cached_upcoming_season_briefing.clear()  # re-project on the new fixtures
             _go("Home")
         if st.button("Update squads", icon=":material/groups:", width="stretch"):
-            usage.track(settings, usage.ACTION, "update_squads")
+            _track(usage.ACTION, "update_squads")
             with st.spinner("Fetching club squads…"):
                 st.toast(actions.update_squads(settings), icon="✅")
             _go("Home")
         if st.button("Update injuries", icon=":material/personal_injury:", width="stretch"):
-            usage.track(settings, usage.ACTION, "update_availability")
+            _track(usage.ACTION, "update_availability")
             with st.spinner("Fetching team news…"):
                 st.toast(actions.update_availability(settings), icon="✅")
             _go("Home")
@@ -232,7 +232,7 @@ def _render_data_manager(settings: Settings) -> None:
     with st.expander("Add a league (results & forecasts)", icon=":material/add_circle:"):
         choice = st.selectbox("Which league?", list(actions.LEAGUE_CHOICES))
         if st.button("Download recent seasons", key="add_league"):
-            usage.track(settings, usage.ACTION, "add_league_history")
+            _track(usage.ACTION, "add_league_history")
             with st.spinner(f"Downloading {choice}…"):
                 st.success(actions.add_league_history(settings, actions.LEAGUE_CHOICES[choice]))
         st.caption(
@@ -240,7 +240,7 @@ def _render_data_manager(settings: Settings) -> None:
             f"(~{actions.FULL_HISTORY_SEASONS} seasons). Richer tables, forecasts and records."
         )
         if st.button("Load full history (all leagues)", key="add_full_history"):
-            usage.track(settings, usage.ACTION, "load_full_history")
+            _track(usage.ACTION, "load_full_history")
             bar = st.progress(0.0, "Starting…")
 
             def on_progress(d: int, t: int) -> None:
@@ -254,7 +254,7 @@ def _render_data_manager(settings: Settings) -> None:
             "head-to-head and records. Needs a free football-data.org token."
         )
         if st.button("Load Champions League", key="add_ucl"):
-            usage.track(settings, usage.ACTION, "load_champions_league")
+            _track(usage.ACTION, "load_champions_league")
             with st.spinner("Fetching Champions League results…"):
                 st.success(actions.load_champions_league(settings))
 
@@ -264,7 +264,7 @@ def _render_data_manager(settings: Settings) -> None:
             "required. Loading everything takes a few minutes."
         )
         if st.button("Load all player data", key="add_all_events"):
-            usage.track(settings, usage.ACTION, "load_all_events")
+            _track(usage.ACTION, "load_all_events")
             bar = st.progress(0.0, "Starting…")
 
             def on_progress(d: int, t: int) -> None:
@@ -275,7 +275,7 @@ def _render_data_manager(settings: Settings) -> None:
             st.success(msg)
         pack = st.selectbox("Or a single dataset", list(actions.EVENT_PACKS))
         if st.button("Load this one", key="add_events"):
-            usage.track(settings, usage.ACTION, "load_event_pack")
+            _track(usage.ACTION, "load_event_pack")
             comp_id, season_id, _n = actions.EVENT_PACKS[pack]
             bar = st.progress(0.0, "Starting…")
 
@@ -371,8 +371,7 @@ def _render_assistant(settings: Settings) -> None:
         st.session_state._chat_context = reply.context
         # Question text only for unanswered ones -- that's the unmet demand worth reading.
         intent = reply.intent or "unknown"
-        usage.track(
-            settings,
+        _track(
             usage.ASK,
             intent,
             prompt if intent == usage.FALLBACK_INTENT else None,
@@ -749,6 +748,44 @@ def _render_season(briefing: SeasonBriefing) -> None:
     st.caption("xPts = expected final points. Probabilities are Monte Carlo frequencies.")
 
 
+# Open the dashboard at ?notrack (automated checks, demos) and that session logs nothing --
+# so `soccer usage` counts real use only.
+NO_TRACK_PARAM = "notrack"
+
+
+def _session_id() -> str | None:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+    ctx = get_script_run_ctx()
+    return ctx.session_id if ctx else None
+
+
+def _track(kind: str, name: str, detail: str | None = None) -> None:
+    """Log one usage event, tagged with this browser session."""
+    if st.session_state.get("_notrack"):
+        return
+    usage.track(get_settings(), kind, name, detail, session=_session_id())
+
+
+def _track_view(slot: str, kind: str, name: str, detail: str | None = None) -> None:
+    """Log `name` when what `slot` shows changes -- one event per view, not per rerun (every
+    widget click reruns the whole script)."""
+    seen: dict[str, str] = st.session_state.setdefault("_tracked", {})
+    if seen.get(slot) != name:
+        seen[slot] = name
+        _track(kind, name, detail)
+
+
+def _tabs(page: str, labels: list[str]) -> Any:
+    """st.tabs that logs each tab the reader opens (the first one is the page visit itself)."""
+    key = f"_tab_{page}"
+    return st.tabs(labels, key=key, on_change=_on_tab_change, args=(page, key))
+
+
+def _on_tab_change(page: str, key: str) -> None:
+    _track(usage.TAB, f"{page}/{st.session_state[key]}")
+
+
 @overload
 def _league_season_pickers(
     available: list[tuple[str, str, int]],
@@ -756,6 +793,7 @@ def _league_season_pickers(
     extra: int,
     key: str = "ls",
     latest_only: bool = False,
+    visible: bool = True,
 ) -> tuple[str, str, list[DeltaGenerator]]: ...
 @overload
 def _league_season_pickers(
@@ -764,6 +802,7 @@ def _league_season_pickers(
     extra: Literal[0] = 0,
     key: str = "ls",
     latest_only: bool = False,
+    visible: bool = True,
 ) -> tuple[str, str]: ...
 def _league_season_pickers(
     available: list[tuple[str, str, int]],
@@ -771,6 +810,7 @@ def _league_season_pickers(
     extra: int = 0,
     key: str = "ls",
     latest_only: bool = False,
+    visible: bool = True,
 ) -> tuple[str, str] | tuple[str, str, list[DeltaGenerator]]:
     """Dependent League + Season selectors laid out as a row on the page.
 
@@ -782,6 +822,9 @@ def _league_season_pickers(
     With `latest_only`, the season is locked (read-only) to each league's most recent loaded
     season -- for the Predictions tabs, where projecting a finished past season is not a
     forecast.
+
+    `visible=False` for a picker inside a tab that is not open: every tab's content runs on
+    each rerun, so its default league would otherwise be logged as viewed.
     """
     by_league: dict[str, list[Any]] = {}
     for season, division, _n in available:
@@ -790,6 +833,8 @@ def _league_season_pickers(
 
     cols = st.columns(2 + extra)
     league = cols[0].selectbox("League", sorted(by_league), key=f"{key}_league")
+    if visible:
+        _track_view(f"league:{key}", usage.LEAGUE, league, key)
     division, seasons = by_league[league]
     seasons = sorted(set(seasons), key=season_sort_key, reverse=True)
     if latest_only:
@@ -2493,10 +2538,9 @@ def main() -> None:
             key="nav",
         )
     page = _KEY_BY_LABEL[selected]
-    # One event per visit, not per rerun -- every widget click reruns the whole script.
-    if st.session_state.get("_tracked_page") != page:
-        st.session_state._tracked_page = page
-        usage.track(settings, usage.PAGE, page)
+    if NO_TRACK_PARAM in st.query_params:
+        st.session_state._notrack = True
+    _track_view("page", usage.PAGE, page)
 
     _page_header(page)
     _render_freshness(settings, page)
@@ -2510,7 +2554,7 @@ def main() -> None:
         return
 
     if page == "Analysis":
-        match_tab, players_tab = st.tabs(["Match", "Players"])
+        match_tab, players_tab = _tabs(page, ["Match", "Players"])
         with match_tab:
             _render_match_analysis(settings)
         with players_tab:
@@ -2519,8 +2563,8 @@ def main() -> None:
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        upcoming_tab, match_tab, season_tab, card_tab = st.tabs(
-            ["Upcoming", "Matchup", "Season", "Scorecard"]
+        upcoming_tab, match_tab, season_tab, card_tab = _tabs(
+            page, ["Upcoming", "Matchup", "Season", "Scorecard"]
         )
 
         with upcoming_tab:
@@ -2540,7 +2584,7 @@ def main() -> None:
                 )
             else:
                 season, division = _league_season_pickers(
-                    available, key="pred_match", latest_only=True
+                    available, key="pred_match", latest_only=True, visible=bool(match_tab.open)
                 )
                 st.caption("Odds and a likely score for any upcoming matchup this season.")
                 teams = forecast_teams(settings.analytics_db, season, division)
@@ -2605,6 +2649,8 @@ def main() -> None:
                 league = st.selectbox(
                     "League", league_names, index=default_idx, key="pred_season_league"
                 )
+                if season_tab.open:
+                    _track_view("league:pred_season", usage.LEAGUE, league, "pred_season")
                 division = by_league[league]
                 result = _cached_upcoming_season_briefing(
                     str(settings.live_db),
@@ -2663,6 +2709,8 @@ def main() -> None:
                     league_names.index("Premier League") if "Premier League" in league_names else 0
                 )
                 league = st.selectbox("League", league_names, index=default_idx, key="card_league")
+                if card_tab.open:
+                    _track_view("league:card", usage.LEAGUE, league, "card")
                 ready, fc_report = forecast_report_if_ready(
                     settings.analytics_db, by_league[league], n_seasons=6
                 )
@@ -2698,7 +2746,7 @@ def main() -> None:
             st.info("No results for that selection.")
             return
         forms = team_form(settings.analytics_db, season, division, last_n=last_n)
-        table_tab, form_tab, under_tab = st.tabs(["Table", "Form guide", "Underlying"])
+        table_tab, form_tab, under_tab = _tabs("Analytics", ["Table", "Form guide", "Underlying"])
         with table_tab:
             _render_analytics(snap, forms=forms, last_n=last_n)
         with form_tab:
@@ -2751,7 +2799,7 @@ def main() -> None:
             )
             return
         season, division = _league_season_pickers(available)
-        season_tab, all_time_tab = st.tabs(["This season", "All-time"])
+        season_tab, all_time_tab = _tabs("Records", ["This season", "All-time"])
         with season_tab:
             records = season_records(settings.analytics_db, season, division)
             if records is None:

@@ -529,7 +529,15 @@ def rebuild() -> None:
 
 
 @app.command()
-def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
+def dashboard(
+    port: int = typer.Option(8501, help="Port to serve on."),
+    browser: bool = typer.Option(
+        True,
+        help="Open a browser tab on start. --no-browser when something else opens the page "
+        "(an editor's preview pane): otherwise each launch opens two sessions and the usage "
+        "log counts two visits.",
+    ),
+) -> None:
     """Launch the read-only Streamlit dashboard over the local database."""
     import subprocess
     import sys
@@ -571,6 +579,8 @@ def dashboard(port: int = typer.Option(8501, help="Port to serve on.")) -> None:
             str(app_path_on_disk),
             "--server.port",
             str(port),
+            "--server.headless",
+            str(not browser).lower(),
         ],
         cwd=str(app_path_on_disk.parent),
         env=env,
@@ -1481,7 +1491,16 @@ def usage(
     usage log -- plus what never does, and the questions the assistant couldn't answer."""
     from soccer.dashboard.assistant import intent_names
     from soccer.dashboard.nav import NAV
-    from soccer.domain.usage import ACTION, ASK, PAGE, UsageCount, UsageDB, UsageLog
+    from soccer.domain.usage import (
+        ACTION,
+        ASK,
+        LEAGUE,
+        PAGE,
+        TAB,
+        UsageCount,
+        UsageDB,
+        UsageLog,
+    )
 
     settings = get_settings()
     if not settings.usage_tracking:
@@ -1502,6 +1521,8 @@ def usage(
         f"Usage over the last [bold]{days}[/bold] days "
         f"[dim](tracking since {summary.tracking_since:%Y-%m-%d}, {history_days} days ago)[/dim]"
     )
+    if summary.sessions:
+        console.print(f"[bold]{summary.sessions}[/bold] browser sessions in the window")
     if history_days < _USAGE_MIN_DAYS:
         console.print(
             f"[yellow]Only {history_days} days of history[/yellow] -- too early to call "
@@ -1527,6 +1548,14 @@ def usage(
     if unused_pages:
         names = ", ".join(page_labels[k] for k in unused_pages)
         console.print(f"[red]Never visited:[/red] {names}")
+
+    # Tabs are logged only when opened -- a page's first tab shows on every visit to it.
+    tab_labels = {}
+    for c in summary.for_kind(TAB):
+        page_key, _, tab = c.name.partition("/")
+        tab_labels[c.name] = f"{page_labels.get(page_key, page_key)}: {tab}"
+    show("Tabs opened", "Opens", summary.for_kind(TAB), tab_labels)
+    show("Leagues viewed", "Views", summary.for_kind(LEAGUE), {})
 
     show("Data actions", "Runs", summary.for_kind(ACTION), {})
 

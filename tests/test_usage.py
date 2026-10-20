@@ -9,7 +9,17 @@ from typer.testing import CliRunner
 
 from soccer.config import Settings
 from soccer.dashboard.assistant import answer, intent_names
-from soccer.domain.usage import ACTION, ASK, FALLBACK_INTENT, PAGE, UsageDB, UsageLog, track
+from soccer.domain.usage import (
+    ACTION,
+    ASK,
+    FALLBACK_INTENT,
+    LEAGUE,
+    PAGE,
+    TAB,
+    UsageDB,
+    UsageLog,
+    track,
+)
 from soccer.storage.live_db import LiveDB
 from tests.test_dashboard_data import seed_results
 
@@ -59,6 +69,44 @@ class TestUsageLog:
     def test_empty_log_has_no_tracking_start(self, tmp_path) -> None:
         summary = _log(tmp_path).summary(NOW - timedelta(days=30))
         assert summary.counts == [] and summary.tracking_since is None
+
+    def test_tabs_and_leagues_are_their_own_kinds(self, tmp_path) -> None:
+        log = _log(tmp_path)
+        log.record(TAB, "Predictor/Season", at=NOW)
+        log.record(LEAGUE, "Serie A", "pred_match", at=NOW)
+        log.record(LEAGUE, "Serie A", "ls", at=NOW)
+        summary = log.summary(NOW - timedelta(days=1))
+        assert [(c.name, c.count) for c in summary.for_kind(TAB)] == [("Predictor/Season", 1)]
+        assert [(c.name, c.count) for c in summary.for_kind(LEAGUE)] == [("Serie A", 2)]
+
+    def test_sessions_count_distinct_browser_sessions_in_window(self, tmp_path) -> None:
+        log = _log(tmp_path)
+        log.record(PAGE, "Home", at=NOW, session="a")
+        log.record(PAGE, "Predictor", at=NOW, session="a")
+        log.record(PAGE, "Home", at=NOW, session="b")
+        log.record(PAGE, "Home", at=NOW - timedelta(days=9), session="old")
+        assert log.summary(NOW - timedelta(days=1)).sessions == 2
+
+    def test_log_from_before_sessions_gains_the_column(self, tmp_path) -> None:
+        import sqlite3
+
+        path = tmp_path / "usage.sqlite"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE usage_event (id INTEGER PRIMARY KEY, at TEXT NOT NULL, "
+            "kind TEXT NOT NULL, name TEXT NOT NULL, detail TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO usage_event (at, kind, name) VALUES (?, 'page', 'Home')",
+            (NOW.isoformat(),),
+        )
+        conn.commit()
+        conn.close()
+        log = UsageLog(UsageDB(path))
+        log.record(PAGE, "Team", at=NOW, session="s1")
+        summary = log.summary(NOW - timedelta(days=1))
+        assert {c.name for c in summary.for_kind(PAGE)} == {"Home", "Team"}
+        assert summary.sessions == 1
 
 
 class TestTrack:
@@ -141,6 +189,18 @@ class TestUsageCommand:
         assert "Never asked:" in result.output and "standings" in result.output
         assert "who is the best manager ever" in result.output
         assert "too early" not in result.output  # 20 days of history is enough
+
+    def test_reports_tabs_leagues_and_sessions(self, tmp_path, monkeypatch) -> None:
+        log = _log(tmp_path)
+        now = datetime.now(UTC)
+        log.record(PAGE, "Predictor", at=now, session="s1")
+        log.record(TAB, "Predictor/Scorecard", at=now, session="s1")
+        log.record(LEAGUE, "Bundesliga", "pred_match", at=now, session="s1")
+        result = self._run(tmp_path, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert "1 browser sessions" in result.output
+        assert "Predictions: Scorecard" in result.output  # page shown by its sidebar label
+        assert "Bundesliga" in result.output
 
     def test_flags_thin_history_as_provisional(self, tmp_path, monkeypatch) -> None:
         _log(tmp_path).record(PAGE, "Home", at=datetime.now(UTC) - timedelta(days=2))

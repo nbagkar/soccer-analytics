@@ -2,9 +2,10 @@
 
 Feature decisions were being made without evidence -- several features shipped and were
 never touched (an empty bet ledger, a lineup signal that never fired). This records just
-enough to tell used from unused: one row per page visit, dashboard action, or assistant
-question, tagged with what it was. It lives in the local live DB and never leaves the
-machine.
+enough to tell used from unused: one row per page visit, tab opened, league viewed,
+dashboard action, or assistant question, tagged with what it was and the browser session it
+came from (so visits can be told apart from sessions). It lives in its own local file and
+never leaves the machine.
 
 Deliberately coarse. Question text is kept only when the assistant could not answer
 (intent "fallback") -- that is the unmet demand worth reading; answered questions are
@@ -27,7 +28,9 @@ logger = logging.getLogger(__name__)
 PAGE = "page"
 ACTION = "action"
 ASK = "ask"
-KINDS = (PAGE, ACTION, ASK)
+TAB = "tab"  # name "<page key>/<tab label>": a tab opened beyond the page's first one
+LEAGUE = "league"  # name: the league shown; detail: which picker (page) showed it
+KINDS = (PAGE, ACTION, ASK, TAB, LEAGUE)
 
 FALLBACK_INTENT = "fallback"
 
@@ -48,6 +51,8 @@ class UsageSummary:
     """Assistant questions that fell through to the fallback, newest first."""
     tracking_since: datetime | None
     """The earliest event ever recorded -- how much history the counts can rest on."""
+    sessions: int = 0
+    """Distinct browser sessions in the window (events recorded before 2026-10-20 carry none)."""
 
     def for_kind(self, kind: str) -> list[UsageCount]:
         return [c for c in self.counts if c.kind == kind]
@@ -63,8 +68,9 @@ CREATE TABLE IF NOT EXISTS usage_event (
     id     INTEGER PRIMARY KEY,
     at     TEXT NOT NULL,
     kind   TEXT NOT NULL,       -- page | action | ask
-    name   TEXT NOT NULL,       -- page key, action name, or assistant intent
-    detail TEXT
+    name   TEXT NOT NULL,       -- page key, action name, assistant intent, tab or league
+    detail TEXT,
+    session TEXT                -- the browser session; NULL for events from the CLI/tests
 );
 CREATE INDEX IF NOT EXISTS idx_usage_kind_at ON usage_event (kind, at);
 """
@@ -83,6 +89,10 @@ class UsageDB:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(usage_event)")}
+        if "session" not in columns:  # logs created before sessions were recorded
+            with self._conn:
+                self._conn.execute("ALTER TABLE usage_event ADD COLUMN session TEXT")
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -103,15 +113,21 @@ class UsageLog:
         self._conn = db.connection
 
     def record(
-        self, kind: str, name: str, detail: str | None = None, *, at: datetime | None = None
+        self,
+        kind: str,
+        name: str,
+        detail: str | None = None,
+        *,
+        at: datetime | None = None,
+        session: str | None = None,
     ) -> None:
         if kind not in KINDS:
             raise ValueError(f"unknown usage kind {kind!r}; expected one of {KINDS}")
         when = (at or datetime.now(UTC)).isoformat()
         with self._conn:
             self._conn.execute(
-                "INSERT INTO usage_event (at, kind, name, detail) VALUES (?, ?, ?, ?)",
-                (when, kind, name, detail),
+                "INSERT INTO usage_event (at, kind, name, detail, session) VALUES (?, ?, ?, ?, ?)",
+                (when, kind, name, detail, session),
             )
 
     def summary(self, since: datetime) -> UsageSummary:
@@ -135,15 +151,27 @@ class UsageLog:
         ]
         first = self._conn.execute("SELECT MIN(at) AS t FROM usage_event").fetchone()
         since_at = datetime.fromisoformat(first["t"]) if first and first["t"] else None
-        return UsageSummary(counts=counts, unanswered=unanswered, tracking_since=since_at)
+        sessions = self._conn.execute(
+            "SELECT COUNT(DISTINCT session) AS n FROM usage_event WHERE at >= ?", (cutoff,)
+        ).fetchone()["n"]
+        return UsageSummary(
+            counts=counts, unanswered=unanswered, tracking_since=since_at, sessions=sessions
+        )
 
 
-def track(settings: Settings, kind: str, name: str, detail: str | None = None) -> None:
+def track(
+    settings: Settings,
+    kind: str,
+    name: str,
+    detail: str | None = None,
+    *,
+    session: str | None = None,
+) -> None:
     """Record one event, never letting a logging failure break the page that called it."""
     if not settings.usage_tracking:
         return
     try:
         with UsageDB(settings.usage_db) as db:
-            UsageLog(db).record(kind, name, detail)
+            UsageLog(db).record(kind, name, detail, session=session)
     except (sqlite3.Error, OSError) as exc:
         logger.warning("usage tracking failed for %s/%s: %s", kind, name, exc)
