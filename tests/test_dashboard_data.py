@@ -1874,9 +1874,8 @@ class TestAppSmoke:
                 cta[0].click().run()
                 assert not at.exception, f"Home navigation raised: {at.exception}"
 
-            at.radio[0].set_value("Live scores").run()
-            assert not at.exception, f"Live Centre raised: {at.exception}"
-            assert any(m.label == "Matches" for m in at.metric)
+            # Live scores is archived (nav.ARCHIVED): no longer in the sidebar.
+            assert "Live scores" not in at.radio[0].options
 
             at.radio[0].set_value("About & sources").run()
             assert not at.exception, f"Data Health raised: {at.exception}"
@@ -1944,7 +1943,7 @@ class TestAppSmoke:
             pages = [e["name"] for e in events if e["kind"] == "page"]
             asks = [e["name"] for e in events if e["kind"] == "ask"]
             assert pages[0] == "Home"
-            assert {"Live Centre", "Assistant", "Predictor", "Analysis"} <= set(pages)
+            assert {"Assistant", "Predictor", "Analysis"} <= set(pages)
             assert pages.count("Analysis") == 1  # the profile toggle rerun isn't a new visit
             assert asks == ["standings", "team"]
         finally:

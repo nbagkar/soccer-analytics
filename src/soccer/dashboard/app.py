@@ -193,11 +193,6 @@ def _render_home(settings: Settings) -> None:
             _go("Predictor")
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
-        if st.button("Refresh live scores", icon=":material/bolt:", width="stretch"):
-            usage.track(settings, usage.ACTION, "refresh_scores")
-            with st.spinner("Fetching the latest scores…"):
-                st.toast(actions.refresh_scores(settings), icon="✅")
-            _go("Home")
         if st.button("Update results", icon=":material/scoreboard:", width="stretch"):
             usage.track(settings, usage.ACTION, "refresh_results")
             with st.spinner("Fetching the latest results for every loaded league…"):
@@ -2491,6 +2486,8 @@ def main() -> None:
         # radio is created -- setting its key afterwards is not allowed.
         if "_nav_to" in st.session_state:
             st.session_state.nav = st.session_state.pop("_nav_to")
+        if st.session_state.get("nav") not in (None, *_NAV_LABELS):
+            del st.session_state["nav"]  # a page archived since (nav.ARCHIVED): back to Home
         selected = st.radio(
             "Menu",
             _NAV_LABELS,
@@ -2771,7 +2768,7 @@ def main() -> None:
 
     if not settings.live_db.exists():
         st.info(
-            "No data yet. Go to **Home** → **Refresh live scores** to get started.",
+            "No data yet. Go to **Home** → **Update fixtures** to get started.",
             icon=":material/bolt:",
         )
         return

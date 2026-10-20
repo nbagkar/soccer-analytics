@@ -12,7 +12,6 @@ visited), so it must stay importable without the dashboard extra.
 NAV = [
     ("Home", "Home", ":material/home:", "Set up and quick actions"),
     ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
-    ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
     ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
     ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
     ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
@@ -22,3 +21,11 @@ NAV = [
 ]
 
 PAGE_KEYS = [key for key, _label, _icon, _caption in NAV]
+
+# Pages taken out of the sidebar but kept in the code, so one can come back by moving its
+# row into NAV. Archived 2026-10-20: Live scores ("Live Centre") had 1 visit in its first
+# 15 days of usage tracking while Home had 31; the assistant still answers "what's on now"
+# from the live feed and refreshes it itself.
+ARCHIVED = [
+    ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
+]
