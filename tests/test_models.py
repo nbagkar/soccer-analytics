@@ -289,6 +289,78 @@ class TestPoissonShotsTimeDecay:
         assert decayed.strengths == flat.strengths
 
 
+def _uneven_schedule_rows() -> list[Row]:
+    """`hard` and `easy` score exactly the same, but `hard` only ever met `top` and `easy`
+    only ever met `bottom`; `top` and `bottom` play each other often enough to be rated."""
+    rows: list[Row] = []
+    for day in range(1, 9):
+        rows.append(Row("top", "bottom", 3, 0, date(2026, 1, day)))
+        rows.append(Row("bottom", "top", 0, 3, date(2026, 2, day)))
+    for day in range(1, 5):
+        rows.append(Row("hard", "top", 1, 1, date(2026, 3, day)))
+        rows.append(Row("top", "hard", 1, 1, date(2026, 4, day)))
+        rows.append(Row("easy", "bottom", 1, 1, date(2026, 3, day)))
+        rows.append(Row("bottom", "easy", 1, 1, date(2026, 4, day)))
+    return rows
+
+
+class TestOpponentAdjust:
+    def test_off_by_default(self) -> None:
+        rows = _uneven_schedule_rows()
+        assert (
+            fit_poisson_shots(rows).strengths
+            == fit_poisson_shots(rows, opponent_adjust=False).strengths
+        )
+
+    def test_credits_the_strength_of_the_opposition(self) -> None:
+        rows = _uneven_schedule_rows()
+        plain = fit_poisson_shots(rows, alpha=1.0).strengths
+        adjusted = fit_poisson_shots(rows, alpha=1.0, opponent_adjust=True).strengths
+        # Raw averages cannot tell them apart; against who they played, `hard` is far better.
+        assert plain["hard"] == plain["easy"]
+        assert adjusted["hard"].attack > adjusted["easy"].attack
+        assert adjusted["hard"].defence < adjusted["easy"].defence
+
+    def test_reaches_the_likelihood_fixed_point(self) -> None:
+        # Unshrunk, every team's fitted goals are its actual goals times ONE common factor
+        # (Maher's MLE equations, up to the overall scale both strengths are pinned to).
+        teams = ["t0", "t1", "t2", "t3", "t4"]
+        rows = [
+            Row(h, a, 1 + (i + 2 * j) % 3, (2 * i + j) % 3, date(2026, 1 + i, 1 + j))
+            for i, h in enumerate(teams)
+            for j, a in enumerate(teams)
+            if h != a
+        ]
+        model = fit_poisson_shots(rows, alpha=1.0, opponent_adjust=True)
+        home_rate = sum(o.fthg for o in rows) / len(rows)
+        away_rate = sum(o.ftag for o in rows) / len(rows)
+        s = model.strengths
+        ratios = []
+        for team in s:
+            fitted = sum(
+                home_rate * s[o.home_norm].attack * s[o.away_norm].defence
+                if o.home_norm == team
+                else away_rate * s[o.away_norm].attack * s[o.home_norm].defence
+                for o in rows
+                if team in (o.home_norm, o.away_norm)
+            )
+            actual = sum(
+                o.fthg if o.home_norm == team else o.ftag
+                for o in rows
+                if team in (o.home_norm, o.away_norm)
+            )
+            ratios.append(fitted / actual)
+        assert max(ratios) == pytest.approx(min(ratios), rel=1e-6)
+
+    def test_strengths_average_one(self) -> None:
+        rows = _uneven_schedule_rows()
+        s = fit_poisson_shots(rows, opponent_adjust=True, shrinkage=2.0).strengths
+        games = {t: sum(t in (o.home_norm, o.away_norm) for o in rows) for t in s}
+        total = sum(games.values())
+        assert sum(games[t] * v.attack for t, v in s.items()) / total == pytest.approx(1.0)
+        assert sum(games[t] * v.defence for t, v in s.items()) / total == pytest.approx(1.0)
+
+
 class TestElo:
     def test_ratings_are_zero_sum_around_initial(self) -> None:
         # Elo only redistributes points, so the mean stays at the initial rating.

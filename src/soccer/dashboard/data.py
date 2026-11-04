@@ -26,6 +26,18 @@ from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
 from soccer.domain.freshness import LIVE_STALE_AFTER, Freshness, freshness, injuries_as_of
+from soccer.domain.ledger import (
+    MATCH_WINDOW_DAYS,
+    FinalResult,
+    ForecastLedger,
+    LedgerDB,
+    LiveOutcome,
+    LiveRecord,
+    PublishedForecast,
+    RecordOutcome,
+    grade,
+    safe_record,
+)
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -49,6 +61,7 @@ from soccer.storage.analytics_db import (
     AnalyticsDB,
     MatchLogRow,
     MatchRecord,
+    OddsRow,
     PlayerProfile,
     PlayerRow,
     ResultRow,
@@ -684,12 +697,18 @@ def _season_model(
     window: list[ResultRow],
     teams: list[str],
     priors: dict[str, tuple[float, float]] | None = None,
+    *,
+    preseason: bool = False,
 ) -> tuple[PoissonModel, list[str]]:
     """The season-projection rating model: the forecast model fit on `window`, with every
     thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`, toward
     `priors` for the clubs it names). Returns (model, the teams the fit never saw -- the
-    newcomers)."""
-    model = _forecast_fit(window)
+    newcomers). `preseason` (no match of the projected season in `window` yet) fits with the
+    slower `SEASON_PRESEASON_DECAY_DAYS`."""
+    model = _forecast_fit(
+        window,
+        half_life_days=SEASON_PRESEASON_DECAY_DAYS if preseason else FORECAST_TIME_DECAY_DAYS,
+    )
     match_counts: dict[str, int] = {}
     for o in window:
         match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
@@ -920,7 +939,7 @@ def upcoming_season_briefing(
             else anchor_season
         )
         priors = _newcomer_priors(adb, division, last, teams) if last else {}
-    model, promoted = _season_model(window, teams, priors)
+    model, promoted = _season_model(window, teams, priors, preseason=not still_in_progress)
     projections, played, total = _project_from_table(
         model,
         teams,
@@ -969,7 +988,7 @@ FORECAST_SHRINKAGE = 0.5  # was 3.0 before market-implied ratings; see FORECAST_
 # -0.22% at 250d, Serie A -0.10% at 500d, Ligue 1 -0.20% at 250d); only La Liga disagrees, and
 # by a smaller margin (+0.21% at 250d) than the gains elsewhere. 250 days sits in every
 # league's good range. See forecast-model-quality memory for the full sweep.
-FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
+FORECAST_TIME_DECAY_DAYS = 60  # 250 before market ratings, 120 before opponent adjustment
 # Market-implied ratings: each PLAYED match's closing 1X2 is inverted into the market's
 # expected goals and used as the rating input (fit_poisson_shots market_weight; never an
 # upcoming match's odds). Walk-forward vs the vig-free closing line, refit per matchday,
@@ -999,9 +1018,70 @@ FORECAST_MARKET_WEIGHT = 1.0
 # worth ~0.0002. The fitted values barely moved across 15 seasons (spread 1.06-1.10, home
 # 0.012-0.025, rho -0.08 to -0.11), so they are fixed here. Fitting them per league scored no
 # better than pooled -- league-specific calibration is not worth its extra parameters.
-FORECAST_SPREAD = 1.08
-FORECAST_HOME_SHIFT = 0.02
+# 2026-11-04: re-fit jointly with FORECAST_OPPONENT_ADJUST below -- spread 1.08 -> 1.14,
+# home shift 0.02 -> 0.01, rho unchanged.
+FORECAST_SPREAD = 1.14
+FORECAST_HOME_SHIFT = 0.01
 FORECAST_RHO = -0.09
+# Opponent-adjusted ratings (`fit_poisson_shots(opponent_adjust=True)`): each team rated
+# against the defences/attacks it actually faced, by iterative proportional fitting, instead
+# of by its raw average -- which reads a side that has just played the top three as weak.
+# Measured 2026-11-04 with `scripts/forecast_experiment.py`: the same walk-forward as the
+# live model (three-season window, refit every matchday), 18 divisions 2012/13-2026/27,
+# 94,146 matches. Settings chosen on 2012/13-2020/21 only, then scored on the untouched
+# 2021/22-2026/27 holdout (41,664 matches), gap to the vig-free closing line:
+#   live model before:                          +0.01322
+#   same model, settings re-tuned (1.12, 90d):  +0.01263
+#   opponent-adjusted + re-tuned (this):        +0.01115  (-0.00207 +/- 0.00033 per match)
+#   thin-history slice (a team with <6 games):  +0.0216 -> +0.0134
+# Every season 2012/13-2026/27 improved; 16 of 18 divisions on the holdout. Scotland (SC0,
+# +0.0035) is the clear exception and La Liga is level. The adjustment wants faster decay:
+# 60d beat 45/75/90/120d, where the plain ratio fit still prefers 90d.
+# 2026-11-04, the Scotland exception, investigated: it is outcome noise, not a model fault.
+# Scored by KL(closing line || model) -- the gap expected if the closing line were true,
+# which ignores which result happened and so has ~1/7 of the log loss's per-division s.e. --
+# the adjustment moves EVERY division toward the market on the holdout, SC0 by -0.00162 +/-
+# 0.00026 (log loss +0.00347 +/- 0.00198, only 1.75 s.e.; tune seasons level, +0.00002) and
+# SP1 by -0.00151 +/- 0.00018. In the SC0 holdout the market itself ran off: favourites priced
+# 0.65-0.80 won 77.8% against 73.0% priced. Hypotheses ruled out
+# (`scripts/market_inversion_diagnostics.py`, `forecast_experiment.py --divisions SC0`):
+#   - the scipy closest-fit fallback in the odds inversion: hit by 0 of 108k played matches in
+#     all 18 divisions (an ~85% favourite with a normal draw price solves exactly); SC0's
+#     residuals (O/U-overdetermined, mean 0.0056) match E2/E3, which gained most;
+#   - extreme favourites: SC0's loss is spread over every price band (fav < 0.50: +0.0044);
+#     N1/P1/G1 have as many 80%+ favourites as SC0 and improved most. Only the 0.80+ band
+#     drifts from the market in SC0 (KL +0.0007 +/- 0.0007), mixed elsewhere (E0/I1 closer,
+#     D1/SP1 further), too small to act on;
+#   - the post-split rounds (game 34+): KL improves there too (-0.00126 +/- 0.00057);
+#   - 60d half-life too short for a 12-team league: SC0 alone prefers 60-90d on tune seasons,
+#     120-250d is clearly worse, and the plain fit beats the adjusted by ~0.004 at every
+#     half-life and spread on the SC0 holdout (the same outcome luck).
+# `soccer backtest-season` cannot score SC0 (no complete round-robin season, the split).
+# Note FORECAST_ALPHA is inert while FORECAST_MARKET_WEIGHT is 1.0: every match with odds
+# is rated from its market expected goals alone; the shots blend only covers odds-less rows.
+FORECAST_OPPONENT_ADJUST = True
+# Rest days / fixture congestion -- measured 2026-11-04, NOT used (null result). Each side's
+# days since its previous league match (bucketed <=3, 4-5, 6-7, 8-10, 11-20, first/>20) or its
+# league matches in the previous 14 days (0, 1, 2, 3+) as log-multipliers on expected goals,
+# fit on 2012/13-2020/21 by Poisson regression offset by the model's own xG, scored on the
+# 2021/22-2026/27 holdout (41,664 matches; `scripts/forecast_experiment.py --fit-rest`):
+#   rest buckets, fit to goals:          +0.01115 -> +0.01118  (+0.00003 +/- 0.00006)
+#   rest buckets, fit to market xG:      +0.01115 -> +0.01120  (+0.00005 +/- 0.00003)
+#   14-day count, fit to goals:          +0.01115 -> +0.01116  (+0.00001 +/- 0.00003)
+#   14-day count, fit to market xG:      +0.01115 -> +0.01112  (-0.00003 +/- 0.00002)
+# The best (14-day, market) improved 9 of 18 divisions -- a coin flip. The market does price
+# schedule, but small: vs this model's xG, a side on <=3 days' rest is rated ~1% lower and its
+# opponent ~1% higher (+/- 0.2%); a side with no match in 14 days ~0.8% lower. Fit to actual
+# goals, every bucket is within 2 s.e. of zero. A 1% xG nudge moves 1X2 by ~0.3 points, below
+# what log loss can see. Cup and European ties are not in the history, so the rest of clubs
+# in Europe is mismeasured -- the one place a real effect could still hide.
+# Pre-season projections (none of the season played yet) keep the slower 120-day decay. With
+# 60 days the ratings going into a season are mostly last season's final ~8 games, and
+# `soccer backtest-season` (20 seasons each) got worse pre-season in the top flights (E0
+# points RMSE 10.85 -> 11.38, SP1 9.21 -> 9.61) while every in-season checkpoint improved
+# (E0 25% played 8.62 -> 8.34, F1 7.95 -> 7.62, E2 10.59 -> 10.05). With 120 days pre-season
+# matches or beats the old model: E0 10.88, SP1 9.26, D1 9.66, F1 10.37, I1 9.47, E2 14.48.
+SEASON_PRESEASON_DECAY_DAYS = 120
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
@@ -1036,22 +1116,40 @@ DIVISION_LADDERS = (
 # Promoted INTO a top flight keeps the weakest-three prior: the "up" map there measured worse
 # (pre-recalibration: E0 +39.9% -> +38.8%, RMSE 10.3 -> 10.5; SP1 +41.9% -> +41.4%) -- that
 # prior already fits.
+# 2026-11-04, re-checked on the opponent-adjusted ratings (`scripts/newcomer_map_experiment.py`):
+# refit the same way on the 1,083 moves into 1996/97-2020/21 (source fit at the live 60d
+# decay, target an undecayed single-season fit), the map barely moves -- down ((0.147, 0.097),
+# (0.276, -0.125)), up ((0.239, -0.168), (0.239, 0.131)); relegated clubs still average attack
+# 1.07, defence 0.92. On the 250 later moves its error is no better (down 0.0152 vs 0.0150,
+# up 0.0183 vs 0.0173, mean squared log error). `soccer backtest-season`, 20 seasons,
+# pre-season skill (points RMSE), live -> refit: E1 +13.4% (12.83) -> +13.4% (12.82); E2
+# +4.7% (14.31) -> +4.8% (14.27); E3 -2.1% (13.54) -> -1.7% (13.51); SP2 +7.0% -> +6.9%
+# (11.67); D2 +10.0% -> +9.9% (10.16); I2 +3.2% -> +3.1% (13.13); F2 +8.7% -> +8.8% (11.14).
+# 2021/22+ seasons alone: 4 better, 3 worse, mean +0.1pp. The 25% checkpoint is identical
+# (every newcomer has its own matches by then). Fitting the source at 120d (as pre-season)
+# scored the same. Not shipped: within noise. Into a top flight the "up" map still loses to
+# the weakest-three prior pre-season: E0 +41.3% -> +40.8%, D1 +39.0% -> +38.4%, I1 +39.3% ->
+# +38.0% (RMSE 9.61 -> 9.92), SP1 +43.8% -> +43.4%, F1 +33.1% -> +33.2%; a map fit on
+# top-flight promotions only gets level at best (E0 +41.0%, D1 +39.0%, I1 +38.3%).
 NEWCOMER_RATING_MAP: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
     "down": ((0.135, 0.098), (0.255, -0.128)),
     "up": ((0.223, -0.175), (0.291, 0.144)),
 }
 
 
-def _forecast_fit(outcomes: Sequence[Any]) -> PoissonModel:
-    """The live forecast model: market-implied shots-blend ratings, then the measured
+def _forecast_fit(
+    outcomes: Sequence[Any], *, half_life_days: float = FORECAST_TIME_DECAY_DAYS
+) -> PoissonModel:
+    """The live forecast model: market-implied, opponent-adjusted ratings, then the measured
     goal-space recalibration (`FORECAST_SPREAD`/`FORECAST_HOME_SHIFT`/`FORECAST_RHO`)."""
     return calibrate_model(
         fit_poisson_shots(
             outcomes,
             alpha=FORECAST_ALPHA,
             shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            time_decay=_decay(half_life_days),
             market_weight=FORECAST_MARKET_WEIGHT,
+            opponent_adjust=FORECAST_OPPONENT_ADJUST,
         ),
         spread=FORECAST_SPREAD,
         home_shift=FORECAST_HOME_SHIFT,
@@ -1702,8 +1800,10 @@ def season_backtest(
     n_seasons: int = 20,
     checkpoints: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
     n_sims: int = 4000,
+    score_only: tuple[str, ...] | None = None,
 ) -> SeasonBacktest | None:
-    """Score the season projections on a division's last `n_seasons` completed seasons.
+    """Score the season projections on a division's last `n_seasons` completed seasons
+    (or just the `score_only` season codes among them).
 
     Same rating model, thin-sample handling and projection-from-the-table as the Season tab
     (`_season_model` + `season_rating_noise`), refit at each checkpoint on only what had been
@@ -1722,8 +1822,12 @@ def season_backtest(
             for (last, _r), (code, rows) in itertools.pairwise(seasons)
         }
 
+    own = {code: set(rows) for code, rows in seasons}
+
     def fit(window: list[ResultRow], teams: list[str], code: str) -> PoissonModel:
-        return _season_model(window, teams, priors.get(code))[0]
+        # the window is the history seasons then the played part of `code`, in that order
+        preseason = not window or window[-1] not in own[code]
+        return _season_model(window, teams, priors.get(code), preseason=preseason)[0]
 
     return backtest_season_projections(
         seasons,
@@ -1732,6 +1836,7 @@ def season_backtest(
         history_seasons=FORECAST_SEASONS - 1,
         n_sims=n_sims,
         relegation=relegation_places(division),
+        score_only=score_only,
     )
 
 
@@ -1802,6 +1907,7 @@ def forecast_report(
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
         market_weight=FORECAST_MARKET_WEIGHT,
+        opponent_adjust=FORECAST_OPPONENT_ADJUST,
         calibration={
             "spread": FORECAST_SPREAD,
             "home_shift": FORECAST_HOME_SHIFT,
@@ -2317,6 +2423,13 @@ class FixtureForecast:
     slate: MarketSlate | None  # None when no model covers the matchup
     experimental: bool = False
     """A cross-league cup forecast (models/crossleague.py) -- measured, but on few matches."""
+    match_id: str | None = None
+    """The live store's canonical match id -- the fixture's identity in the forecast ledger."""
+    division: str | None = None
+    """The results division the forecast came from ("E0", "UCL", ...), when one did."""
+    home_norm: str | None = None
+    away_norm: str | None = None
+    """The model's normalized team names (football-data.co.uk spelling for leagues)."""
 
 
 # Cup competitions forecast by the cross-league model, and its measured standing so every
@@ -2459,6 +2572,7 @@ def fixture_forecasts(
     for v in ups:
         slate = None
         home, away = v.home, v.away
+        hn = an = None
         division = COMPETITION_TO_DIVISION.get(v.competition)
         cup = CUP_COMPETITIONS.get(v.competition)
         if cup:
@@ -2469,7 +2583,20 @@ def fixture_forecasts(
                 if hn and an:
                     lam, mu = cup_fit.expected_goals(ratings[hn], ratings[an])
                     slate = compute_markets(home, away, lam, mu, DEFAULT_RHO)
-            out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate, True))
+            out.append(
+                FixtureForecast(
+                    v.kickoff_utc,
+                    v.competition,
+                    home,
+                    away,
+                    slate,
+                    True,
+                    match_id=v.match_id,
+                    division=cup,
+                    home_norm=hn if slate else None,
+                    away_norm=an if slate else None,
+                )
+            )
             continue
         if division:
             model = model_for(division)
@@ -2482,5 +2609,157 @@ def fixture_forecasts(
                     home, away = names.get(hn, v.home), names.get(an, v.away)
                     lam, mu = model.expected_goals(hn, an)
                     slate = compute_markets(home, away, lam, mu, model.rho)
-        out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate))
+        out.append(
+            FixtureForecast(
+                v.kickoff_utc,
+                v.competition,
+                home,
+                away,
+                slate,
+                match_id=v.match_id,
+                division=division,
+                home_norm=hn if slate else None,
+                away_norm=an if slate else None,
+            )
+        )
     return out
+
+
+# --- Forecast ledger (domain/ledger.py): the live track record ---------------------------
+
+
+def _constants_digest(prefixes: tuple[str, ...], exclude: Collection[str] = ()) -> str:
+    """A short hash of this module's tuning constants with the given prefixes."""
+    values = {
+        k: v
+        for k, v in globals().items()
+        if k.startswith(prefixes) and k.isupper() and k not in exclude
+    }
+    return hashlib.sha256(repr(sorted(values.items())).encode()).hexdigest()[:8]
+
+
+def forecast_model_version(*, cup: bool = False) -> str:
+    """The model-version tag stored with every ledger row: a hash of the FORECAST_* settings
+    (league fixtures) or the CUP_* settings (the cross-league cup model). Re-tuning any of
+    them starts a new version, so the live record can be read per model."""
+    if cup:
+        return "cup-" + _constants_digest(("CUP_",), exclude={"CUP_MODEL_NOTE"})
+    return "league-" + _constants_digest(("FORECAST_",))
+
+
+def ledger_rows(forecasts: Sequence[FixtureForecast]) -> list[PublishedForecast]:
+    """The ledger's record of a fixture list: one row per fixture that actually has a
+    forecast (an unforecast fixture has nothing to grade)."""
+    league_version, cup_version = forecast_model_version(), forecast_model_version(cup=True)
+    rows = []
+    for f in forecasts:
+        if f.slate is None:
+            continue
+        p_home, p_draw, p_away = (m.probability for m in f.slate.result)
+        rows.append(
+            PublishedForecast(
+                match_id=f.match_id,
+                competition=f.competition,
+                division=f.division,
+                kickoff_utc=f.kickoff_utc,
+                home=f.home,
+                away=f.away,
+                home_norm=f.home_norm or normalize_name(f.home),
+                away_norm=f.away_norm or normalize_name(f.away),
+                p_home=p_home,
+                p_draw=p_draw,
+                p_away=p_away,
+                home_xg=f.slate.home_expected,
+                away_xg=f.slate.away_expected,
+                model_version=cup_version if f.experimental else league_version,
+                team_news=False,  # the fixture list shows the base model, never the nudge
+            )
+        )
+    return rows
+
+
+def record_fixture_forecasts(
+    ledger_db: Path, forecasts: Sequence[FixtureForecast]
+) -> RecordOutcome | None:
+    """Write the published fixture forecasts to the ledger; never raises (a ledger failure
+    must not break the page or job that computed them). Returns the RecordOutcome or None."""
+    try:
+        rows = ledger_rows(forecasts)
+    except Exception:  # a malformed slate must not take the page down
+        logger.exception("could not build ledger rows")
+        return None
+    return safe_record(Path(ledger_db), rows) if rows else None
+
+
+def _odds_triple(r: OddsRow) -> tuple[float, float, float] | None:
+    h, d, a = r.close_home_odds, r.close_draw_odds, r.close_away_odds
+    return (h, d, a) if h is not None and d is not None and a is not None else None
+
+
+# Base rates for grading: each division's home/draw/away shares over this many days before
+# the ledger's first graded kickoff there -- so the baseline never sees the matches it scores.
+LEDGER_BASE_RATE_DAYS = 3 * 365
+
+
+def live_record(ledger_db: Path, analytics_db: Path, live_db: Path | None = None) -> LiveRecord:
+    """The ledger graded against every result we have (domain/ledger.py `LiveRecord`).
+
+    Results come from the analytics store (football-data.co.uk, with closing odds); a fixture
+    with a canonical match id whose result isn't there yet falls back to the live store's
+    final score, graded without odds. Teams are bridged with `match_team`, per division.
+    """
+    from datetime import timedelta
+
+    if not Path(ledger_db).exists():
+        return LiveRecord(recorded=0, upcoming=0, awaiting=0, unmatched=0, void=0)
+    with LedgerDB(Path(ledger_db)) as db:
+        entries = ForecastLedger(db).entries()
+    now = datetime.now(UTC)
+    played = [e for e in entries if e.kickoff_utc <= now]
+
+    results: dict[str, list[FinalResult]] = {}
+    base_rates: dict[str, tuple[float, float, float]] = {}
+    divisions = sorted({e.division for e in played if e.division})
+    if divisions and Path(analytics_db).exists():
+        window = timedelta(days=MATCH_WINDOW_DAYS)
+        with AnalyticsDB(Path(analytics_db)) as adb:
+            for division in divisions:
+                days = [e.kickoff_utc.date() for e in played if e.division == division]
+                start, end = min(days) - window, max(days) + window
+                results[division] = [
+                    FinalResult(
+                        match_date=r.match_date,
+                        home=r.home,
+                        away=r.away,
+                        home_norm=r.home_norm,
+                        away_norm=r.away_norm,
+                        home_goals=r.fthg,
+                        away_goals=r.ftag,
+                        closing_odds=_odds_triple(r),
+                    )
+                    for r in adb.results_between(division, start, end)
+                ]
+                first = min(days) - window
+                counts = adb.outcome_counts(
+                    division, first - timedelta(days=LEDGER_BASE_RATE_DAYS), first
+                )
+                total = sum(counts)
+                if total >= 30:
+                    base_rates[division] = (
+                        counts[0] / total,
+                        counts[1] / total,
+                        counts[2] / total,
+                    )
+
+    live: dict[str, LiveOutcome] = {}
+    ids = [e.match_id for e in played if e.match_id]
+    if ids and live_db is not None and Path(live_db).exists():
+        with LiveDB(Path(live_db)) as ldb:
+            store = MatchStateStore(ldb)
+            for match_id in ids:
+                state = store.get(match_id)
+                if state is not None:
+                    live[match_id] = LiveOutcome(
+                        str(state.status), state.home_score, state.away_score
+                    )
+    return grade(entries, results, live=live, base_rates=base_rates, matcher=match_team, now=now)
