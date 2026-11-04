@@ -1068,6 +1068,21 @@ DIVISION_LADDERS = (
 # Promoted INTO a top flight keeps the weakest-three prior: the "up" map there measured worse
 # (pre-recalibration: E0 +39.9% -> +38.8%, RMSE 10.3 -> 10.5; SP1 +41.9% -> +41.4%) -- that
 # prior already fits.
+# 2026-11-04, re-checked on the opponent-adjusted ratings (`scripts/newcomer_map_experiment.py`):
+# refit the same way on the 1,083 moves into 1996/97-2020/21 (source fit at the live 60d
+# decay, target an undecayed single-season fit), the map barely moves -- down ((0.147, 0.097),
+# (0.276, -0.125)), up ((0.239, -0.168), (0.239, 0.131)); relegated clubs still average attack
+# 1.07, defence 0.92. On the 250 later moves its error is no better (down 0.0152 vs 0.0150,
+# up 0.0183 vs 0.0173, mean squared log error). `soccer backtest-season`, 20 seasons,
+# pre-season skill (points RMSE), live -> refit: E1 +13.4% (12.83) -> +13.4% (12.82); E2
+# +4.7% (14.31) -> +4.8% (14.27); E3 -2.1% (13.54) -> -1.7% (13.51); SP2 +7.0% -> +6.9%
+# (11.67); D2 +10.0% -> +9.9% (10.16); I2 +3.2% -> +3.1% (13.13); F2 +8.7% -> +8.8% (11.14).
+# 2021/22+ seasons alone: 4 better, 3 worse, mean +0.1pp. The 25% checkpoint is identical
+# (every newcomer has its own matches by then). Fitting the source at 120d (as pre-season)
+# scored the same. Not shipped: within noise. Into a top flight the "up" map still loses to
+# the weakest-three prior pre-season: E0 +41.3% -> +40.8%, D1 +39.0% -> +38.4%, I1 +39.3% ->
+# +38.0% (RMSE 9.61 -> 9.92), SP1 +43.8% -> +43.4%, F1 +33.1% -> +33.2%; a map fit on
+# top-flight promotions only gets level at best (E0 +41.0%, D1 +39.0%, I1 +38.3%).
 NEWCOMER_RATING_MAP: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
     "down": ((0.135, 0.098), (0.255, -0.128)),
     "up": ((0.223, -0.175), (0.291, 0.144)),
