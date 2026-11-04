@@ -8,7 +8,11 @@ from datetime import date, timedelta
 import pytest
 
 from soccer.models.poisson import fit_poisson
-from soccer.models.season_backtest import backtest_season_projections, final_positions
+from soccer.models.season_backtest import (
+    backtest_season_projections,
+    final_positions,
+    skill_range,
+)
 
 TEAMS = ["a", "b", "c", "d", "e", "f"]
 STRENGTH = {t: i for i, t in enumerate(reversed(TEAMS))}  # a strongest ... f weakest
@@ -91,3 +95,37 @@ def test_skill_property_matches_its_definition(cp: float) -> None:
     model = sum(s.log_loss for s in score.model.values())
     base = sum(s.log_loss for s in score.baseline.values())
     assert score.skill == pytest.approx(1 - model / base)
+
+
+class TestSkillRange:
+    def test_brackets_a_known_skill_and_narrows_with_more_seasons(self) -> None:
+        import random
+
+        rng = random.Random(3)
+
+        def seasons(n: int) -> list[tuple[list[float], list[float]]]:
+            # true skill 0.2: model loss 0.8x the baseline's, with season-to-season noise
+            out = []
+            for _ in range(n):
+                base = rng.uniform(5, 15)
+                out.append(([0.8 * base * rng.uniform(0.7, 1.3)], [base]))
+            return out
+
+        lo20, hi20 = skill_range(seasons(20))
+        lo200, hi200 = skill_range(seasons(200))
+        assert lo20 < 0.2 < hi20 and lo200 < 0.2 < hi200
+        assert hi200 - lo200 < (hi20 - lo20) / 2  # ~1/sqrt(10) as wide with 10x the seasons
+
+    def test_identical_seasons_have_no_spread_and_one_season_has_no_range(self) -> None:
+        lo, hi = skill_range([([4.0], [5.0])] * 10)
+        assert lo == pytest.approx(0.2) and hi == pytest.approx(0.2)
+        assert all(x != x for x in skill_range([([4.0], [5.0])]))  # nan: nothing to resample
+
+
+def test_backtest_reports_a_range_around_its_skill() -> None:
+    seasons = [(f"{y}", season(date(2000 + y, 8, 1))) for y in range(5)]
+    report = backtest_season_projections(seasons, fit, checkpoints=(0.0, 0.5), n_sims=200)
+    assert report is not None
+    for score in report.checkpoints:
+        lo, hi = score.skill_range
+        assert lo <= score.skill + 1e-9 and score.skill - 1e-9 <= hi

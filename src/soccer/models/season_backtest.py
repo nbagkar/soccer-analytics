@@ -8,14 +8,22 @@ points exactly as the app does, and scores the probabilities against what actual
 
 A no-skill baseline -- every team rated league-average, same banked points -- shows how much
 the ratings add beyond the table itself (late in a season the table does most of the work).
+
+Twenty seasons is a small sample for a title race (twenty champions), so every skill figure
+carries a bootstrap range over seasons (`CheckpointScore.skill_range`). A difference smaller
+than that range -- a model change moving League One's halfway skill by two points, say -- is
+not evidence either way.
 """
 
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 from soccer.models.simulation import (
     ScorelineModel,
@@ -27,6 +35,8 @@ from soccer.models.simulation import (
 )
 
 EVENTS = ("title", "top", "relegation")
+BOOTSTRAP_DRAWS = 1000
+SKILL_RANGE = 0.9  # central share of the bootstrap kept as the skill range
 
 
 @dataclass(frozen=True)
@@ -44,6 +54,9 @@ class CheckpointScore:
     baseline: dict[str, EventScore]  # every team league-average, same banked points
     points_rmse: float
     baseline_points_rmse: float
+    skill_range: tuple[float, float] = (math.nan, math.nan)
+    """90% bootstrap range of `skill`, resampling whole seasons (a season's teams move
+    together: one surprise champion is one draw, not twenty independent misses)."""
 
     @property
     def skill(self) -> float:
@@ -51,6 +64,34 @@ class CheckpointScore:
         model = sum(s.log_loss for s in self.model.values())
         base = sum(s.log_loss for s in self.baseline.values())
         return 1.0 - model / base if base else 0.0
+
+
+def _log_loss(p: float, hit: bool) -> float:
+    return -math.log(max(p if hit else 1.0 - p, 1e-4))  # a 0% call that happens: log(1e-4)
+
+
+def skill_range(
+    seasons: Sequence[tuple[Sequence[float], Sequence[float]]],
+    *,
+    draws: int = BOOTSTRAP_DRAWS,
+    level: float = SKILL_RANGE,
+    seed: int = 7,
+) -> tuple[float, float]:
+    """Bootstrap range of skill from per-season (model, baseline) log-loss totals per event.
+
+    Each element is one season: its summed log loss for each event under the model and under
+    the baseline (same team count in both). Seasons are resampled with replacement and skill
+    recomputed as 1 - sum(model)/sum(baseline). (nan, nan) for fewer than two seasons.
+    """
+    if len(seasons) < 2:
+        return math.nan, math.nan
+    model = np.array([sum(m) for m, _b in seasons])
+    base = np.array([sum(b) for _m, b in seasons])
+    idx = np.random.default_rng(seed).integers(0, len(seasons), size=(draws, len(seasons)))
+    skills = 1.0 - model[idx].sum(axis=1) / base[idx].sum(axis=1)
+    tail = (1.0 - level) / 2 * 100
+    lo, hi = np.percentile(skills, [tail, 100 - tail])
+    return float(lo), float(hi)
 
 
 @dataclass(frozen=True)
@@ -78,8 +119,7 @@ def final_positions(rows: Sequence[Any]) -> tuple[dict[str, int], dict[str, int]
 
 def _event_score(pairs: list[tuple[float, bool]]) -> EventScore:
     n = len(pairs)
-    clip = 1e-4  # a 0% call that happens costs log(1e-4), not infinity
-    log_loss = -sum(math.log(max(p if hit else 1.0 - p, clip)) for p, hit in pairs) / n
+    log_loss = sum(_log_loss(p, hit) for p, hit in pairs) / n
     brier = sum((p - hit) ** 2 for p, hit in pairs) / n
     return EventScore(log_loss=log_loss, brier=brier)
 
@@ -108,6 +148,8 @@ def backtest_season_projections(
     None if nothing was scored.
     """
     per: dict[float, dict[str, list[Any]]] = {cp: {"model": [], "base": []} for cp in checkpoints}
+    # (checkpoint, season) -> [model, baseline] summed log loss over the three events
+    by_season: dict[tuple[float, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
     scored: list[str] = []
     for i, (code, season_rows) in enumerate(seasons):
         rows = sorted(season_rows, key=lambda o: o.match_date)
@@ -153,14 +195,13 @@ def backtest_season_projections(
                     rating_noise=noise,
                 )
                 for p in sim.projections:
-                    per[cp][key].append(
-                        (
-                            (p.title_pct, position[p.team] == 1),
-                            (p.top_pct, position[p.team] <= top_n),
-                            (p.relegation_pct, position[p.team] > n - relegation),
-                            (p.expected_points, final_points[p.team]),
-                        )
+                    calls = (
+                        (p.title_pct, position[p.team] == 1),
+                        (p.top_pct, position[p.team] <= top_n),
+                        (p.relegation_pct, position[p.team] > n - relegation),
                     )
+                    per[cp][key].append((*calls, (p.expected_points, final_points[p.team])))
+                    by_season[cp, code][key != "model"] += sum(_log_loss(*c) for c in calls)
     if not scored:
         return None
 
@@ -180,6 +221,9 @@ def backtest_season_projections(
                 baseline=scores(per[cp]["base"]),
                 points_rmse=rmse(per[cp]["model"]),
                 baseline_points_rmse=rmse(per[cp]["base"]),
+                skill_range=skill_range(
+                    [([by_season[cp, c][0]], [by_season[cp, c][1]]) for c in scored]
+                ),
             )
             for cp in checkpoints
         ],
