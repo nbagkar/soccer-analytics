@@ -13,7 +13,7 @@ the ratings add beyond the table itself (late in a season the table does most of
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,6 +94,7 @@ def backtest_season_projections(
     top_n: int = 4,
     relegation: int = 3,
     seed: int = 1,
+    score_only: Collection[str] | None = None,
 ) -> SeasonBacktest | None:
     """Score projections made part-way through each season against its final table.
 
@@ -102,7 +103,9 @@ def backtest_season_projections(
     code)` returns the model for season `code`, fit only on `window` (everything before the
     checkpoint). Seasons
     that are not a clean double round-robin (splits, play-offs, unfinished) are skipped --
-    their final table is not what the projection describes. None if nothing was scored.
+    their final table is not what the projection describes. `score_only` (season codes)
+    scores just those seasons, the rest still serving as history -- for a tune/holdout split.
+    None if nothing was scored.
     """
     per: dict[float, dict[str, list[Any]]] = {cp: {"model": [], "base": []} for cp in checkpoints}
     scored: list[str] = []
@@ -111,6 +114,8 @@ def backtest_season_projections(
         teams = sorted({o.home_norm for o in rows} | {o.away_norm for o in rows})
         n = len(teams)
         if i == 0 or n < 4 or len(rows) != n * (n - 1):
+            continue
+        if score_only is not None and code not in score_only:
             continue
         position, final_points = final_positions(rows)
         history = [o for _c, prior in seasons[max(0, i - history_seasons) : i] for o in prior]

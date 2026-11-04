@@ -1737,8 +1737,10 @@ def season_backtest(
     n_seasons: int = 20,
     checkpoints: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
     n_sims: int = 4000,
+    score_only: tuple[str, ...] | None = None,
 ) -> SeasonBacktest | None:
-    """Score the season projections on a division's last `n_seasons` completed seasons.
+    """Score the season projections on a division's last `n_seasons` completed seasons
+    (or just the `score_only` season codes among them).
 
     Same rating model, thin-sample handling and projection-from-the-table as the Season tab
     (`_season_model` + `season_rating_noise`), refit at each checkpoint on only what had been
@@ -1771,6 +1773,7 @@ def season_backtest(
         history_seasons=FORECAST_SEASONS - 1,
         n_sims=n_sims,
         relegation=relegation_places(division),
+        score_only=score_only,
     )
 
 
