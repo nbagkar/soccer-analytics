@@ -4,7 +4,9 @@ Mirrors the dashboard's live forecast (`soccer.dashboard.data._forecast_fit`): r
 the last three seasons (`FORECAST_SEASONS`) up to the match, refit every matchday, then the
 goal-space recalibration. Each eligible match (both teams in the window, closing 1X2 present)
 is scored on log loss against the vig-free closing line; the headline number is the mean gap
-``model - market`` (lower is better; 0 would match the market).
+``model - market`` (lower is better; 0 would match the market). Paired comparisons also
+report the change in KL(closing line || model), a far lower-variance read of whether a
+variant moved toward the market -- use it before blaming one division's log loss on the model.
 
 The fit is a vectorized re-implementation of `fit_poisson_shots` + `calibrate_model` so the
 whole sweep runs in minutes; `--verify` checks it against the real `_forecast_fit` first.
@@ -232,7 +234,13 @@ def probs(lam: np.ndarray, mu: np.ndarray, rho: float) -> np.ndarray:
 def walk(
     div: Division, cfg: Config, first_test_season: int = 2
 ) -> list[tuple[str, float, float, float, int]]:
-    """Per scored match: (season, model log loss, market log loss, base-rate-free, thin flag)."""
+    """Per scored match: (season, model log loss, market log loss, KL to market, thin flag).
+
+    ``KL to market`` is KL(closing line || model) for the match: the gap the model would be
+    expected to post if the closing line were the true probabilities. Unlike the log-loss gap
+    it does not depend on which result happened, so its standard error is ~5-8x smaller --
+    see the Scotland note in `main`'s per-division readout.
+    """
     out: list[tuple[str, float, float, float, int]] = []
     actual = np.where(div.hg > div.ag, 0, np.where(div.hg == div.ag, 1, 2))
     days = div.day
@@ -265,8 +273,11 @@ def walk(
             pm = div.p_mkt[test]
             ll_m = -np.log(np.maximum(p[np.arange(len(y)), y], 1e-15))
             ll_k = -np.log(np.maximum(pm[np.arange(len(y)), y], 1e-15))
+            kl = (pm * np.log(pm / np.maximum(p, 1e-15))).sum(axis=1)
             for j in range(len(y)):
-                out.append((div.seasons[s], float(ll_m[j]), float(ll_k[j]), 0.0, int(thin[j])))
+                out.append(
+                    (div.seasons[s], float(ll_m[j]), float(ll_k[j]), float(kl[j]), int(thin[j]))
+                )
     return out
 
 
@@ -414,6 +425,8 @@ def main() -> None:
             label="adjusted_pinned",
         ),
     }
+    from soccer.sources.football_data_co_uk import season_sort_key
+
     configs = [presets[v] for v in ns.variants.split(",")]
     codes = tuple(ns.divisions.split(","))
     t0 = time.time()
@@ -459,24 +472,46 @@ def main() -> None:
             ("all", lambda r: True),
             ("holdout", lambda r: r[0] >= ns.holdout_from[:2]),
         ):
-            d = np.array(
-                [
-                    b[1] - a[1]
-                    for c in codes
-                    for a, b in zip(res[base].get(c, []), res[cfg.label].get(c, []), strict=True)
-                    if keep(a)
-                ]
-            )
+            pairs = [
+                (a, b)
+                for c in codes
+                for a, b in zip(res[base].get(c, []), res[cfg.label].get(c, []), strict=True)
+                if keep(a)
+            ]
+            d = np.array([b[1] - a[1] for a, b in pairs])
+            dk = np.array([b[3] - a[3] for a, b in pairs])
+            se = math.sqrt(len(d))
             print(
-                f"  {name:8s} {d.mean():+.5f} +/- {d.std(ddof=1) / math.sqrt(len(d)):.5f} (1 s.e.)"
+                f"  {name:8s} {d.mean():+.5f} +/- {d.std(ddof=1) / se:.5f} (1 s.e.)  "
+                f"KL to market {dk.mean():+.5f} +/- {dk.std(ddof=1) / se:.5f}"
             )
-        better = 0
+        # Per division on the holdout: the log-loss gap and its paired change, then the paired
+        # change in KL to the closing line. One division's log loss is noisy (s.e. ~0.0015-
+        # 0.0023 per division); KL is not (~0.0002-0.0004). A division whose log loss worsens
+        # while its KL improves by many s.e. moved TOWARD the market and was unlucky with
+        # results -- SC0 under opponent adjustment, 2026-11-04 (FORECAST_OPPONENT_ADJUST note).
+        better = better_kl = 0
         for c in codes:
             g0 = summary[base]["by_division_holdout"][c][0]
             g1 = summary[cfg.label]["by_division_holdout"][c][0]
+            pairs = [
+                (a, b)
+                for a, b in zip(res[base].get(c, []), res[cfg.label].get(c, []), strict=True)
+                if season_sort_key(a[0]) >= season_sort_key(ns.holdout_from)
+            ]
+            if not pairs:
+                continue
+            dl = np.array([b[1] - a[1] for a, b in pairs])
+            dk = np.array([b[3] - a[3] for a, b in pairs])
+            se = math.sqrt(len(pairs))
             better += g1 < g0
-            print(f"  {c:4s} holdout gap {g0:+.5f} -> {g1:+.5f}  ({g1 - g0:+.5f})")
-        print(f"  {better}/{len(codes)} divisions improved on holdout")
+            better_kl += dk.mean() < 0
+            print(
+                f"  {c:4s} holdout gap {g0:+.5f} -> {g1:+.5f}  "
+                f"({dl.mean():+.5f} +/- {dl.std(ddof=1) / se:.5f})  "
+                f"KL {dk.mean():+.5f} +/- {dk.std(ddof=1) / se:.5f}"
+            )
+        print(f"  {better}/{len(codes)} divisions improved on holdout log loss, {better_kl} on KL")
         seasons = sorted({r[0] for rs in res[base].values() for r in rs})
         for sn in seasons:
             d = np.array(

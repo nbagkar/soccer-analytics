@@ -1037,6 +1037,26 @@ FORECAST_RHO = -0.09
 # Every season 2012/13-2026/27 improved; 16 of 18 divisions on the holdout. Scotland (SC0,
 # +0.0035) is the clear exception and La Liga is level. The adjustment wants faster decay:
 # 60d beat 45/75/90/120d, where the plain ratio fit still prefers 90d.
+# 2026-11-04, the Scotland exception, investigated: it is outcome noise, not a model fault.
+# Scored by KL(closing line || model) -- the gap expected if the closing line were true,
+# which ignores which result happened and so has ~1/7 of the log loss's per-division s.e. --
+# the adjustment moves EVERY division toward the market on the holdout, SC0 by -0.00162 +/-
+# 0.00026 (log loss +0.00347 +/- 0.00198, only 1.75 s.e.; tune seasons level, +0.00002) and
+# SP1 by -0.00151 +/- 0.00018. In the SC0 holdout the market itself ran off: favourites priced
+# 0.65-0.80 won 77.8% against 73.0% priced. Hypotheses ruled out
+# (`scripts/market_inversion_diagnostics.py`, `forecast_experiment.py --divisions SC0`):
+#   - the scipy closest-fit fallback in the odds inversion: hit by 0 of 108k played matches in
+#     all 18 divisions (an ~85% favourite with a normal draw price solves exactly); SC0's
+#     residuals (O/U-overdetermined, mean 0.0056) match E2/E3, which gained most;
+#   - extreme favourites: SC0's loss is spread over every price band (fav < 0.50: +0.0044);
+#     N1/P1/G1 have as many 80%+ favourites as SC0 and improved most. Only the 0.80+ band
+#     drifts from the market in SC0 (KL +0.0007 +/- 0.0007), mixed elsewhere (E0/I1 closer,
+#     D1/SP1 further), too small to act on;
+#   - the post-split rounds (game 34+): KL improves there too (-0.00126 +/- 0.00057);
+#   - 60d half-life too short for a 12-team league: SC0 alone prefers 60-90d on tune seasons,
+#     120-250d is clearly worse, and the plain fit beats the adjusted by ~0.004 at every
+#     half-life and spread on the SC0 holdout (the same outcome luck).
+# `soccer backtest-season` cannot score SC0 (no complete round-robin season, the split).
 # Note FORECAST_ALPHA is inert while FORECAST_MARKET_WEIGHT is 1.0: every match with odds
 # is rated from its market expected goals alone; the shots blend only covers odds-less rows.
 FORECAST_OPPONENT_ADJUST = True
