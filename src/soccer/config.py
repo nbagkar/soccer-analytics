@@ -15,6 +15,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from soccer.sources.registry import SourceId
 
+# The forecast ledger's file name, beside the analytics store (the assistant, which is handed
+# only database paths, finds it there).
+LEDGER_FILENAME = "ledger.sqlite"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -78,6 +82,12 @@ class Settings(BaseSettings):
         """The local usage log -- kept out of live.sqlite so that logging a page view never
         changes the live store's mtime, which keys the dashboard's data caches."""
         return self.data_dir / "usage.sqlite"
+
+    @property
+    def ledger_db(self) -> Path:
+        """The forecast ledger (domain/ledger.py) -- its own file for the same reason as the
+        usage log: recording a forecast must not invalidate the data caches."""
+        return self.data_dir / LEDGER_FILENAME
 
     @property
     def analytics_db(self) -> Path:
