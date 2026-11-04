@@ -684,12 +684,18 @@ def _season_model(
     window: list[ResultRow],
     teams: list[str],
     priors: dict[str, tuple[float, float]] | None = None,
+    *,
+    preseason: bool = False,
 ) -> tuple[PoissonModel, list[str]]:
     """The season-projection rating model: the forecast model fit on `window`, with every
     thin-sample or unseen team in `teams` stabilised (`_stabilize_thin_samples`, toward
     `priors` for the clubs it names). Returns (model, the teams the fit never saw -- the
-    newcomers)."""
-    model = _forecast_fit(window)
+    newcomers). `preseason` (no match of the projected season in `window` yet) fits with the
+    slower `SEASON_PRESEASON_DECAY_DAYS`."""
+    model = _forecast_fit(
+        window,
+        half_life_days=SEASON_PRESEASON_DECAY_DAYS if preseason else FORECAST_TIME_DECAY_DAYS,
+    )
     match_counts: dict[str, int] = {}
     for o in window:
         match_counts[o.home_norm] = match_counts.get(o.home_norm, 0) + 1
@@ -920,7 +926,7 @@ def upcoming_season_briefing(
             else anchor_season
         )
         priors = _newcomer_priors(adb, division, last, teams) if last else {}
-    model, promoted = _season_model(window, teams, priors)
+    model, promoted = _season_model(window, teams, priors, preseason=not still_in_progress)
     projections, played, total = _project_from_table(
         model,
         teams,
@@ -969,7 +975,7 @@ FORECAST_SHRINKAGE = 0.5  # was 3.0 before market-implied ratings; see FORECAST_
 # -0.22% at 250d, Serie A -0.10% at 500d, Ligue 1 -0.20% at 250d); only La Liga disagrees, and
 # by a smaller margin (+0.21% at 250d) than the gains elsewhere. 250 days sits in every
 # league's good range. See forecast-model-quality memory for the full sweep.
-FORECAST_TIME_DECAY_DAYS = 120  # was 250 before market-implied ratings (below)
+FORECAST_TIME_DECAY_DAYS = 60  # 250 before market ratings, 120 before opponent adjustment
 # Market-implied ratings: each PLAYED match's closing 1X2 is inverted into the market's
 # expected goals and used as the rating input (fit_poisson_shots market_weight; never an
 # upcoming match's odds). Walk-forward vs the vig-free closing line, refit per matchday,
@@ -999,9 +1005,35 @@ FORECAST_MARKET_WEIGHT = 1.0
 # worth ~0.0002. The fitted values barely moved across 15 seasons (spread 1.06-1.10, home
 # 0.012-0.025, rho -0.08 to -0.11), so they are fixed here. Fitting them per league scored no
 # better than pooled -- league-specific calibration is not worth its extra parameters.
-FORECAST_SPREAD = 1.08
-FORECAST_HOME_SHIFT = 0.02
+# 2026-11-04: re-fit jointly with FORECAST_OPPONENT_ADJUST below -- spread 1.08 -> 1.14,
+# home shift 0.02 -> 0.01, rho unchanged.
+FORECAST_SPREAD = 1.14
+FORECAST_HOME_SHIFT = 0.01
 FORECAST_RHO = -0.09
+# Opponent-adjusted ratings (`fit_poisson_shots(opponent_adjust=True)`): each team rated
+# against the defences/attacks it actually faced, by iterative proportional fitting, instead
+# of by its raw average -- which reads a side that has just played the top three as weak.
+# Measured 2026-11-04 with `scripts/forecast_experiment.py`: the same walk-forward as the
+# live model (three-season window, refit every matchday), 18 divisions 2012/13-2026/27,
+# 94,146 matches. Settings chosen on 2012/13-2020/21 only, then scored on the untouched
+# 2021/22-2026/27 holdout (41,664 matches), gap to the vig-free closing line:
+#   live model before:                          +0.01322
+#   same model, settings re-tuned (1.12, 90d):  +0.01263
+#   opponent-adjusted + re-tuned (this):        +0.01115  (-0.00207 +/- 0.00033 per match)
+#   thin-history slice (a team with <6 games):  +0.0216 -> +0.0134
+# Every season 2012/13-2026/27 improved; 16 of 18 divisions on the holdout. Scotland (SC0,
+# +0.0035) is the clear exception and La Liga is level. The adjustment wants faster decay:
+# 60d beat 45/75/90/120d, where the plain ratio fit still prefers 90d.
+# Note FORECAST_ALPHA is inert while FORECAST_MARKET_WEIGHT is 1.0: every match with odds
+# is rated from its market expected goals alone; the shots blend only covers odds-less rows.
+FORECAST_OPPONENT_ADJUST = True
+# Pre-season projections (none of the season played yet) keep the slower 120-day decay. With
+# 60 days the ratings going into a season are mostly last season's final ~8 games, and
+# `soccer backtest-season` (20 seasons each) got worse pre-season in the top flights (E0
+# points RMSE 10.85 -> 11.38, SP1 9.21 -> 9.61) while every in-season checkpoint improved
+# (E0 25% played 8.62 -> 8.34, F1 7.95 -> 7.62, E2 10.59 -> 10.05). With 120 days pre-season
+# matches or beats the old model: E0 10.88, SP1 9.26, D1 9.66, F1 10.37, I1 9.47, E2 14.48.
+SEASON_PRESEASON_DECAY_DAYS = 120
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
@@ -1042,16 +1074,19 @@ NEWCOMER_RATING_MAP: dict[str, tuple[tuple[float, float], tuple[float, float]]] 
 }
 
 
-def _forecast_fit(outcomes: Sequence[Any]) -> PoissonModel:
-    """The live forecast model: market-implied shots-blend ratings, then the measured
+def _forecast_fit(
+    outcomes: Sequence[Any], *, half_life_days: float = FORECAST_TIME_DECAY_DAYS
+) -> PoissonModel:
+    """The live forecast model: market-implied, opponent-adjusted ratings, then the measured
     goal-space recalibration (`FORECAST_SPREAD`/`FORECAST_HOME_SHIFT`/`FORECAST_RHO`)."""
     return calibrate_model(
         fit_poisson_shots(
             outcomes,
             alpha=FORECAST_ALPHA,
             shrinkage=FORECAST_SHRINKAGE,
-            time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
+            time_decay=_decay(half_life_days),
             market_weight=FORECAST_MARKET_WEIGHT,
+            opponent_adjust=FORECAST_OPPONENT_ADJUST,
         ),
         spread=FORECAST_SPREAD,
         home_shift=FORECAST_HOME_SHIFT,
@@ -1722,8 +1757,12 @@ def season_backtest(
             for (last, _r), (code, rows) in itertools.pairwise(seasons)
         }
 
+    own = {code: set(rows) for code, rows in seasons}
+
     def fit(window: list[ResultRow], teams: list[str], code: str) -> PoissonModel:
-        return _season_model(window, teams, priors.get(code))[0]
+        # the window is the history seasons then the played part of `code`, in that order
+        preseason = not window or window[-1] not in own[code]
+        return _season_model(window, teams, priors.get(code), preseason=preseason)[0]
 
     return backtest_season_projections(
         seasons,
@@ -1802,6 +1841,7 @@ def forecast_report(
         shrinkage=FORECAST_SHRINKAGE,
         time_decay=_decay(FORECAST_TIME_DECAY_DAYS),
         market_weight=FORECAST_MARKET_WEIGHT,
+        opponent_adjust=FORECAST_OPPONENT_ADJUST,
         calibration={
             "spread": FORECAST_SPREAD,
             "home_shift": FORECAST_HOME_SHIFT,

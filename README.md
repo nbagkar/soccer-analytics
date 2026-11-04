@@ -70,6 +70,13 @@ about a third of the model's log-loss gap — +0.0194 → +0.0127 on 10,021 matc
 leagues it was never tuned on, with all 18 leagues tested improving. The model still trails
 the closing line; it is a better-informed forecaster, not a source of betting edge.
 
+Next, ratings were made opponent-adjusted: each club is rated against the sides it actually
+faced, not by its raw average, so a run against the top three no longer reads as weakness.
+With its settings re-fitted on 2012/13–2020/21 only, the gap to the closing line on the
+untouched 2021/22–2026/27 seasons fell +0.0132 → +0.0112 (41,664 matches, 18 leagues; 16 of
+them better, Scotland worse), and +0.0216 → +0.0134 for clubs with under six games behind
+their rating. `scripts/forecast_experiment.py` reruns the measurement.
+
 This realizes the original 12-week plan's full scope. Remaining ideas are optional
 extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 
