@@ -26,6 +26,18 @@ from soccer.config import Settings
 from soccer.domain.aliases import Alias, AliasStore, DuplicateCandidate, suggest_duplicates
 from soccer.domain.availability import AvailabilityAdjustment
 from soccer.domain.freshness import LIVE_STALE_AFTER, Freshness, freshness, injuries_as_of
+from soccer.domain.ledger import (
+    MATCH_WINDOW_DAYS,
+    FinalResult,
+    ForecastLedger,
+    LedgerDB,
+    LiveOutcome,
+    LiveRecord,
+    PublishedForecast,
+    RecordOutcome,
+    grade,
+    safe_record,
+)
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
 from soccer.models.dixon_coles import DixonColesModel
@@ -49,6 +61,7 @@ from soccer.storage.analytics_db import (
     AnalyticsDB,
     MatchLogRow,
     MatchRecord,
+    OddsRow,
     PlayerProfile,
     PlayerRow,
     ResultRow,
@@ -2357,6 +2370,13 @@ class FixtureForecast:
     slate: MarketSlate | None  # None when no model covers the matchup
     experimental: bool = False
     """A cross-league cup forecast (models/crossleague.py) -- measured, but on few matches."""
+    match_id: str | None = None
+    """The live store's canonical match id -- the fixture's identity in the forecast ledger."""
+    division: str | None = None
+    """The results division the forecast came from ("E0", "UCL", ...), when one did."""
+    home_norm: str | None = None
+    away_norm: str | None = None
+    """The model's normalized team names (football-data.co.uk spelling for leagues)."""
 
 
 # Cup competitions forecast by the cross-league model, and its measured standing so every
@@ -2499,6 +2519,7 @@ def fixture_forecasts(
     for v in ups:
         slate = None
         home, away = v.home, v.away
+        hn = an = None
         division = COMPETITION_TO_DIVISION.get(v.competition)
         cup = CUP_COMPETITIONS.get(v.competition)
         if cup:
@@ -2509,7 +2530,20 @@ def fixture_forecasts(
                 if hn and an:
                     lam, mu = cup_fit.expected_goals(ratings[hn], ratings[an])
                     slate = compute_markets(home, away, lam, mu, DEFAULT_RHO)
-            out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate, True))
+            out.append(
+                FixtureForecast(
+                    v.kickoff_utc,
+                    v.competition,
+                    home,
+                    away,
+                    slate,
+                    True,
+                    match_id=v.match_id,
+                    division=cup,
+                    home_norm=hn if slate else None,
+                    away_norm=an if slate else None,
+                )
+            )
             continue
         if division:
             model = model_for(division)
@@ -2522,5 +2556,157 @@ def fixture_forecasts(
                     home, away = names.get(hn, v.home), names.get(an, v.away)
                     lam, mu = model.expected_goals(hn, an)
                     slate = compute_markets(home, away, lam, mu, model.rho)
-        out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate))
+        out.append(
+            FixtureForecast(
+                v.kickoff_utc,
+                v.competition,
+                home,
+                away,
+                slate,
+                match_id=v.match_id,
+                division=division,
+                home_norm=hn if slate else None,
+                away_norm=an if slate else None,
+            )
+        )
     return out
+
+
+# --- Forecast ledger (domain/ledger.py): the live track record ---------------------------
+
+
+def _constants_digest(prefixes: tuple[str, ...], exclude: Collection[str] = ()) -> str:
+    """A short hash of this module's tuning constants with the given prefixes."""
+    values = {
+        k: v
+        for k, v in globals().items()
+        if k.startswith(prefixes) and k.isupper() and k not in exclude
+    }
+    return hashlib.sha256(repr(sorted(values.items())).encode()).hexdigest()[:8]
+
+
+def forecast_model_version(*, cup: bool = False) -> str:
+    """The model-version tag stored with every ledger row: a hash of the FORECAST_* settings
+    (league fixtures) or the CUP_* settings (the cross-league cup model). Re-tuning any of
+    them starts a new version, so the live record can be read per model."""
+    if cup:
+        return "cup-" + _constants_digest(("CUP_",), exclude={"CUP_MODEL_NOTE"})
+    return "league-" + _constants_digest(("FORECAST_",))
+
+
+def ledger_rows(forecasts: Sequence[FixtureForecast]) -> list[PublishedForecast]:
+    """The ledger's record of a fixture list: one row per fixture that actually has a
+    forecast (an unforecast fixture has nothing to grade)."""
+    league_version, cup_version = forecast_model_version(), forecast_model_version(cup=True)
+    rows = []
+    for f in forecasts:
+        if f.slate is None:
+            continue
+        p_home, p_draw, p_away = (m.probability for m in f.slate.result)
+        rows.append(
+            PublishedForecast(
+                match_id=f.match_id,
+                competition=f.competition,
+                division=f.division,
+                kickoff_utc=f.kickoff_utc,
+                home=f.home,
+                away=f.away,
+                home_norm=f.home_norm or normalize_name(f.home),
+                away_norm=f.away_norm or normalize_name(f.away),
+                p_home=p_home,
+                p_draw=p_draw,
+                p_away=p_away,
+                home_xg=f.slate.home_expected,
+                away_xg=f.slate.away_expected,
+                model_version=cup_version if f.experimental else league_version,
+                team_news=False,  # the fixture list shows the base model, never the nudge
+            )
+        )
+    return rows
+
+
+def record_fixture_forecasts(
+    ledger_db: Path, forecasts: Sequence[FixtureForecast]
+) -> RecordOutcome | None:
+    """Write the published fixture forecasts to the ledger; never raises (a ledger failure
+    must not break the page or job that computed them). Returns the RecordOutcome or None."""
+    try:
+        rows = ledger_rows(forecasts)
+    except Exception:  # a malformed slate must not take the page down
+        logger.exception("could not build ledger rows")
+        return None
+    return safe_record(Path(ledger_db), rows) if rows else None
+
+
+def _odds_triple(r: OddsRow) -> tuple[float, float, float] | None:
+    h, d, a = r.close_home_odds, r.close_draw_odds, r.close_away_odds
+    return (h, d, a) if h is not None and d is not None and a is not None else None
+
+
+# Base rates for grading: each division's home/draw/away shares over this many days before
+# the ledger's first graded kickoff there -- so the baseline never sees the matches it scores.
+LEDGER_BASE_RATE_DAYS = 3 * 365
+
+
+def live_record(ledger_db: Path, analytics_db: Path, live_db: Path | None = None) -> LiveRecord:
+    """The ledger graded against every result we have (domain/ledger.py `LiveRecord`).
+
+    Results come from the analytics store (football-data.co.uk, with closing odds); a fixture
+    with a canonical match id whose result isn't there yet falls back to the live store's
+    final score, graded without odds. Teams are bridged with `match_team`, per division.
+    """
+    from datetime import timedelta
+
+    if not Path(ledger_db).exists():
+        return LiveRecord(recorded=0, upcoming=0, awaiting=0, unmatched=0, void=0)
+    with LedgerDB(Path(ledger_db)) as db:
+        entries = ForecastLedger(db).entries()
+    now = datetime.now(UTC)
+    played = [e for e in entries if e.kickoff_utc <= now]
+
+    results: dict[str, list[FinalResult]] = {}
+    base_rates: dict[str, tuple[float, float, float]] = {}
+    divisions = sorted({e.division for e in played if e.division})
+    if divisions and Path(analytics_db).exists():
+        window = timedelta(days=MATCH_WINDOW_DAYS)
+        with AnalyticsDB(Path(analytics_db)) as adb:
+            for division in divisions:
+                days = [e.kickoff_utc.date() for e in played if e.division == division]
+                start, end = min(days) - window, max(days) + window
+                results[division] = [
+                    FinalResult(
+                        match_date=r.match_date,
+                        home=r.home,
+                        away=r.away,
+                        home_norm=r.home_norm,
+                        away_norm=r.away_norm,
+                        home_goals=r.fthg,
+                        away_goals=r.ftag,
+                        closing_odds=_odds_triple(r),
+                    )
+                    for r in adb.results_between(division, start, end)
+                ]
+                first = min(days) - window
+                counts = adb.outcome_counts(
+                    division, first - timedelta(days=LEDGER_BASE_RATE_DAYS), first
+                )
+                total = sum(counts)
+                if total >= 30:
+                    base_rates[division] = (
+                        counts[0] / total,
+                        counts[1] / total,
+                        counts[2] / total,
+                    )
+
+    live: dict[str, LiveOutcome] = {}
+    ids = [e.match_id for e in played if e.match_id]
+    if ids and live_db is not None and Path(live_db).exists():
+        with LiveDB(Path(live_db)) as ldb:
+            store = MatchStateStore(ldb)
+            for match_id in ids:
+                state = store.get(match_id)
+                if state is not None:
+                    live[match_id] = LiveOutcome(
+                        str(state.status), state.home_score, state.away_score
+                    )
+    return grade(entries, results, live=live, base_rates=base_rates, matcher=match_team, now=now)

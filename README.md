@@ -44,7 +44,8 @@ analytics (real xG, shot data). The read-only Streamlit dashboard has:
   cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest); any **Matchup** (market slate,
   correct-score grid, team-news adjustment, attribution); the **Season** projection
   (Monte Carlo title / top-four / relegation odds); and the **Scorecard** — model vs the
-  bookmaker's closing line, with calibration
+  bookmaker's closing line, with calibration, plus the **Live record** of forecasts actually
+  published before kickoff
 - **League tables** — standings, form guide, and underlying (xG) performance
 - **Teams** — one club at a glance, with a season-on-season trajectory
 - **Records** — this season's streaks and standout results, plus all-time honours
@@ -99,6 +100,15 @@ old. Every page warns plainly if data is stale or a refresh failed, and adjusted
 show the date of the team news they use. **Home → Keep it current** does the same on
 demand, and `soccer serve` runs the very same refreshes unattended.
 
+Backtests are re-enactments, so the app also keeps a **forecast ledger**: every time the
+upcoming fixtures are forecast (the Predictions page, its background warm-up, `soccer serve`),
+each fixture's forecast is recorded — the first one published and the last before kickoff,
+tagged with a hash of the model's settings — and frozen at kickoff. As results land they are
+graded (log loss, RPS, Brier) against base rates and, once football-data.co.uk posts it, the
+closing line. The Scorecard's **Live record**, `soccer ledger` and the assistant ("how accurate
+have the predictions been?") report it, and say plainly while the sample is too small to mean
+much. It fills only while real fixtures flow in (a football-data.org token).
+
 `soccer check` self-checks the loaded data (season ordering, duplicates, split club names,
 future-dated results) and runs in `soccer doctor` and the weekly review — so a data defect
 announces itself instead of waiting to be spotted on a page.
@@ -151,7 +161,8 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
-| `soccer serve` | Run the dashboard's refreshes unattended on a cadence (live scores, fixtures, current-season results, injury news and squads when stale, housekeeping) |
+| `soccer serve` | Run the dashboard's refreshes unattended on a cadence (live scores, fixtures, current-season results, injury news and squads when stale, the forecast ledger, housekeeping) |
+| `soccer ledger` | The live track record: published pre-kickoff forecasts graded vs closing line and base rates, by model version |
 | `soccer check` | Self-check the loaded data; exits non-zero on errors |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |
 | `soccer alias-add` | Declare two names refer to the same entity |
@@ -210,8 +221,9 @@ free APIs / open datasets
 - `src/soccer/dashboard/` — pages, the assistant, refresh actions, background auto-refresh
 - `src/soccer/cli/` — the `soccer` command
 
-The `data/` directory holds `raw/` (snapshots), `live.sqlite`, `analytics.duckdb` and
-`usage.sqlite` (the local usage log, kept separate so logging never invalidates data caches).
+The `data/` directory holds `raw/` (snapshots), `live.sqlite`, `analytics.duckdb`,
+`usage.sqlite` (the local usage log) and `ledger.sqlite` (the forecast ledger) — the last two
+kept separate so writing them never invalidates data caches.
 
 Two design commitments worth calling out. **Identity is never assumed from names** — a
 provider's stable id is trusted for its own records; linking across sources by name is
