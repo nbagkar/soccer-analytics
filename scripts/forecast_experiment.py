@@ -22,6 +22,16 @@ Presets: ``baseline`` is the live model as of 2026-10 (plain ratio fit, 120d); `
 the dashboard's current constants. Tuning picks by the tune seasons (before
 ``--holdout-from``) only; the holdout is reported, never selected on. Results 2026-11-04 --
 see the FORECAST_OPPONENT_ADJUST note in `soccer/dashboard/data.py`.
+
+Schedule (rest days / fixture congestion), 2026-11-04 -- NULL, not live:
+    python scripts/forecast_experiment.py --variants live --fit-rest rest   # or c14
+fits log-multipliers on each side's expected goals by its own and its opponent's rest bucket
+(Poisson GLM on the tune seasons, offset = the live model's own xG; target = actual goals or
+market-implied goals), then scores them walk-forward. Holdout 2021/22-2026/27, 41,664 matches,
+paired vs live (+0.01115): rest buckets +0.00003 +/- 0.00006 (goals target) and +0.00005 +/-
+0.00003 (market target); matches-in-14-days +0.00001 +/- 0.00003 and -0.00003 +/- 0.00002
+(9/18 divisions better). Market-target effects are real but ~1% of xG -- see the note
+beside FORECAST_OPPONENT_ADJUST in `soccer/dashboard/data.py`.
 """
 
 from __future__ import annotations
