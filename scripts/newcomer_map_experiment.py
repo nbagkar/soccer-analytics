@@ -221,14 +221,23 @@ def _variant_priors(mp: Map, source_half_life: float, up_into_top: bool, top_map
     return priors
 
 
+_LIVE_PRIORS: Any = None
+
+
 def _run_one(job: dict[str, Any]) -> dict[str, Any]:
     from soccer.dashboard import data
+
+    global _LIVE_PRIORS
+    if _LIVE_PRIORS is None:
+        _LIVE_PRIORS = data._newcomer_priors
     from soccer.storage.analytics_db import AnalyticsDB
 
-    work = Path(tempfile.mkdtemp(prefix="nm_"))
+    work = Path(tempfile.mkdtemp(prefix="nm_", dir=job.get("work_dir")))
     db = work / "analytics.duckdb"
     shutil.copy(job["db"], db)
     v = job["variant"]
+    # pool workers are reused across jobs: start every job from the live function
+    data._newcomer_priors = _LIVE_PRIORS  # type: ignore[assignment]
     if v.get("map") is not None:
         mp = {k: (tuple(a), tuple(b)) for k, (a, b) in v["map"].items()}
         top = v.get("top_map")
@@ -284,6 +293,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             "n_seasons": args.seasons,
             "sims": args.sims,
             "holdout_from": args.holdout_from,
+            "work_dir": args.work_dir,
         }
         for d in args.divisions.split(",")
         for v in variants
@@ -321,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--sims", type=int, default=4000)
     b.add_argument("--workers", type=int, default=4)
     b.add_argument("--out")
+    b.add_argument("--work-dir", help="where each worker copies the database (default: tmp)")
     args = ap.parse_args(argv)
     {"fit": cmd_fit, "backtest": cmd_backtest}[args.cmd](args)
     return 0
