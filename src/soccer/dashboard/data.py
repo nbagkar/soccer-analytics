@@ -1060,6 +1060,21 @@ FORECAST_RHO = -0.09
 # Note FORECAST_ALPHA is inert while FORECAST_MARKET_WEIGHT is 1.0: every match with odds
 # is rated from its market expected goals alone; the shots blend only covers odds-less rows.
 FORECAST_OPPONENT_ADJUST = True
+# Rest days / fixture congestion -- measured 2026-11-04, NOT used (null result). Each side's
+# days since its previous league match (bucketed <=3, 4-5, 6-7, 8-10, 11-20, first/>20) or its
+# league matches in the previous 14 days (0, 1, 2, 3+) as log-multipliers on expected goals,
+# fit on 2012/13-2020/21 by Poisson regression offset by the model's own xG, scored on the
+# 2021/22-2026/27 holdout (41,664 matches; `scripts/forecast_experiment.py --fit-rest`):
+#   rest buckets, fit to goals:          +0.01115 -> +0.01118  (+0.00003 +/- 0.00006)
+#   rest buckets, fit to market xG:      +0.01115 -> +0.01120  (+0.00005 +/- 0.00003)
+#   14-day count, fit to goals:          +0.01115 -> +0.01116  (+0.00001 +/- 0.00003)
+#   14-day count, fit to market xG:      +0.01115 -> +0.01112  (-0.00003 +/- 0.00002)
+# The best (14-day, market) improved 9 of 18 divisions -- a coin flip. The market does price
+# schedule, but small: vs this model's xG, a side on <=3 days' rest is rated ~1% lower and its
+# opponent ~1% higher (+/- 0.2%); a side with no match in 14 days ~0.8% lower. Fit to actual
+# goals, every bucket is within 2 s.e. of zero. A 1% xG nudge moves 1X2 by ~0.3 points, below
+# what log loss can see. Cup and European ties are not in the history, so the rest of clubs
+# in Europe is mismeasured -- the one place a real effect could still hide.
 # Pre-season projections (none of the season played yet) keep the slower 120-day decay. With
 # 60 days the ratings going into a season are mostly last season's final ~8 games, and
 # `soccer backtest-season` (20 seasons each) got worse pre-season in the top flights (E0

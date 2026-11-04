@@ -24,6 +24,16 @@ Presets: ``baseline`` is the live model as of 2026-10 (plain ratio fit, 120d); `
 the dashboard's current constants. Tuning picks by the tune seasons (before
 ``--holdout-from``) only; the holdout is reported, never selected on. Results 2026-11-04 --
 see the FORECAST_OPPONENT_ADJUST note in `soccer/dashboard/data.py`.
+
+Schedule (rest days / fixture congestion), 2026-11-04 -- NULL, not live:
+    python scripts/forecast_experiment.py --variants live --fit-rest rest   # or c14
+fits log-multipliers on each side's expected goals by its own and its opponent's rest bucket
+(Poisson GLM on the tune seasons, offset = the live model's own xG; target = actual goals or
+market-implied goals), then scores them walk-forward. Holdout 2021/22-2026/27, 41,664 matches,
+paired vs live (+0.01115): rest buckets +0.00003 +/- 0.00006 (goals target) and +0.00005 +/-
+0.00003 (market target); matches-in-14-days +0.00001 +/- 0.00003 and -0.00003 +/- 0.00002
+(9/18 divisions better). Market-target effects are real but ~1% of xG -- see the note
+beside FORECAST_OPPONENT_ADJUST in `soccer/dashboard/data.py`.
 """
 
 from __future__ import annotations
@@ -60,6 +70,12 @@ class Config:
     adjusted: bool = False  # opponent-adjusted (iterative) fit instead of plain ratio
     iterations: int = 12
     pin_attack_only: bool = False  # rescale attack, compensate defence (exact MLE fixed point)
+    # Schedule adjustment (see `rest_buckets`): log-multipliers on expected goals by rest
+    # bucket -- `rest_own[b]` on a side's own goals when IT is in bucket b, `rest_opp[b]` on
+    # its goals when the OPPONENT is in bucket b. Empty = no adjustment (the live model).
+    rest_mode: str = "rest"  # "rest" (days since last match) or "c14" (matches in last 14d)
+    rest_own: tuple[float, ...] = ()
+    rest_opp: tuple[float, ...] = ()
     label: str = "baseline"
 
 
@@ -134,6 +150,57 @@ def load(db_path: Path, codes: tuple[str, ...]) -> dict[str, Division]:
                 teams=teams,
             )
     return out
+
+
+# ---------------------------------------------------------------- schedule
+
+# Days since the side's previous LEAGUE match in the same season (cup and European ties are
+# not in this history, so midweek European games are invisible). Buckets:
+#   0: <=3d  1: 4-5d  2: 6-7d (the normal week)  3: 8-10d  4: 11-20d (international break)
+#   5: first match of the season or >20d
+REST_EDGES = np.array([3, 5, 7, 10, 20])
+REST_LABELS = ("<=3d", "4-5d", "6-7d", "8-10d", "11-20d", "first/>20d")
+# League matches in the 14 days before kick-off: 0, 1, 2, 3+.
+C14_LABELS = ("0", "1", "2", "3+")
+_REST_CACHE: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
+
+
+def rest_days(div: Division) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per row: (home rest days, away rest days, home matches in last 14d, away ...).
+
+    Rest is NaN for a side's first match of the season. Rows are chronological."""
+    n = len(div.day)
+    rest = np.full((n, 2), np.nan)
+    c14 = np.zeros((n, 2))
+    history: dict[tuple[int, int], list[int]] = {}
+    for i in range(n):
+        for side, team in enumerate((div.home[i], div.away[i])):
+            past = history.setdefault((int(div.season_idx[i]), int(team)), [])
+            d = int(div.day[i])
+            if past:
+                rest[i, side] = d - past[-1]
+                c14[i, side] = sum(1 for p in past[-4:] if d - p <= 14)
+            past.append(d)
+    return rest[:, 0], rest[:, 1], c14[:, 0], c14[:, 1]
+
+
+def rest_buckets(div: Division, mode: str) -> tuple[np.ndarray, np.ndarray]:
+    """Per row bucket index for (home side, away side)."""
+    key = (div.code, mode)
+    if key not in _REST_CACHE:
+        rh, ra, ch, ca = rest_days(div)
+        if mode == "rest":
+
+            def b(r: np.ndarray) -> np.ndarray:
+                out = np.searchsorted(REST_EDGES, r, side="left")
+                return np.where(np.isnan(r), len(REST_EDGES), out)
+
+            _REST_CACHE[key] = (b(rh), b(ra))
+        elif mode == "c14":
+            _REST_CACHE[key] = (np.minimum(ch, 3).astype(int), np.minimum(ca, 3).astype(int))
+        else:
+            raise ValueError(mode)
+    return _REST_CACHE[key]
 
 
 # ---------------------------------------------------------------- model
@@ -231,17 +298,20 @@ def probs(lam: np.ndarray, mu: np.ndarray, rho: float) -> np.ndarray:
 # ---------------------------------------------------------------- walk-forward
 
 
-def walk(
-    div: Division, cfg: Config, first_test_season: int = 2
-) -> list[tuple[str, float, float, float, int]]:
-    """Per scored match: (season, model log loss, market log loss, KL to market, thin flag).
+def walk(div: Division, cfg: Config, first_test_season: int = 2) -> list[tuple[Any, ...]]:
+    """Per scored match: (season, model log loss, market log loss, KL to market, thin flag,
+    row index, model home xG, model away xG) -- xG before any schedule adjustment.
 
     ``KL to market`` is KL(closing line || model) for the match: the gap the model would be
     expected to post if the closing line were the true probabilities. Unlike the log-loss gap
     it does not depend on which result happened, so its standard error is ~5-8x smaller --
     see the Scotland note in `main`'s per-division readout.
     """
-    out: list[tuple[str, float, float, float, int]] = []
+    out: list[tuple[Any, ...]] = []
+    if cfg.rest_own or cfg.rest_opp:
+        bh, ba = rest_buckets(div, cfg.rest_mode)
+        own = np.asarray(cfg.rest_own) if cfg.rest_own else None
+        opp = np.asarray(cfg.rest_opp) if cfg.rest_opp else None
     actual = np.where(div.hg > div.ag, 0, np.where(div.hg == div.ag, 1, 2))
     days = div.day
     for s in range(first_test_season, len(div.seasons)):
@@ -262,8 +332,19 @@ def walk(
             if not ok.any():
                 continue
             test, hi, ai = test[ok], hi[ok], ai[ok]
-            lam = ha * att[hi] * dfn[ai]
-            mu = aa * att[ai] * dfn[hi]
+            lam0 = ha * att[hi] * dfn[ai]
+            mu0 = aa * att[ai] * dfn[hi]
+            lam, mu = lam0, mu0
+            if cfg.rest_own or cfg.rest_opp:
+                adj_h = np.zeros(len(test))
+                adj_a = np.zeros(len(test))
+                if own is not None:
+                    adj_h += own[bh[test]]
+                    adj_a += own[ba[test]]
+                if opp is not None:
+                    adj_h += opp[ba[test]]
+                    adj_a += opp[bh[test]]
+                lam, mu = lam0 * np.exp(adj_h), mu0 * np.exp(adj_a)
             p = probs(lam, mu, cfg.rho)
             y = actual[test]
             g = np.bincount(
@@ -276,7 +357,16 @@ def walk(
             kl = (pm * np.log(pm / np.maximum(p, 1e-15))).sum(axis=1)
             for j in range(len(y)):
                 out.append(
-                    (div.seasons[s], float(ll_m[j]), float(ll_k[j]), float(kl[j]), int(thin[j]))
+                    (
+                        div.seasons[s],
+                        float(ll_m[j]),
+                        float(ll_k[j]),
+                        float(kl[j]),
+                        int(thin[j]),
+                        int(test[j]),
+                        float(lam0[j]),
+                        float(mu0[j]),
+                    )
                 )
     return out
 
@@ -340,6 +430,90 @@ def run_configs(
     return res
 
 
+# ---------------------------------------------------------------- schedule fit
+
+
+def poisson_glm(
+    y: np.ndarray, x: np.ndarray, offset: np.ndarray, iters: int = 25
+) -> tuple[np.ndarray, np.ndarray]:
+    """log E[y] = offset + x @ beta, by Newton-Raphson. Returns (beta, quasi-Poisson s.e.).
+
+    `y` need not be integer (market-implied goals): the Poisson score equations are then a
+    quasi-likelihood, and the s.e. is scaled by the Pearson dispersion."""
+    beta = np.zeros(x.shape[1])
+    for _ in range(iters):
+        m = np.exp(offset + x @ beta)
+        info = x.T @ (x * m[:, None])
+        step = np.linalg.solve(info, x.T @ (y - m))
+        beta += step
+        if np.abs(step).max() < 1e-10:
+            break
+    m = np.exp(offset + x @ beta)
+    info = x.T @ (x * m[:, None])
+    phi = float(((y - m) ** 2 / m).sum() / (len(y) - x.shape[1]))
+    return beta, np.sqrt(np.diag(np.linalg.inv(info)) * phi)
+
+
+def fit_rest(
+    res: dict[str, list[Any]], mode: str, holdout_from: str, target: str
+) -> tuple[tuple[float, ...], tuple[float, ...], float]:
+    """Fit (own, opp) rest log-multipliers on the TUNE seasons of a walk-forward run.
+
+    One row per side per match: y = that side's goals (`target="goals"`) or its market-implied
+    expected goals (`target="market"`), offset = log of the model's own expected goals, and
+    dummies for the side's own rest bucket and the opponent's. An intercept absorbs any
+    overall level bias; it is reported but not applied. Reference bucket = 6-7 days (rest) or
+    one match in 14 days (c14), fixed at 0."""
+    from soccer.sources.football_data_co_uk import season_sort_key
+
+    labels = REST_LABELS if mode == "rest" else C14_LABELS
+    ref = 2 if mode == "rest" else 1
+    nb = len(labels)
+    hk = season_sort_key(holdout_from)
+    ys, offs, own_b, opp_b = [], [], [], []
+    for code, recs in res.items():
+        div = _DIVS[code]
+        bh, ba = rest_buckets(div, mode)
+        for r in recs:
+            if season_sort_key(r[0]) >= hk:
+                continue
+            i, lam0, mu0 = r[5], r[6], r[7]
+            if target == "goals":
+                yh, ya = div.hg[i], div.ag[i]
+            else:
+                yh, ya = div.mh[i], div.ma[i]
+                if np.isnan(yh):
+                    continue
+            ys += [yh, ya]
+            offs += [math.log(lam0), math.log(mu0)]
+            own_b += [bh[i], ba[i]]
+            opp_b += [ba[i], bh[i]]
+    y = np.array(ys)
+    ob, pb = np.array(own_b), np.array(opp_b)
+    keep = [b for b in range(nb) if b != ref]
+    x = np.column_stack(
+        [np.ones(len(y))] + [(ob == b).astype(float) for b in keep] + [(pb == b) for b in keep]
+    ).astype(float)
+    beta, se = poisson_glm(y, x, np.array(offs))
+    own = np.zeros(nb)
+    opp = np.zeros(nb)
+    own[keep] = beta[1 : 1 + len(keep)]
+    opp[keep] = beta[1 + len(keep) :]
+    own_se = np.zeros(nb)
+    opp_se = np.zeros(nb)
+    own_se[keep] = se[1 : 1 + len(keep)]
+    opp_se[keep] = se[1 + len(keep) :]
+    print(f"\nrest fit ({mode}, target={target}) on tune seasons, {len(y)} side-matches:")
+    print(f"  intercept {beta[0]:+.4f} +/- {se[0]:.4f} (not applied)")
+    counts = np.bincount(ob, minlength=nb)
+    for b in range(nb):
+        print(
+            f"  {labels[b]:>10s} n={counts[b]:6d}  own {own[b]:+.4f} +/- {own_se[b]:.4f}"
+            f"   opp {opp[b]:+.4f} +/- {opp_se[b]:.4f}"
+        )
+    return tuple(round(float(v), 4) for v in own), tuple(round(float(v), 4) for v in opp), beta[0]
+
+
 # ---------------------------------------------------------------- verification
 
 
@@ -398,6 +572,12 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out", default="")
     ap.add_argument(
+        "--fit-rest",
+        default="",
+        help="rest|c14: fit schedule multipliers on the tune seasons of the first variant, "
+        "then compare it with the fitted variants (goals and market-xG targets)",
+    )
+    ap.add_argument(
         "--grid",
         default="",
         help='JSON {"field": [values], ...} swept on the first variant; ranked on tune seasons',
@@ -430,6 +610,25 @@ def main() -> None:
     configs = [presets[v] for v in ns.variants.split(",")]
     codes = tuple(ns.divisions.split(","))
     t0 = time.time()
+    prior: dict[str, dict[str, list[Any]]] = {}
+    if ns.fit_rest:
+        base_cfg = configs[0]
+        first = run_configs(db, [base_cfg], codes, ns.workers)[base_cfg.label]
+        fitted = []
+        for target in ("goals", "market"):
+            own, opp, _ = fit_rest(first, ns.fit_rest, ns.holdout_from, target)
+            fitted.append(
+                replace(
+                    base_cfg,
+                    rest_mode=ns.fit_rest,
+                    rest_own=own,
+                    rest_opp=opp,
+                    label=f"{ns.fit_rest}_{target}",
+                )
+            )
+            print(f"  -> rest_own={own} rest_opp={opp}")
+        configs = [base_cfg, *fitted]
+        prior = {base_cfg.label: first}
     if ns.grid:
         import itertools
 
@@ -457,7 +656,8 @@ def main() -> None:
         if ns.out:
             Path(ns.out).write_text(json.dumps([(sm, label) for sm, label in rows], indent=1))
         return
-    res = run_configs(db, configs, codes, ns.workers)
+    todo = [c for c in configs if c.label not in prior]
+    res = {**prior, **run_configs(db, todo, codes, ns.workers)}
     summary = {label: summarize(recs, ns.holdout_from) for label, recs in res.items()}
     for label, s in summary.items():
         print(
