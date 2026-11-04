@@ -996,6 +996,7 @@ def backtest_season(
         tbl.add_column(f"{col} LL", justify="right")
     tbl.add_column("Baseline LL", justify="right")
     tbl.add_column("Skill", justify="right")
+    tbl.add_column("90% range", justify="right")
     tbl.add_column("Pts RMSE (base)", justify="right")
     for cp in report.checkpoints:
         model_ll = [cp.model[e].log_loss for e in ("title", "top", "relegation")]
@@ -1005,6 +1006,7 @@ def backtest_season(
             *(f"{x:.3f}" for x in model_ll),
             f"{base_ll:.3f}",
             f"{cp.skill:+.0%}",
+            f"{cp.skill_range[0]:+.0%} to {cp.skill_range[1]:+.0%}",
             f"{cp.points_rmse:.1f} ({cp.baseline_points_rmse:.1f})",
         )
     console.print(tbl)
@@ -1012,7 +1014,8 @@ def backtest_season(
         "[dim]Log loss of each yes/no outcome per team-season (lower is better). Baseline: "
         "every team league-average, starting from the same banked points -- Skill is the share "
         "of its error the ratings remove. Late in a season the table itself does most of the "
-        "work, so skill shrinks while every error falls.[/dim]"
+        "work, so skill shrinks while every error falls. The 90% range resamples whole "
+        "seasons: a change smaller than it is not evidence either way.[/dim]"
     )
 
 
