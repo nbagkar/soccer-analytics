@@ -16,7 +16,16 @@ from typing import Any
 
 from soccer.config import Settings
 from soccer.domain.availability import PlayerAvailability
-from soccer.domain.freshness import FIXTURES, INJURIES, LIVE, RESULTS, SQUADS, RefreshLog
+from soccer.domain.freshness import (
+    FIXTURES,
+    INJURIES,
+    LIVE,
+    ODDS,
+    RESULTS,
+    SQUADS,
+    RefreshLog,
+)
+from soccer.domain.prematch import UpcomingOddsStore
 from soccer.ingest.pipeline import IngestPipeline
 from soccer.sources.football_data_co_uk import (
     CUP_DIVISIONS,
@@ -271,6 +280,41 @@ def refresh_results(settings: Settings) -> str:
         return f"refreshed {total} results across {slices} league slice(s) (season {season})" + cup
 
     return _logged(settings, RESULTS, run)
+
+
+def has_upcoming_fixtures(settings: Settings) -> bool:
+    """Whether the live store holds any fixture still to be played."""
+    from soccer.domain.match_state import MatchStateStore
+
+    if not settings.live_db.exists():
+        return False
+    with LiveDB(settings.live_db) as db:
+        return bool(MatchStateStore(db).upcoming(limit=1))
+
+
+def update_upcoming_odds(settings: Settings) -> str:
+    """Pull the coming round's pre-match odds (football-data.co.uk fixtures.csv) into the
+    live store, where the Upcoming forecasts pick them up (`domain/prematch.py`).
+
+    Needs no token. A fetch failure raises and is stamped in `refresh_log`; odds already
+    stored stay in place, each carrying the time it was fetched.
+    """
+    settings.ensure_dirs()
+    raw = RawStore(settings.raw_dir)
+
+    def run() -> str:
+        with FootballDataCoUk(raw) as source:
+            rows = source.fetch_upcoming_odds()
+        with LiveDB(settings.live_db) as db:
+            store = UpcomingOddsStore(db)
+            store.replace(rows)
+            kept = store.count()
+        divisions = len({r.division for r in rows})
+        if not rows:
+            return f"no priced fixtures in the file right now ({kept} kept from earlier)"
+        return f"pre-match odds for {len(rows)} fixtures across {divisions} division(s)"
+
+    return _logged(settings, ODDS, run)
 
 
 def _recent_seasons(n: int = 3) -> list[str]:

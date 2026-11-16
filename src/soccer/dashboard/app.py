@@ -13,6 +13,7 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 from __future__ import annotations
 
 import html
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -87,7 +88,12 @@ from soccer.models.evaluation import (
 from soccer.models.markets import Market, MarketSlate, OverUnder
 from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
-from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
+from soccer.sources.football_data_co_uk import (
+    UPCOMING_BOOK_NAMES,
+    division_name,
+    season_label,
+    season_sort_key,
+)
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
 from soccer.storage.analytics_db import MatchLogRow, MatchRecord, PlayerProfile, PlayerRow, TeamForm
 from soccer.storage.live_db import LiveDB
@@ -211,6 +217,12 @@ def _render_home(settings: Settings) -> None:
                 st.toast(actions.update_fixtures(settings), icon="✅")
             _cached_fixture_forecasts.clear()  # show the freshly pulled schedule at once
             _cached_upcoming_season_briefing.clear()  # re-project on the new fixtures
+            _go("Home")
+        if st.button("Update pre-match odds", icon=":material/price_check:", width="stretch"):
+            _track(usage.ACTION, "update_upcoming_odds")
+            with st.spinner("Fetching pre-match odds for the coming round…"):
+                st.toast(actions.update_upcoming_odds(settings), icon="✅")
+            _cached_fixture_forecasts.clear()  # lead with the new prices at once
             _go("Home")
         if st.button("Update squads", icon=":material/groups:", width="stretch"):
             _track(usage.ACTION, "update_squads")
@@ -1887,6 +1899,15 @@ def _render_live_record(record: LiveRecord) -> None:
             _score_row(f"Model, on the {s.n_with_odds} with odds", s.model_on_odds),
             _score_row(f"Market (closing line), same {s.n_with_odds}", s.market),
         ]
+    if s.model_on_prematch is not None and s.prematch is not None:
+        rows += [
+            _score_row(
+                f"Model, on the {s.n_with_prematch} with pre-match odds", s.model_on_prematch
+            ),
+            _score_row(
+                f"Pre-match odds (what Upcoming led with), same {s.n_with_prematch}", s.prematch
+            ),
+        ]
     st.markdown(_html_table(rows), unsafe_allow_html=True)
     if record.is_small:
         st.warning(
@@ -2351,12 +2372,23 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         )
         if choice != "All competitions":
             fixtures = [f for f in fixtures if f.competition == choice]
-    forecastable = [f for f in fixtures if f.slate is not None]
-    uncovered = [f for f in fixtures if f.slate is None]
-    st.caption(
-        f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast from each league's "
-        "model (shots-on-target Poisson over recent seasons). Directional, not precise."
-    )
+    forecastable = [f for f in fixtures if f.headline is not None]
+    uncovered = [f for f in fixtures if f.headline is None]
+    priced = [f for f in forecastable if f.from_odds]
+    if priced:
+        st.caption(
+            f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast. "
+            f"**{len(priced)} lead with bookmakers' pre-match odds** (margin removed) — "
+            "measurably the stronger forecast — with the model's own numbers beside them; the "
+            "rest are the model alone (odds are only published for the coming round, and not "
+            "for cups). Directional, not precise."
+        )
+    else:
+        st.caption(
+            f"{len(forecastable)} of {len(fixtures)} upcoming matches forecast from each "
+            "league's model (ratings built from past closing odds, over recent seasons). "
+            "Directional, not precise."
+        )
     if not forecastable:
         st.info(
             "No forecastable fixtures here yet. Go to **Home** to update fixtures and add a "
@@ -2379,10 +2411,12 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         "Favourite",
         "Confidence",
     ]
+    if priced:
+        hdr += ["Source", "Model 1·X·2"]
     body = ""
     for f in forecastable:
-        assert f.slate is not None  # `forecastable` was already filtered to slate is not None
-        s = f.slate
+        s = f.headline
+        assert s is not None  # `forecastable` was already filtered to headline is not None
         home_p, draw_p, away_p = (m.probability for m in s.result)
         over25 = next(o for o in s.over_under if o.line == 2.5).over
         btts_yes = next(m.probability for m in s.btts if m.name == "Yes")
@@ -2407,6 +2441,8 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
             f'<span style="color:{_YES}">{_esc(fav)}</span>',
             _confidence_cell(pick_p),
         ]
+        if priced:
+            cells += [_source_cell(f), _model_cell(f)]
         tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
         body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
     head = "".join(f'<th style="text-align:left;padding:4px 12px 4px 0">{h}</th>' for h in hdr)
@@ -2416,15 +2452,44 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Exp gls = the model's expected goals per side (this is where matches differ — the "
+        "Exp gls = expected goals per side (this is where matches differ — the "
         "single most-likely scoreline is 1-1 for most games and only ~12% likely, so it's not "
         "shown). 1/X/2 = home / draw / away win. O2.5 = over 2.5 goals. BTTS = both teams score. "
-        "Confidence = the probability the model gave its favourite; ~33% is a coin flip, "
+        "Confidence = the probability given to the favourite; ~33% is a coin flip, "
         "anything near that is barely a lean."
     )
+    if priced:
+        lines = [f.prematch for f in priced if f.prematch is not None]
+        books = sorted({UPCOMING_BOOK_NAMES.get(ln.book, ln.book) for ln in lines})
+        fetched = age_label(max(ln.fetched_at for ln in lines), datetime.now(UTC))
+        st.caption(
+            f"Source **Odds** = pre-match prices from football-data.co.uk ({', '.join(books)}; "
+            f"fetched {fetched}), margin removed. 1/X/2 are those prices exactly; expected "
+            "goals, O2.5 and BTTS are what the prices imply. This is the market's view, not "
+            "the model's: over 2021/22–2026/27 such odds sat 0.004 from the closing line "
+            "against the model's 0.011 (log loss, 34,891 matches), and mixing the model in "
+            "added nothing. **Model 1·X·2** is the model's own forecast for the same match — "
+            "both are recorded and graded on the Scorecard."
+        )
     if any(f.experimental for f in forecastable):
         st.caption(f"ᵉˣᵖ {CUP_MODEL_NOTE}")
     _render_uncovered_fixtures(uncovered)
+
+
+def _source_cell(f: FixtureForecast) -> str:
+    if not f.from_odds:
+        return f'<span style="color:{_MUTE}">Model</span>'
+    return "<b>Odds</b>"
+
+
+def _model_cell(f: FixtureForecast) -> str:
+    """The model's own 1X2 beside an odds-led row; blank where the model IS the row."""
+    if not f.from_odds:
+        return ""
+    if f.slate is None:
+        return f'<span style="color:{_MUTE}" title="No model covers this matchup">—</span>'
+    h, d, a = (round(100 * m.probability) for m in f.slate.result)
+    return f'<span style="color:{_MUTE};font-variant-numeric:tabular-nums">{h} · {d} · {a}</span>'
 
 
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:

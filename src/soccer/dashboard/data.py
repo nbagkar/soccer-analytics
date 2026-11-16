@@ -17,7 +17,7 @@ import pickle
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast
@@ -40,11 +40,19 @@ from soccer.domain.ledger import (
 )
 from soccer.domain.match_state import MatchStateStore, MatchView
 from soccer.domain.names import normalize_name
+from soccer.domain.prematch import PrematchLine, UpcomingOddsStore, find_line
 from soccer.models.dixon_coles import DixonColesModel
 from soccer.models.elo import EloRating, power_ranking
 from soccer.models.evaluation import ForecastReport
-from soccer.models.markets import MarketSlate
-from soccer.models.poisson import DEFAULT_RHO, PoissonModel, calibrate_model, fit_poisson_shots
+from soccer.models.markets import Market, MarketSlate
+from soccer.models.poisson import (
+    DEFAULT_RHO,
+    PoissonModel,
+    calibrate_model,
+    fit_poisson_shots,
+    implied_goal_rates,
+    implied_goal_rates_with_total,
+)
 from soccer.models.season_backtest import SeasonBacktest
 from soccer.models.simulation import (
     TeamProjection,
@@ -2430,6 +2438,69 @@ class FixtureForecast:
     home_norm: str | None = None
     away_norm: str | None = None
     """The model's normalized team names (football-data.co.uk spelling for leagues)."""
+    prematch: PrematchLine | None = None
+    """The vig-free pre-match odds for this fixture, when fixtures.csv prices it."""
+    market: MarketSlate | None = None
+    """Every market implied by `prematch`: its 1X2 exactly, the rest from the expected goals
+    the prices imply (so they stay mutually consistent). None without `prematch`."""
+
+    @property
+    def headline(self) -> MarketSlate | None:
+        """What the page leads with: the pre-match odds where there are any (measurably the
+        stronger forecast -- see PREMATCH_ODDS_HEADLINE), else the model. `slate` is always
+        the model's own."""
+        if PREMATCH_ODDS_HEADLINE and self.market is not None:
+            return self.market
+        return self.slate
+
+    @property
+    def from_odds(self) -> bool:
+        return PREMATCH_ODDS_HEADLINE and self.market is not None
+
+
+# Lead the Upcoming forecasts with pre-match odds where football-data.co.uk's fixtures.csv
+# prices the fixture (`domain/prematch.py`); the model's own forecast is kept beside it and
+# is all there is beyond the coming round and for cups. Measured 2026-11-16,
+# `scripts/prematch_odds_backtest.py`: the live walk-forward, 18 divisions, 2021/22-2026/27
+# holdout (34,891 matches), log-loss gap to the vig-free closing line --
+#   model alone                              +0.01088 +/- 0.00074
+#   pre-match market average alone           +0.00408 +/- 0.00041
+#   blend, weight fit on 2019/20-2020/21     +0.00407  (vs odds alone: -0.00000 +/- 0.00007)
+#   Bet365 pre-match alone / blended at 15%  +0.00434 / +0.00428
+# The pre-match line is closer to the close in all 18 divisions and the model adds nothing
+# measurable on top, so the odds are shown as they are -- no blend. This is the market's view,
+# not the model's: False puts the model back in the lead everywhere.
+# (Named outside FORECAST_* on purpose: it is not a model setting, and must not start a new
+# model version in the forecast ledger.)
+PREMATCH_ODDS_HEADLINE = True
+
+
+def market_slate(home: str, away: str, line: PrematchLine) -> MarketSlate:
+    """The full market slate a pre-match line implies.
+
+    The prices are inverted into the market's expected goals (1X2 jointly with the over/under
+    2.5 where priced -- the same inversion the ratings use on closing lines), and every
+    market is read off that score grid. The 1X2 and double chance are then set to the
+    vig-free prices exactly, so the headline is the odds themselves, not a fit to them.
+    """
+    from soccer.models.markets import compute_markets
+
+    p_home, p_away = round(line.p_home, 3), round(line.p_away, 3)
+    if line.p_over25 is not None:
+        lam, mu = implied_goal_rates_with_total(p_home, p_away, round(line.p_over25, 3))
+    else:
+        lam, mu = implied_goal_rates(p_home, p_away)
+    slate = compute_markets(home, away, lam, mu, DEFAULT_RHO)
+    h, d, a = line.probs
+    return replace(
+        slate,
+        result=[Market(home, h), Market("Draw", d), Market(away, a)],
+        double_chance=[
+            Market(f"{home} or Draw", h + d),
+            Market(f"{home} or {away}", h + a),
+            Market(f"Draw or {away}", d + a),
+        ],
+    )
 
 
 # Cup competitions forecast by the cross-league model, and its measured standing so every
@@ -2540,6 +2611,7 @@ def fixture_forecasts(
         return []
     with LiveDB(live_db) as db:
         ups = MatchStateStore(db).upcoming(limit=limit)
+        odds = UpcomingOddsStore(db).all()
 
     models: dict[str, PoissonModel | None] = {}
     model_names: dict[str, dict[str, str]] = {}  # division -> {norm: canonical display}
@@ -2609,6 +2681,18 @@ def fixture_forecasts(
                     home, away = names.get(hn, v.home), names.get(an, v.away)
                     lam, mu = model.expected_goals(hn, an)
                     slate = compute_markets(home, away, lam, mu, model.rho)
+        line = (
+            find_line(
+                odds,
+                division=division,
+                kickoff_utc=v.kickoff_utc,
+                home=v.home,
+                away=v.away,
+                matcher=match_team,
+            )
+            if division and odds
+            else None
+        )
         out.append(
             FixtureForecast(
                 v.kickoff_utc,
@@ -2620,6 +2704,8 @@ def fixture_forecasts(
                 division=division,
                 home_norm=hn if slate else None,
                 away_norm=an if slate else None,
+                prematch=line,
+                market=market_slate(home, away, line) if line else None,
             )
         )
     return out
@@ -2648,8 +2734,10 @@ def forecast_model_version(*, cup: bool = False) -> str:
 
 
 def ledger_rows(forecasts: Sequence[FixtureForecast]) -> list[PublishedForecast]:
-    """The ledger's record of a fixture list: one row per fixture that actually has a
-    forecast (an unforecast fixture has nothing to grade)."""
+    """The ledger's record of a fixture list: one row per fixture the MODEL forecast, with
+    the pre-match odds shown beside it where there were any -- so the live record grades
+    both. A fixture with odds but no model forecast is not recorded: the ledger is the
+    model's track record, and there is nothing of the model's to grade."""
     league_version, cup_version = forecast_model_version(), forecast_model_version(cup=True)
     rows = []
     for f in forecasts:
@@ -2673,6 +2761,8 @@ def ledger_rows(forecasts: Sequence[FixtureForecast]) -> list[PublishedForecast]
                 away_xg=f.slate.away_expected,
                 model_version=cup_version if f.experimental else league_version,
                 team_news=False,  # the fixture list shows the base model, never the nudge
+                prematch=f.prematch.probs if f.prematch else None,
+                prematch_book=f.prematch.book if f.prematch else None,
             )
         )
     return rows

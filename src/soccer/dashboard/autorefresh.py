@@ -61,6 +61,10 @@ def _jobs(settings: Settings) -> list[tuple[str, Callable[[Settings], str]]]:
         jobs.append(("results", actions.refresh_results))
     if token and fresh.fixtures_stale:
         jobs.append(("fixtures", actions.update_fixtures))
+    if fresh.odds_stale and actions.has_upcoming_fixtures(settings):
+        # After fixtures (the odds attach to them, so with none loaded there is nothing to
+        # price); one small file, no token needed.
+        jobs.append(("odds", actions.update_upcoming_odds))
     if settings.enable_fpl and fresh.injuries_stale:
         jobs.append(("injuries", actions.update_availability))
     if token and fresh.squads_stale:

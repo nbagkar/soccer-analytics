@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_entity (
@@ -147,6 +147,27 @@ CREATE TABLE IF NOT EXISTS refresh_log (
     ran_at  TEXT NOT NULL,
     ok      INTEGER NOT NULL,
     message TEXT
+);
+
+-- Pre-match odds for the coming round (football-data.co.uk fixtures.csv; domain/prematch.py).
+-- One row per fixture, overwritten on each fetch and dropped a few days after the match.
+-- Kept here, not in its own file, on purpose: new odds change the Upcoming forecasts, so they
+-- SHOULD move this store's mtime and invalidate the forecast caches. Added in v12.
+CREATE TABLE IF NOT EXISTS upcoming_odds (
+    division     TEXT NOT NULL,
+    match_date   TEXT NOT NULL,
+    home_norm    TEXT NOT NULL,
+    away_norm    TEXT NOT NULL,
+    home         TEXT NOT NULL,
+    away         TEXT NOT NULL,
+    book         TEXT NOT NULL,
+    home_odds    REAL NOT NULL,
+    draw_odds    REAL NOT NULL,
+    away_odds    REAL NOT NULL,
+    over25_odds  REAL,
+    under25_odds REAL,
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (division, match_date, home_norm, away_norm)
 );
 """
 
