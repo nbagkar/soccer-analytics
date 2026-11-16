@@ -1389,6 +1389,22 @@ def serve(
 
         return refresh_results(settings)
 
+    def ledger_job() -> str:
+        """Forecast the upcoming fixtures and record them in the forecast ledger, so the live
+        track record fills while the dashboard is closed (the same rows the page records)."""
+        from soccer.dashboard.data import fixture_forecasts, record_fixture_forecasts
+
+        if not (settings.live_db.exists() and settings.analytics_db.exists()):
+            return "skipped (no fixtures or history loaded)"
+        forecasts = fixture_forecasts(settings.live_db, settings.analytics_db, limit=5000)
+        outcome = record_fixture_forecasts(settings.ledger_db, forecasts)
+        if outcome is None:
+            return "nothing to record" if not forecasts else "ledger write failed (see log)"
+        return (
+            f"ledger: {outcome.inserted} new, {outcome.updated} updated, "
+            f"{outcome.unchanged} unchanged"
+        )
+
     def prune_job() -> str:
         removed = raw.prune(SourceId.THESPORTSDB, "livescore", keep_days=7)
         return f"pruned {removed} old live snapshot(s)"
@@ -1399,6 +1415,8 @@ def serve(
             Job("fixtures", timedelta(seconds=fixtures_interval), fixtures_job),
             Job("history", timedelta(seconds=history_interval), history_job),
             Job("injuries", timedelta(seconds=history_interval), news_job),
+            # After fixtures/results/news, so it forecasts from the freshest data.
+            Job("ledger", timedelta(seconds=fixtures_interval), ledger_job),
             Job("squads", timedelta(days=1), squads_job),
             Job("prune", timedelta(days=1), prune_job),
         ]
@@ -1481,6 +1499,92 @@ def players(
     console.print(tbl)
     console.print("[dim]G-xG: goals minus expected goals — positive = clinical finishing.[/dim]")
     console.print(f"[dim]{SB_ATTRIBUTION}[/dim]")
+
+
+@app.command()
+def ledger(
+    recent: int = typer.Option(10, min=0, help="Most recent graded forecasts to list."),
+) -> None:
+    """The live track record: forecasts published before kickoff, graded as results land --
+    model vs closing line vs base rates, by model version and competition."""
+    from soccer.dashboard.data import live_record
+    from soccer.domain.ledger import RecordSummary, verdict
+
+    settings = get_settings()
+    if not settings.ledger_db.exists():
+        console.print(
+            "[yellow]No forecasts recorded yet.[/yellow] The ledger fills when upcoming "
+            "fixtures are forecast: open the dashboard's Predictions page, or run "
+            "[bold]soccer serve[/bold] (fixtures need a football-data.org token)."
+        )
+        raise typer.Exit(code=1)
+    record = live_record(settings.ledger_db, settings.analytics_db, settings.live_db)
+    since = f" since {record.since:%Y-%m-%d}" if record.since else ""
+    console.print(
+        f"[bold]{record.recorded}[/bold] forecasts recorded{since}: "
+        f"[bold]{record.n}[/bold] graded, {record.awaiting} awaiting a result, "
+        f"{record.upcoming} still to play, {record.unmatched} unmatched, {record.void} void."
+    )
+    summary = record.summary
+    if summary is not None:
+        tbl = Table(title="Live record", title_justify="left", header_style="bold")
+        tbl.add_column("Forecaster")
+        tbl.add_column("N", justify="right")
+        tbl.add_column("Log loss", justify="right")
+        tbl.add_column("RPS", justify="right")
+        tbl.add_column("Brier", justify="right")
+        rows = [
+            ("Model (last before kickoff)", summary.n, summary.model),
+            ("Model (first published)", summary.n, summary.first),
+            ("Base rates", summary.n, summary.baseline),
+        ]
+        if summary.model_on_odds is not None and summary.market is not None:
+            rows += [
+                ("Model, matches with odds", summary.n_with_odds, summary.model_on_odds),
+                ("Market (closing line)", summary.n_with_odds, summary.market),
+            ]
+        for name, n, sc in rows:
+            tbl.add_row(name, str(n), f"{sc.log_loss:.4f}", f"{sc.rps:.4f}", f"{sc.brier:.4f}")
+        console.print(tbl)
+
+        def groups(title: str, label: str, items: list[tuple[str, RecordSummary]]) -> None:
+            g = Table(title=title, title_justify="left", header_style="bold")
+            for col in (label, "N", "Model LL", "Base LL", "Skill", "vs close"):
+                g.add_column(col, justify="left" if col == label else "right")
+            for name, s in items:
+                gap = "-" if s.gap is None else f"{s.gap:+.4f}"
+                if s.gap is not None and s.gap_se:
+                    gap += f" ± {s.gap_se:.4f}"
+                g.add_row(
+                    name,
+                    str(s.n),
+                    f"{s.model.log_loss:.4f}",
+                    f"{s.baseline.log_loss:.4f}",
+                    f"{s.skill_vs_base:+.1%}",
+                    gap,
+                )
+            console.print(g)
+
+        groups("By model version", "Version", record.by_version())
+        groups("By competition", "Competition", record.by_competition())
+        if recent:
+            r = Table(title="Most recent", title_justify="left", header_style="bold")
+            for col in ("Date", "Match", "H/D/A", "Result", "Model", "Market", "From"):
+                r.add_column(col)
+            for gf in record.graded[:recent]:
+                ph, pd_, pa = gf.model
+                r.add_row(
+                    f"{gf.entry.kickoff_utc:%Y-%m-%d}",
+                    f"{gf.entry.home} v {gf.entry.away}",
+                    f"{ph:.0%}/{pd_:.0%}/{pa:.0%}",
+                    f"{gf.result.home_goals}-{gf.result.away_goals}",
+                    f"{gf.model[gf.actual]:.0%}",
+                    "-" if gf.market is None else f"{gf.market[gf.actual]:.0%}",
+                    gf.result.source,
+                )
+            console.print(r)
+    style = "yellow" if record.is_small else "green"
+    console.print(f"[{style}]{verdict(record)}[/{style}]")
 
 
 # Below this many days of history, "never used" means "not used yet", not "unwanted".

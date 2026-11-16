@@ -325,6 +325,7 @@ def _intent_handlers() -> tuple[Callable[[str, Path, Path | None], Reply | None]
         _intent_live,
         _intent_recent_results,
         _intent_forecast,
+        _intent_track_record,
         _intent_model,
         _intent_value,
         _intent_honours,
@@ -1308,6 +1309,69 @@ def _unresolved_name(q: str, found: str) -> str:
     known = set(_norm(found).split())
     rest = [w for w in q.split() if w not in _COMPARE_FILLER and w not in known]
     return " ".join(rest).title()
+
+
+_TRACK_RECORD = re.compile(
+    r"track record|live record|\bledger\b"
+    r"|how (accurate|good|reliable|right) (have|has|were|was) (your|the|my|its) "
+    r"(predictions?|forecasts?|picks?|tips?)( been)?"
+    r"|how (have|did|has) (your|the) (predictions?|forecasts?|picks?) (done|do|gone|go|performed|"
+    r"perform|fared)"
+    r"|(predictions?|forecasts?) so far|how many (predictions?|forecasts?|games|matches) "
+    r"(have you|did you) (got|get|called) right"
+)
+
+
+def _intent_track_record(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:
+    """The live record from the forecast ledger -- what was published before kickoff, graded
+    -- as distinct from `_intent_model`'s walk-forward backtest."""
+    if not _TRACK_RECORD.search(q):
+        return None
+    from soccer.config import LEDGER_FILENAME
+    from soccer.dashboard.data import live_record
+    from soccer.domain.ledger import verdict
+
+    record = live_record(Path(analytics_db).parent / LEDGER_FILENAME, analytics_db, live_db)
+    s = record.summary
+    lines = ["**Live record** — forecasts published before kickoff, graded on the result.", ""]
+    table = None
+    if s is not None:
+        lines.append(
+            f"- Graded: **{s.n}** (from {record.recorded} recorded; "
+            f"{record.awaiting} awaiting a result, {record.upcoming} still to play)"
+        )
+        lines.append(
+            f"- Model: log-loss **{s.model.log_loss:.3f}**, RPS **{s.model.rps:.3f}** · base "
+            f"rates: log-loss **{s.baseline.log_loss:.3f}**"
+        )
+        if s.market is not None and s.model_on_odds is not None:
+            lines.append(
+                f"- On the {s.n_with_odds} with closing odds: model "
+                f"**{s.model_on_odds.log_loss:.3f}** vs market **{s.market.log_loss:.3f}** "
+                "(lower is better)"
+            )
+        lines.append("")
+        table = [
+            {
+                "Date": f"{g.entry.kickoff_utc:%Y-%m-%d}",
+                "Match": f"{g.entry.home} v {g.entry.away}",
+                "Result": f"{g.result.home_goals}-{g.result.away_goals}",
+                "Model gave it": f"{g.model[g.actual]:.0%}",
+            }
+            for g in record.graded[:10]
+        ]
+    lines.append(verdict(record))
+    text = "\n".join(lines)
+    if s is None or record.is_small:
+        # Too little live history to answer on its own: add what the backtest says.
+        backtest = _intent_model(q + " forecast accuracy", analytics_db, live_db)
+        if backtest is not None:
+            text += "\n\nMeanwhile, the walk-forward backtest:\n\n" + backtest.text
+    return Reply(
+        text,
+        table=table or None,
+        suggestions=["How accurate is your model?", "Who will win the league?"],
+    )
 
 
 def _intent_model(q: str, analytics_db: Path, live_db: Path | None) -> Reply | None:

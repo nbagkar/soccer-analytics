@@ -51,6 +51,7 @@ from soccer.dashboard.data import (
     has_player_events,
     health_snapshot,
     league_history,
+    live_record,
     live_snapshot,
     market_edge,
     player_board,
@@ -62,6 +63,7 @@ from soccer.dashboard.data import (
     player_seasons,
     player_similarity,
     previous_season,
+    record_fixture_forecasts,
     season_briefing,
     season_records,
     shot_map,
@@ -74,6 +76,7 @@ from soccer.dashboard.data import (
 from soccer.dashboard.nav import NAV
 from soccer.domain import usage
 from soccer.domain.freshness import age_label
+from soccer.domain.ledger import SMALL_SAMPLE, LiveRecord, RecordSummary, verdict
 from soccer.domain.match_state import MatchStatus, MatchView
 from soccer.models.evaluation import (
     BlendPoint,
@@ -1817,6 +1820,115 @@ def _calibration_chart(outcomes: list[OutcomeCalibration]) -> AltChart:
     return alt.hconcat(*panels)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_live_record(
+    ledger_db: str, analytics_db: str, live_db: str, version: float
+) -> LiveRecord:
+    return live_record(Path(ledger_db), Path(analytics_db), Path(live_db))
+
+
+def _score_row(name: str, score: Any) -> dict[str, Any]:
+    return {
+        "Forecaster": _esc(name),
+        "Log loss": f"{score.log_loss:.4f}",
+        "RPS": f"{score.rps:.4f}",
+        "Brier": f"{score.brier:.4f}",
+    }
+
+
+def _group_rows(label: str, groups: list[tuple[str, RecordSummary]]) -> list[dict[str, Any]]:
+    rows = []
+    for name, s in groups:
+        gap = s.gap
+        rows.append(
+            {
+                label: _esc(name),
+                "Graded": s.n,
+                "Model log loss": f"{s.model.log_loss:.4f}",
+                "Base rates": f"{s.baseline.log_loss:.4f}",
+                "Skill vs base": f"{s.skill_vs_base:+.1%}",
+                "vs closing line": (
+                    "—"
+                    if gap is None
+                    else f"{gap:+.4f}" + (f" ± {s.gap_se:.4f}" if s.gap_se else "")
+                ),
+            }
+        )
+    return rows
+
+
+def _render_live_record(record: LiveRecord) -> None:
+    """The forecasts actually published before kickoff, graded as results land."""
+    st.subheader("Live record", anchor=False)
+    st.caption(
+        "Everything above is a backtest — a re-enactment. This is the real thing: every "
+        "upcoming-fixture forecast the app published, frozen at kickoff, then scored against "
+        "the result (and the closing line, once football-data.co.uk posts it). Each match is "
+        "graded on the last forecast before kickoff."
+    )
+    c = st.columns(4)
+    c[0].metric("Graded", record.n, border=True)
+    c[1].metric(
+        "With closing odds", record.summary.n_with_odds if record.summary else 0, border=True
+    )
+    c[2].metric("Awaiting result", record.awaiting, border=True)
+    c[3].metric("Still to play", record.upcoming, border=True)
+    s = record.summary
+    if s is None:
+        st.info(verdict(record), icon=":material/history:")
+        return
+    rows = [
+        _score_row("Model (last forecast before kickoff)", s.model),
+        _score_row("Model (first forecast published)", s.first),
+        _score_row("Base rates", s.baseline),
+    ]
+    if s.model_on_odds is not None and s.market is not None:
+        rows += [
+            _score_row(f"Model, on the {s.n_with_odds} with odds", s.model_on_odds),
+            _score_row(f"Market (closing line), same {s.n_with_odds}", s.market),
+        ]
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+    if record.is_small:
+        st.warning(
+            f"Only **{s.n}** graded so far — below {SMALL_SAMPLE}, a live record is mostly "
+            "luck. Treat these numbers as a progress meter, not a verdict; the backtest above "
+            "is the better guide until a season's worth accumulates.",
+            icon=":material/science:",
+        )
+    st.info(verdict(record, sample_note=False), icon=":material/insights:")
+    versions = record.by_version()
+    if versions:
+        st.markdown("**By model version** — re-tuning the model starts a new version")
+        st.markdown(_html_table(_group_rows("Version", versions)), unsafe_allow_html=True)
+    comps = record.by_competition()
+    if len(comps) > 1:
+        st.markdown("**By competition**")
+        st.markdown(_html_table(_group_rows("Competition", comps)), unsafe_allow_html=True)
+    recent = record.graded[:15]
+    if recent:
+        st.markdown("**Most recent**")
+        recent_rows = []
+        for g in recent:
+            ph, pd_, pa = g.model
+            r = g.result
+            recent_rows.append(
+                {
+                    "Date": f"{g.entry.kickoff_utc:%d %b}",
+                    "Match": _esc(f"{g.entry.home} v {g.entry.away}"),
+                    "Forecast H/D/A": f"{ph:.0%} / {pd_:.0%} / {pa:.0%}",
+                    "Result": f"{r.home_goals}-{r.away_goals}",
+                    "Model gave it": f"{g.model[g.actual]:.0%}",
+                    "Market gave it": "—" if g.market is None else f"{g.market[g.actual]:.0%}",
+                }
+            )
+        st.markdown(_html_table(recent_rows), unsafe_allow_html=True)
+    if record.unmatched or record.void:
+        st.caption(
+            f"Not graded: {record.unmatched} with no result found 10+ days after kickoff, "
+            f"{record.void} postponed, cancelled or awarded."
+        )
+
+
 def _render_report_card(report: ForecastReport, division: str) -> None:
     """Honest model-vs-market scorecard: proper scores, the blend curve, and calibration."""
     st.caption(
@@ -2639,6 +2751,9 @@ def main() -> None:
                 max(_db_version(settings.analytics_db), _db_version(settings.live_db)),
                 5000,
             )
+            # What is shown is what is published: record it in the forecast ledger (its own
+            # file, so this never moves the data caches; unchanged forecasts write nothing).
+            record_fixture_forecasts(settings.ledger_db, upcoming_fixtures)
             _render_fixtures(upcoming_fixtures)
 
         with match_tab:
@@ -2787,6 +2902,19 @@ def main() -> None:
                     st.info("No closing odds loaded for that league yet.")
                 else:
                     _render_report_card(fc_report, by_league[league])
+            st.divider()
+            _render_live_record(
+                _cached_live_record(
+                    str(settings.ledger_db),
+                    str(settings.analytics_db),
+                    str(settings.live_db),
+                    max(
+                        _db_version(settings.ledger_db),
+                        _db_version(settings.analytics_db),
+                        _db_version(settings.live_db),
+                    ),
+                )
+            )
 
         return
 

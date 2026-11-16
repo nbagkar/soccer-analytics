@@ -14,7 +14,8 @@ from tests.assistant_bank import DEPTH, DEV, HOLDOUT, build_store, report, score
 # time words, derbies/aliases, team compare, scoring, improvement): DEV 45/45, HOLDOUT 18/20.
 # 2026-10-06: DEPTH checklist added (why / market comparison / ranges / peer ranks): 0/10 on
 # the code before it, 10/10 after.
-DEV_FLOOR = 45
+# 2026-11-04: the live-record question (forecast ledger) added to DEV: 46/46.
+DEV_FLOOR = 46
 HOLDOUT_FLOOR = 18
 DEPTH_FLOOR = 10
 

@@ -1037,6 +1037,42 @@ class AnalyticsDB:
             for r in rows
         ]
 
+    def results_between(self, division: str, start: date, end: date) -> list[OddsRow]:
+        """Every result in a division dated start..end inclusive (any season), with its
+        closing odds -- the candidates a forecast-ledger row is graded against."""
+        rows = self._con.execute(
+            "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
+            "       close_home_odds, close_draw_odds, close_away_odds "
+            "FROM results WHERE division=? AND match_date BETWEEN ? AND ? "
+            "ORDER BY match_date, home",
+            [division, start, end],
+        ).fetchall()
+        return [
+            OddsRow(
+                match_date=r[0],
+                home=r[1],
+                away=r[2],
+                home_norm=r[3],
+                away_norm=r[4],
+                fthg=r[5],
+                ftag=r[6],
+                close_home_odds=r[7],
+                close_draw_odds=r[8],
+                close_away_odds=r[9],
+            )
+            for r in rows
+        ]
+
+    def outcome_counts(self, division: str, start: date, before: date) -> tuple[int, int, int]:
+        """(home wins, draws, away wins) in a division dated start <= date < before."""
+        row = self._con.execute(
+            "SELECT COUNT(*) FILTER (WHERE fthg > ftag), COUNT(*) FILTER (WHERE fthg = ftag), "
+            "       COUNT(*) FILTER (WHERE fthg < ftag) "
+            "FROM results WHERE division=? AND match_date >= ? AND match_date < ?",
+            [division, start, before],
+        ).fetchone()
+        return (int(row[0]), int(row[1]), int(row[2])) if row else (0, 0, 0)
+
     def odds_coverage(self, season: str, division: str) -> tuple[int, int]:
         """(matches with a full closing-odds triple, total matches) for a slice."""
         row = self._con.execute(

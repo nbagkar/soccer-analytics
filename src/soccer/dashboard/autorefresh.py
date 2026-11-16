@@ -94,14 +94,22 @@ def warm_caches(settings: Settings) -> None:
     from soccer.dashboard.data import (
         fixture_forecasts,
         forecast_report,
+        record_fixture_forecasts,
         upcoming_season_briefing,
     )
 
     live, analytics = settings.live_db, settings.analytics_db
     if not (live.exists() and analytics.exists()):
         return
+
+    def fixtures() -> object:
+        # The forecasts being warmed are the ones the page will publish, so they go into the
+        # forecast ledger here too -- the live track record fills even if nobody opens it.
+        forecasts = fixture_forecasts(live, analytics, limit=5000)
+        return record_fixture_forecasts(settings.ledger_db, forecasts)
+
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("fixtures", lambda: fixture_forecasts(live, analytics, limit=5000)),
+        ("fixtures", fixtures),
         ("season", lambda: upcoming_season_briefing(live, analytics, "E0")),
         ("scorecard", lambda: forecast_report(analytics, "E0", n_seasons=6)),
     ]

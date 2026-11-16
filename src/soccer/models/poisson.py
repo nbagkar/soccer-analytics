@@ -392,6 +392,7 @@ def fit_poisson_shots(
     home_shrinkage: float = 0.0,
     time_decay: float = 0.0,
     market_weight: float = 0.0,
+    opponent_adjust: bool = False,
 ) -> PoissonModel:
     """Fit strengths on a shrinkage blend of goals and shots-on-target expected goals.
 
@@ -430,6 +431,17 @@ def fit_poisson_shots(
     weighting `fit_dixon_coles` uses, applied here to the ratio method's sums instead of an
     MLE. Requires every outcome to carry `match_date`; silently ignored (all games weighted
     equally) otherwise, same defensive fallback `fit_dixon_coles` uses.
+
+    ``opponent_adjust`` (off by default) rates each team against the opposition it actually
+    faced instead of by its raw average: attack is what it scored over what a league-average
+    attack would have scored against the same defences at the same venues (and defence the
+    mirror image), solved by iterative proportional fitting -- the fixed point of Maher's
+    Poisson likelihood equations on the pseudo-goals, up to one overall scale factor: both
+    strengths are pinned to average 1.0 like the ratio method's (pinning attack alone and
+    letting defence absorb the scale forecast identically over a 94k-match walk-forward, but
+    leaves defence off the 1.0 scale the newcomer priors assume). The plain ratio method
+    credits a side that has just played the top three with a weak attack; this does not.
+    Shrinkage applies to the adjusted rate the same way.
     """
     if not outcomes:
         raise ValueError("cannot fit a model with no results")
@@ -455,6 +467,7 @@ def fit_poisson_shots(
     conceded: dict[str, float] = {}
     games: dict[str, float] = {}
     home_goals = away_goals = 0.0
+    pseudo: list[tuple[str, str, float, float, float]] = []  # (home, away, w, h_val, a_val)
 
     for o, w in zip(outcomes, weights, strict=True):
         home_goals += w * o.fthg
@@ -470,26 +483,30 @@ def fit_poisson_shots(
             if implied is not None:
                 h_val = (1 - market_weight) * h_val + market_weight * implied[0]
                 a_val = (1 - market_weight) * a_val + market_weight * implied[1]
+        pseudo.append((o.home_norm, o.away_norm, w, h_val, a_val))
         for team, gf, ga in ((o.home_norm, h_val, a_val), (o.away_norm, a_val, h_val)):
             scored[team] = scored.get(team, 0.0) + w * gf
             conceded[team] = conceded.get(team, 0.0) + w * ga
             games[team] = games.get(team, 0.0) + w
 
     matches = sum(weights)
-    overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
+    if opponent_adjust:
+        strengths = _opponent_adjusted_strengths(pseudo, scored, conceded, games, shrinkage)
+    else:
+        overall = sum(scored.values()) / (2 * matches)  # mean pseudo-goals per team-game
 
-    def _strength(total: float, n: float) -> float:
-        # per-game rate relative to the league, shrunk toward 1.0 by `shrinkage` pseudo-games
-        rate = (total / n) / overall
-        return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
+        def _strength(total: float, n: float) -> float:
+            # per-game rate relative to the league, shrunk toward 1.0 by `shrinkage` pseudo-games
+            rate = (total / n) / overall
+            return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
 
-    strengths = {
-        team: TeamStrength(
-            attack=_strength(scored[team], games[team]),
-            defence=_strength(conceded[team], games[team]),
-        )
-        for team in games
-    }
+        strengths = {
+            team: TeamStrength(
+                attack=_strength(scored[team], games[team]),
+                defence=_strength(conceded[team], games[team]),
+            )
+            for team in games
+        }
     home_avg = home_goals / matches
     away_avg = away_goals / matches
 
@@ -525,6 +542,54 @@ def fit_poisson_shots(
         rho=rho,
         home_boost=home_boost,
     )
+
+
+OPPONENT_ADJUST_ITERATIONS = 12  # converged to ~1e-9 on real three-season windows
+
+
+def _opponent_adjusted_strengths(
+    pseudo: Sequence[tuple[str, str, float, float, float]],
+    scored: dict[str, float],
+    conceded: dict[str, float],
+    games: dict[str, float],
+    shrinkage: float,
+) -> dict[str, TeamStrength]:
+    """Attack/defence by iterative proportional fitting on (home, away, w, h_val, a_val).
+
+    Each pass sets a team's attack to its weighted pseudo-goals over what a 1.0 attack would
+    have scored against the defences it faced -- at the league's home or away rate, by venue
+    -- and its defence likewise from the attacks it faced, each shrunk toward 1.0 by
+    `shrinkage` pseudo-games. Both are then rescaled to a games-weighted mean of 1.0, the
+    same scale the plain ratio method's strengths sit on.
+    """
+    total_w = sum(w for _h, _a, w, _hv, _av in pseudo)
+    home_rate = sum(w * hv for _h, _a, w, hv, _av in pseudo) / total_w
+    away_rate = sum(w * av for _h, _a, w, _hv, av in pseudo) / total_w
+    total_games = sum(games.values())
+
+    def shrink(total: float, expected: float, n: float) -> float:
+        rate = total / expected
+        return (n * rate + shrinkage) / (n + shrinkage) if shrinkage else rate
+
+    def rescale(values: dict[str, float]) -> dict[str, float]:
+        mean = sum(games[t] * v for t, v in values.items()) / total_games
+        return {t: v / mean for t, v in values.items()}
+
+    attack = dict.fromkeys(games, 1.0)
+    defence = dict.fromkeys(games, 1.0)
+    for _ in range(OPPONENT_ADJUST_ITERATIONS):
+        expected = dict.fromkeys(games, 0.0)
+        for home, away, w, _hv, _av in pseudo:
+            expected[home] += w * home_rate * defence[away]
+            expected[away] += w * away_rate * defence[home]
+        attack = {t: shrink(scored[t], expected[t], games[t]) for t in games}
+        expected = dict.fromkeys(games, 0.0)
+        for home, away, w, _hv, _av in pseudo:
+            expected[home] += w * away_rate * attack[away]
+            expected[away] += w * home_rate * attack[home]
+        defence = {t: shrink(conceded[t], expected[t], games[t]) for t in games}
+        attack, defence = rescale(attack), rescale(defence)
+    return {t: TeamStrength(attack=attack[t], defence=defence[t]) for t in games}
 
 
 def calibrate_model(

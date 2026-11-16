@@ -195,6 +195,13 @@ DEV: list[Case] = [
     Case("what was the result of the last chelsea game", ("recent_results",), ("Chelsea",)),
     Case("messi stats", ("player",), ("Messi",)),
     Case("who is top of the premier league", ("standings",), ("Man City",)),
+    # The live record (forecast ledger), not the backtest; nothing is graded in the bank's
+    # store, so a correct answer says so instead of inventing a record.
+    Case(
+        "how accurate have the predictions been?",
+        ("track_record",),
+        ("Live record", "No forecasts recorded yet"),
+    ),
 ]
 
 # Written alongside DEV, before any fix. Score only -- do not design fixes from these.

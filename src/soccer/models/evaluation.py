@@ -181,6 +181,7 @@ def evaluate_forecasts(
     shrinkage: float = 0.0,
     time_decay: float = 0.0,
     market_weight: float = 0.0,
+    opponent_adjust: bool = False,
     calibration: dict[str, float] | None = None,
     min_history: int = 60,
     weight_steps: int = 21,
@@ -199,6 +200,8 @@ def evaluate_forecasts(
     it fall back to the actual scoreline, same as a shots-blend row missing shot data.
     ``calibration`` (``spread``/``home_shift``/``rho``) recalibrates the shots model's
     expected goals the way the live forecasts do -- see ``calibrate_model``.
+    ``opponent_adjust`` rates the shots model against the opposition actually faced -- see
+    ``fit_poisson_shots``.
     """
     from soccer.models.dixon_coles import fit_dixon_coles
     from soccer.models.poisson import (
@@ -216,6 +219,7 @@ def evaluate_forecasts(
                 shrinkage=shrinkage,
                 time_decay=time_decay,
                 market_weight=market_weight,
+                opponent_adjust=opponent_adjust,
             )
             return calibrate_model(fitted, **calibration) if calibration else fitted
         if model == "xg":
