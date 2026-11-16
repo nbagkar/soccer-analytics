@@ -31,6 +31,12 @@ BASE_URL = "https://www.football-data.co.uk/mmz4281"
 # different schema: one file per country holding every season, no shot/card columns.
 NEW_LEAGUE_BASE = "https://www.football-data.co.uk/new"
 
+# The coming round's fixtures with PRE-MATCH odds (verified by direct fetch 2026-11-16: 51
+# fixtures, every one with 1X2 and over/under 2.5 prices, closing columns empty). One file for
+# all the mmz4281 divisions, republished before each weekend and midweek round -- so it only
+# ever covers the next few days, and no cups.
+FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+
 # football-data.co.uk division codes -> the leagues they actually are, for display. The
 # codes are the storage key everywhere; this maps them to human names at the edges (the
 # dashboard selectors, CLI titles). Unknown codes fall back to the code itself.
@@ -265,6 +271,89 @@ _OU_KEYS = (
     ("AvgC>2.5", "AvgC<2.5"),
     ("B365C>2.5", "B365C<2.5"),
 )
+
+
+# Pre-match 1X2 for UPCOMING fixtures, in preference order: the market average, then Bet365
+# -- the two fixtures.csv carries (no Pinnacle there). Walk-forward on 2021/22-2026/27
+# (`scripts/prematch_odds_backtest.py`) the average sits +0.00408 from the closing line,
+# Bet365 +0.00434; the forecast model, +0.01088.
+_UPCOMING_ODDS_KEYS = (
+    ("avg", ("AvgH", "AvgD", "AvgA")),
+    ("b365", ("B365H", "B365D", "B365A")),
+)
+_UPCOMING_OU_KEYS = (("Avg>2.5", "Avg<2.5"), ("B365>2.5", "B365<2.5"))
+UPCOMING_BOOK_NAMES = {"avg": "market average", "b365": "Bet365"}
+
+
+@dataclass(frozen=True)
+class UpcomingOdds:
+    """One upcoming fixture's pre-match prices from fixtures.csv (decimal odds)."""
+
+    division: str
+    match_date: date
+    home: str
+    away: str
+    home_norm: str
+    away_norm: str
+    book: str  # "avg" | "b365" -- see UPCOMING_BOOK_NAMES
+    home_odds: float
+    draw_odds: float
+    away_odds: float
+    over25_odds: float | None = None
+    under25_odds: float | None = None
+
+
+def _upcoming_triple(row: dict[str, str]) -> tuple[str, float, float, float] | None:
+    """(book, home, draw, away) from the first book with a full, valid pre-match triple."""
+    for book, (h_key, d_key, a_key) in _UPCOMING_ODDS_KEYS:
+        h, d, a = _float(row, h_key), _float(row, d_key), _float(row, a_key)
+        if h and d and a and h > 1 and d > 1 and a > 1:
+            return book, h, d, a
+    return None
+
+
+def parse_fixtures_csv(text: str) -> list[UpcomingOdds]:
+    """Parse fixtures.csv into the fixtures that carry a full pre-match 1X2 triple.
+
+    A row without a division, both teams, a date and a usable price triple is skipped: a
+    fixture with no odds has nothing to offer here (the fixture list itself comes from the
+    live store).
+    """
+    out: list[UpcomingOdds] = []
+    for row in csv.DictReader(io.StringIO(text.lstrip("\ufeff"))):
+        division = (row.get("Div") or "").strip()
+        home = (row.get("HomeTeam") or "").strip()
+        away = (row.get("AwayTeam") or "").strip()
+        match_date = _parse_date(row.get("Date") or "")
+        if not division or not home or not away or match_date is None:
+            continue
+        priced = _upcoming_triple(row)
+        if priced is None:
+            continue
+        book, h, d, a = priced
+        over = under = None
+        for o_key, u_key in _UPCOMING_OU_KEYS:
+            o, u = _float(row, o_key), _float(row, u_key)
+            if o and u and o > 1 and u > 1:
+                over, under = o, u
+                break
+        out.append(
+            UpcomingOdds(
+                division=division,
+                match_date=match_date,
+                home=home,
+                away=away,
+                home_norm=normalize_name(home),
+                away_norm=normalize_name(away),
+                book=book,
+                home_odds=h,
+                draw_odds=d,
+                away_odds=a,
+                over25_odds=over,
+                under25_odds=under,
+            )
+        )
+    return out
 
 
 def _float(row: dict[str, str], key: str) -> float | None:
@@ -517,3 +606,20 @@ class FootballDataCoUk:
             request_meta={"url": url, "code": code, "division": division},
         )
         return parse_new_league_csv(response.text, division=division, recent_seasons=recent_seasons)
+
+    def fetch_upcoming_odds(self) -> list[UpcomingOdds]:
+        """Download and parse fixtures.csv -- the coming round's pre-match odds.
+
+        The raw CSV is snapshotted first, like every other fetch. An HTTP error raises (a
+        failed source is never an empty success); an empty list means the file really holds
+        no priced fixtures right now.
+        """
+        response = self._client.get(FIXTURES_URL)
+        response.raise_for_status()
+        self._raw.write(
+            SourceId.FOOTBALL_DATA_CO_UK,
+            "fixtures",
+            response.text,
+            request_meta={"url": FIXTURES_URL},
+        )
+        return parse_fixtures_csv(response.text)

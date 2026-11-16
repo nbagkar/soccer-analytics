@@ -161,6 +161,12 @@ The strongest analytics source available free, and the one with the murkiest ter
   match prediction only."* Downloading and analysing is plainly intended; there is no
   affirmative permission to republish. **Do not redistribute the CSVs or expose them
   verbatim.**
+- **`fixtures.csv` carries pre-match odds for the coming round** (verified by direct fetch,
+  2026-11-16): one file for all the main divisions, 51 fixtures that day, every one with a
+  Bet365 and market-average 1X2 and over/under 2.5 price, closing columns empty. No
+  Pinnacle. It only ever covers the next few days. An earlier version of this project
+  assumed no free source of upcoming odds existed; this is one, under the same terms as
+  the rest of the site.
 - Men's football only. No women's coverage.
 - Itself an aggregation layer — compiled from Flashscore, BBC, ESPN and others.
 

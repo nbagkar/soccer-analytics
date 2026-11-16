@@ -67,6 +67,9 @@ class PublishedForecast:
     model_version: str
     team_news: bool = False
     """Whether the forecast had the team-news (availability) adjustment applied."""
+    prematch: Probs | None = None
+    """The vig-free pre-match odds shown with the forecast, when the fixture had any."""
+    prematch_book: str | None = None
 
     @property
     def fixture_key(self) -> str:
@@ -115,6 +118,9 @@ class LedgerEntry:
     last: ForecastSnapshot
     revisions: int
     """How many distinct forecasts were published for it (1 = never changed)."""
+    prematch: Probs | None = None
+    """The LAST pre-match odds recorded before kickoff (vig-free), if the fixture had any."""
+    prematch_book: str | None = None
 
 
 _SCHEMA = """
@@ -149,6 +155,18 @@ CREATE TABLE IF NOT EXISTS forecast (
 CREATE INDEX IF NOT EXISTS idx_forecast_kickoff ON forecast (kickoff_utc);
 """
 
+# Columns added after the first release, reconciled onto existing ledgers with ALTER TABLE
+# (CREATE TABLE IF NOT EXISTS cannot). The pre-match odds shown beside the model's forecast
+# (domain/prematch.py): the last line recorded before kickoff, nullable -- most fixtures
+# further out than the coming round have none.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("prematch_p_home", "REAL"),
+    ("prematch_p_draw", "REAL"),
+    ("prematch_p_away", "REAL"),
+    ("prematch_book", "TEXT"),
+    ("prematch_recorded_at", "TEXT"),
+)
+
 # Probabilities and expected goals are stored at this precision, and a recomputation that
 # matches the stored last forecast at it is "the same forecast" (no write).
 _DP = 6
@@ -162,6 +180,10 @@ class LedgerDB:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(forecast)")}
+        for column, ddl in _ADDED_COLUMNS:
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE forecast ADD COLUMN {column} {ddl}")
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -201,6 +223,19 @@ def _row_last(r: sqlite3.Row) -> tuple[float, float, float, float, float, str, i
     )
 
 
+def _prematch_values(f: PublishedForecast) -> tuple[float, float, float, str | None] | None:
+    if f.prematch is None:
+        return None
+    h, d, a = f.prematch
+    return (round(h, _DP), round(d, _DP), round(a, _DP), f.prematch_book)
+
+
+def _row_prematch(r: sqlite3.Row) -> tuple[float, float, float, str | None] | None:
+    if r["prematch_p_home"] is None:
+        return None
+    return (r["prematch_p_home"], r["prematch_p_draw"], r["prematch_p_away"], r["prematch_book"])
+
+
 @dataclass(frozen=True)
 class RecordOutcome:
     inserted: int = 0
@@ -233,13 +268,21 @@ class ForecastLedger:
                     continue
                 key = f.fixture_key
                 values = _values(f)
+                prematch = _prematch_values(f)
                 existing = self._conn.execute(
                     "SELECT * FROM forecast WHERE fixture_key=?", (key,)
                 ).fetchone()
                 if existing is None:
                     self._conn.execute(
-                        "INSERT INTO forecast VALUES "
-                        "(?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 1)",
+                        "INSERT INTO forecast (fixture_key, match_id, competition, division, "
+                        "kickoff_utc, home, away, home_norm, away_norm, first_recorded_at, "
+                        "first_p_home, first_p_draw, first_p_away, first_home_xg, "
+                        "first_away_xg, first_model, first_team_news, last_recorded_at, "
+                        "last_p_home, last_p_draw, last_p_away, last_home_xg, last_away_xg, "
+                        "last_model, last_team_news, revisions, prematch_p_home, "
+                        "prematch_p_draw, prematch_p_away, prematch_book, "
+                        "prematch_recorded_at) VALUES "
+                        "(?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, 1, ?,?,?,?,?)",
                         (
                             key,
                             f.match_id,
@@ -254,6 +297,8 @@ class ForecastLedger:
                             *values,
                             stamp,
                             *values,
+                            *(prematch or (None, None, None, None)),
+                            stamp if prematch else None,
                         ),
                     )
                     inserted += 1
@@ -262,8 +307,24 @@ class ForecastLedger:
                     skipped += 1  # frozen: the stored kickoff has passed
                     continue
                 kickoff_moved = existing["kickoff_utc"] != kickoff.isoformat()
+                # New odds replace the stored line (the last before kickoff is the one graded);
+                # a recomputation without odds never erases a line already recorded. Odds
+                # moving is not a revision of the MODEL's forecast, so `revisions` stays.
+                if prematch is not None and prematch != _row_prematch(existing):
+                    self._conn.execute(
+                        "UPDATE forecast SET prematch_p_home=?, prematch_p_draw=?, "
+                        "prematch_p_away=?, prematch_book=?, prematch_recorded_at=? "
+                        "WHERE fixture_key=? AND kickoff_utc > ?",
+                        (*prematch, stamp, key, stamp),
+                    )
+                    odds_moved = True
+                else:
+                    odds_moved = False
                 if _row_last(existing) == values and not kickoff_moved:
-                    unchanged += 1
+                    if odds_moved:
+                        updated += 1
+                    else:
+                        unchanged += 1
                     continue
                 changed = _row_last(existing) != values
                 self._conn.execute(
@@ -316,6 +377,12 @@ def _entry(r: sqlite3.Row) -> LedgerEntry:
         first=_snapshot(r, "first"),
         last=_snapshot(r, "last"),
         revisions=r["revisions"],
+        prematch=(
+            (r["prematch_p_home"], r["prematch_p_draw"], r["prematch_p_away"])
+            if r["prematch_p_home"] is not None
+            else None
+        ),
+        prematch_book=r["prematch_book"],
     )
 
 
@@ -358,6 +425,10 @@ class GradedForecast:
     def model(self) -> Probs:
         return self.entry.last.probs
 
+    @property
+    def prematch(self) -> Probs | None:
+        return self.entry.prematch
+
 
 @dataclass(frozen=True)
 class RecordSummary:
@@ -371,6 +442,11 @@ class RecordSummary:
     market: Score | None = None
     gap_se: float | None = None
     """Standard error of the per-match log-loss gap (model minus market), when n_with_odds > 1."""
+    n_with_prematch: int = 0
+    """Graded matches that had pre-match odds recorded beside the model's forecast."""
+    model_on_prematch: Score | None = None
+    prematch: Score | None = None
+    """The pre-match odds' score on those matches -- what the Upcoming tab led with."""
 
     @property
     def gap(self) -> float | None:
@@ -454,6 +530,11 @@ def summarize(graded: list[GradedForecast]) -> RecordSummary | None:
             mean = sum(gaps) / len(gaps)
             var = sum((x - mean) ** 2 for x in gaps) / (len(gaps) - 1)
             gap_se = math.sqrt(var / len(gaps))
+    with_prematch = [(g, g.prematch) for g in graded if g.prematch is not None]
+    model_on_prematch = prematch = None
+    if with_prematch:
+        model_on_prematch = _score([(g.model, g.actual) for g, _p in with_prematch])
+        prematch = _score([(p, g.actual) for g, p in with_prematch])
     return RecordSummary(
         n=len(graded),
         model=_score([(g.model, g.actual) for g in graded]),
@@ -463,6 +544,9 @@ def summarize(graded: list[GradedForecast]) -> RecordSummary | None:
         model_on_odds=model_on_odds,
         market=market,
         gap_se=gap_se,
+        n_with_prematch=len(with_prematch),
+        model_on_prematch=model_on_prematch,
+        prematch=prematch,
     )
 
 
@@ -640,6 +724,11 @@ def verdict(record: LiveRecord, *, sample_note: bool = True) -> str:
             parts.append(f"{where} -- the model trails the closing line by {gap:.3f}")
         else:
             parts.append(f"{where} -- the model is ahead of the closing line by {-gap:.3f}")
+    if s.prematch is not None and s.model_on_prematch is not None:
+        parts.append(
+            f"on the {s.n_with_prematch} that had pre-match odds, those odds scored "
+            f"{s.prematch.log_loss:.3f} against the model's {s.model_on_prematch.log_loss:.3f}"
+        )
     sentence = "; ".join(parts) + "."
     if record.is_small and sample_note:
         sentence += (

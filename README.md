@@ -113,7 +113,18 @@ much. It fills only while real fixtures flow in (a football-data.org token).
 future-dated results) and runs in `soccer doctor` and the weekly review — so a data defect
 announces itself instead of waiting to be spotted on a page.
 
-On betting value: there is no free source of odds for *upcoming* matches, so rather than
+The Upcoming forecasts lead with bookmakers' **pre-match odds** where there are any.
+football-data.co.uk's `fixtures.csv` prices the coming round (the eight European leagues the
+fixture feed covers; no cups, nothing further ahead), and those odds, margin removed, are
+measurably the stronger forecast: on 2021/22–2026/27 (34,891 matches) they sat +0.0041 from
+the closing line against the model's +0.0109, and blending the model in added nothing
+(`scripts/prematch_odds_backtest.py`). So the page shows the odds as the headline, marked as
+such, with the model's own 1X2 beside them; everything else is still the model alone, and the
+forecast ledger records and grades both. That is the market's view, not the model's —
+`PREMATCH_ODDS_HEADLINE = False` puts the model back in the lead.
+
+On betting value: those pre-match prices are a forecast to show, not an edge to bet (they are
+the price you would be betting at). So rather than
 fake a live edge, `soccer value` measures a real one against history — betting the model's
 positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
 (Pinnacle's close preferred). On 2024/25 Premier League the model beats the base-rate
@@ -161,7 +172,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
-| `soccer serve` | Run the dashboard's refreshes unattended on a cadence (live scores, fixtures, current-season results, injury news and squads when stale, the forecast ledger, housekeeping) |
+| `soccer serve` | Run the dashboard's refreshes unattended on a cadence (live scores, fixtures, current-season results, pre-match odds, injury news and squads when stale, the forecast ledger, housekeeping) |
 | `soccer ledger` | The live track record: published pre-kickoff forecasts graded vs closing line and base rates, by model version |
 | `soccer check` | Self-check the loaded data; exits non-zero on errors |
 | `soccer aliases-suggest` | Surface probable duplicate entities to review |

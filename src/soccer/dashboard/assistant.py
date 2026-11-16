@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2299,7 +2299,7 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         every = [f for f in every if f.kickoff_utc <= horizon]
         if not every:
             return Reply("No fixtures in the next 24 hours in the loaded schedule.")
-    fixtures = [f for f in every if f.slate is not None]
+    fixtures = [f for f in every if f.headline is not None]
     if competition and not fixtures:
         if not every:
             return Reply(f"No upcoming **{competition}** fixtures are loaded.")
@@ -2328,12 +2328,12 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         if not meet:
             return Reply(f"No upcoming **{named[0][0]} v {named[1][0]}** in the loaded schedule.")
         f = meet[0]
-        assert f.slate is not None
-        res = [m.probability for m in f.slate.result]
+        assert f.headline is not None
+        res = [m.probability for m in f.headline.result]
         return Reply(
             f"Next meeting: **{f.home} v {f.away}** on {f.kickoff_utc.strftime('%a %b %d')} "
             f"({f.competition}) — {f.home} **{res[0]:.0%}** · draw **{res[1]:.0%}** · "
-            f"{f.away} **{res[2]:.0%}**.",
+            f"{f.away} **{res[2]:.0%}**.{_odds_note([f])}",
             suggestions=[f"{f.home} vs {f.away} head to head", f"{f.home} vs {f.away}, who wins?"],
         )
     if named:  # a club is named -> that club's own schedule, team-first
@@ -2345,9 +2345,9 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             )
         rows = []
         for f in mine[:6]:
-            assert f.slate is not None  # `fixtures` was already filtered to slate is not None
-            hx, ax, _ = f.slate.most_likely_score
-            res = [m.probability for m in f.slate.result]
+            assert f.headline is not None  # `fixtures` was already filtered to headline is not None
+            hx, ax, _ = f.headline.most_likely_score
+            res = [m.probability for m in f.headline.result]
             home_is = tnorm in _norm(f.home)
             rows.append(
                 {
@@ -2359,25 +2359,25 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
                 }
             )
         nxt = mine[0]
-        assert nxt.slate is not None
+        assert nxt.headline is not None
         home_is = tnorm in _norm(nxt.home)
         opp = nxt.away if home_is else nxt.home
-        res = [m.probability for m in nxt.slate.result]
-        hx, ax, _ = nxt.slate.most_likely_score
+        res = [m.probability for m in nxt.headline.result]
+        hx, ax, _ = nxt.headline.most_likely_score
         pred = f"{hx}-{ax}" if home_is else f"{ax}-{hx}"
         return Reply(
             f"**{named[0][0]}'s next match** — {'home to' if home_is else 'away to'} "
             f"**{opp}** on {nxt.kickoff_utc.strftime('%a %b %d')}: predicted **{pred}**, "
-            f"{named[0][0]} win **{(res[0] if home_is else res[2]):.0%}**.",
+            f"{named[0][0]} win **{(res[0] if home_is else res[2]):.0%}**.{_odds_note(mine[:6])}",
             table=rows,
             suggestions=[f"Tell me about {named[0][0]}", "Show all upcoming fixtures"],
         )
 
     rows = []
     for f in fixtures[:8]:
-        assert f.slate is not None  # `fixtures` was already filtered to slate is not None
-        x, y, _ = f.slate.most_likely_score
-        res = [m.probability for m in f.slate.result]
+        assert f.headline is not None  # `fixtures` was already filtered to headline is not None
+        x, y, _ = f.headline.most_likely_score
+        res = [m.probability for m in f.headline.result]
         rows.append(
             {
                 "Date": f.kickoff_utc.strftime("%m-%d"),
@@ -2393,10 +2393,28 @@ def _intent_fixtures(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         from soccer.dashboard.data import CUP_MODEL_NOTE
 
         note = f"\n\n_{CUP_MODEL_NOTE}_"
+    note += _odds_note(fixtures[:8])
     return Reply(
         f"**{len(fixtures)} upcoming matches**{scope} with forecasts. The next few:{note}",
         table=rows,
         suggestions=["Who will win the league?", "Who is in form?"],
+    )
+
+
+def _odds_note(shown: Sequence[Any]) -> str:
+    """Says so when any forecast shown comes from pre-match odds rather than the model."""
+    if not any(f.from_odds for f in shown):
+        return ""
+    every = all(f.from_odds for f in shown)
+    which = "These come" if every and len(shown) > 1 else "This comes" if every else None
+    if which is None:
+        return (
+            "\n\n_Where a match has bookmakers' pre-match odds, the numbers are those odds "
+            "(margin removed) — the stronger forecast; the rest are the model's._"
+        )
+    return (
+        f"\n\n_{which} from bookmakers' pre-match odds (margin removed) — measurably "
+        "stronger than the model, whose own forecast is on the Predictions page._"
     )
 
 

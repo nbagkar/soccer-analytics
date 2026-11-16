@@ -22,11 +22,15 @@ FIXTURES = "fixtures"
 INJURIES = "injuries"
 SQUADS = "squads"
 LIVE = "live"
-JOBS = (RESULTS, FIXTURES, INJURIES, SQUADS, LIVE)
+ODDS = "odds"
+JOBS = (RESULTS, FIXTURES, INJURIES, SQUADS, LIVE, ODDS)
 
 STALE_AFTER = timedelta(hours=24)
 # Rosters change at transfer windows, not daily -- a weekly re-pull is plenty.
 SQUADS_STALE_AFTER = timedelta(days=7)
+# Pre-match odds (fixtures.csv) are republished before each weekend and midweek round and
+# prices drift toward kickoff, so they are re-pulled a few times a day -- it is one small file.
+ODDS_STALE_AFTER = timedelta(hours=6)
 # A third of a match: past this, "in play" statuses are more likely finished than live.
 LIVE_STALE_AFTER = timedelta(minutes=30)
 
@@ -97,6 +101,8 @@ class Freshness:
     """Premier League fixtures that kicked off after `headline_through` and should be over by
     now -- played but not yet in the results. Zero during a break in the schedule (an
     international window), when a lagging date is no sign of a stale feed at all."""
+    odds_checked_at: datetime | None = None
+    """Last *successful* pre-match odds refresh (fixtures.csv); None if never recorded."""
 
     @property
     def is_stale(self) -> bool:
@@ -116,6 +122,11 @@ class Freshness:
     def live_stale(self) -> bool:
         checked = self.live_checked_at
         return checked is None or self.now - checked > LIVE_STALE_AFTER
+
+    @property
+    def odds_stale(self) -> bool:
+        checked = self.odds_checked_at
+        return checked is None or self.now - checked > ODDS_STALE_AFTER
 
     @property
     def squads_stale(self) -> bool:
@@ -165,6 +176,7 @@ def freshness(
             else 0
         ),
         live_checked_at=log.last_success(LIVE),
+        odds_checked_at=log.last_success(ODDS),
         now=now,
     )
 

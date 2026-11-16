@@ -1389,6 +1389,14 @@ def serve(
 
         return refresh_results(settings)
 
+    def odds_job() -> str:
+        """Pre-match odds for the coming round (football-data.co.uk fixtures.csv)."""
+        if not actions.has_upcoming_fixtures(settings):
+            return "skipped (no upcoming fixtures loaded)"
+        if not data_freshness(settings).odds_stale:
+            return "fresh, skipped"
+        return actions.update_upcoming_odds(settings)
+
     def ledger_job() -> str:
         """Forecast the upcoming fixtures and record them in the forecast ledger, so the live
         track record fills while the dashboard is closed (the same rows the page records)."""
@@ -1415,7 +1423,8 @@ def serve(
             Job("fixtures", timedelta(seconds=fixtures_interval), fixtures_job),
             Job("history", timedelta(seconds=history_interval), history_job),
             Job("injuries", timedelta(seconds=history_interval), news_job),
-            # After fixtures/results/news, so it forecasts from the freshest data.
+            Job("odds", timedelta(seconds=fixtures_interval), odds_job),
+            # After fixtures/results/news/odds, so it forecasts from the freshest data.
             Job("ledger", timedelta(seconds=fixtures_interval), ledger_job),
             Job("squads", timedelta(days=1), squads_job),
             Job("prune", timedelta(days=1), prune_job),
@@ -1542,6 +1551,11 @@ def ledger(
             rows += [
                 ("Model, matches with odds", summary.n_with_odds, summary.model_on_odds),
                 ("Market (closing line)", summary.n_with_odds, summary.market),
+            ]
+        if summary.model_on_prematch is not None and summary.prematch is not None:
+            rows += [
+                ("Model, with pre-match odds", summary.n_with_prematch, summary.model_on_prematch),
+                ("Pre-match odds (shown)", summary.n_with_prematch, summary.prematch),
             ]
         for name, n, sc in rows:
             tbl.add_row(name, str(n), f"{sc.log_loss:.4f}", f"{sc.rps:.4f}", f"{sc.brier:.4f}")
