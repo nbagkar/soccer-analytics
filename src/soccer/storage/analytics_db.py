@@ -14,14 +14,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import polars as pl
 
-from soccer.sources.football_data_co_uk import MatchResult, season_sort_key
+from soccer.sources.football_data_co_uk import MatchResult, UpcomingOdds, season_sort_key
 from soccer.sources.statsbomb import Action, PlayerMatchStats, Shot
 
 _SCHEMA = """
@@ -53,7 +53,31 @@ CREATE TABLE IF NOT EXISTS results (
     close_draw_odds    DOUBLE,
     close_away_odds    DOUBLE,
     close_over25_odds  DOUBLE,
-    close_under25_odds DOUBLE
+    close_under25_odds DOUBLE,
+    close_odds_book    VARCHAR,
+    early_home_odds    DOUBLE,
+    early_draw_odds    DOUBLE,
+    early_away_odds    DOUBLE
+);
+
+-- Pre-match lines for matches not yet played (football-data.co.uk fixtures files). One row
+-- per observed line: a re-fetch only adds a row when the price changed, so the table is the
+-- line's history. Keyed on normalized names like `results`, joined to fixtures by them.
+CREATE TABLE IF NOT EXISTS odds_observation (
+    division      VARCHAR   NOT NULL,
+    match_date    DATE      NOT NULL,
+    kickoff       VARCHAR,
+    home          VARCHAR   NOT NULL,
+    away          VARCHAR   NOT NULL,
+    home_norm     VARCHAR   NOT NULL,
+    away_norm     VARCHAR   NOT NULL,
+    book          VARCHAR   NOT NULL,
+    home_odds     DOUBLE    NOT NULL,
+    draw_odds     DOUBLE    NOT NULL,
+    away_odds     DOUBLE    NOT NULL,
+    over25_odds   DOUBLE,
+    under25_odds  DOUBLE,
+    observed_at   TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS shots (
@@ -549,10 +573,44 @@ class OddsRow:
     away_xg: float | None = None
     close_over25_odds: float | None = None
     close_under25_odds: float | None = None
+    # The same bookmaker's early line (days before kickoff), for line-movement analysis.
+    early_home_odds: float | None = None
+    early_draw_odds: float | None = None
+    early_away_odds: float | None = None
+    close_odds_book: str | None = None
 
     @property
     def has_odds(self) -> bool:
         return None not in (self.close_home_odds, self.close_draw_odds, self.close_away_odds)
+
+    @property
+    def has_early_odds(self) -> bool:
+        return None not in (self.early_home_odds, self.early_draw_odds, self.early_away_odds)
+
+
+@dataclass(frozen=True)
+class OddsLine:
+    """The latest pre-match line for an upcoming match, plus where it started."""
+
+    division: str
+    match_date: date
+    kickoff: str | None
+    home: str
+    away: str
+    home_norm: str
+    away_norm: str
+    book: str
+    home_odds: float
+    draw_odds: float
+    away_odds: float
+    over25_odds: float | None
+    under25_odds: float | None
+    observed_at: datetime
+    first_home_odds: float
+    first_draw_odds: float
+    first_away_odds: float
+    first_observed_at: datetime
+    observations: int
 
 
 @dataclass(frozen=True)
@@ -663,6 +721,9 @@ class AnalyticsDB:
             "close_under25_odds",
         ):
             self._con.execute(f"ALTER TABLE results ADD COLUMN IF NOT EXISTS {column} DOUBLE")
+        self._con.execute("ALTER TABLE results ADD COLUMN IF NOT EXISTS close_odds_book VARCHAR")
+        for column in ("early_home_odds", "early_draw_odds", "early_away_odds"):
+            self._con.execute(f"ALTER TABLE results ADD COLUMN IF NOT EXISTS {column} DOUBLE")
 
     def _renormalize_names(self) -> None:
         """Recompute stored name keys after a change to `normalize_name` (see NAMES_VERSION).
@@ -707,7 +768,9 @@ class AnalyticsDB:
         if not results:
             return 0
 
-        frame = pl.DataFrame([asdict(r) for r in results])
+        # Infer types from every row: older seasons lack some odds columns entirely, so the
+        # first 100 rows alone can make a float column look all-null.
+        frame = pl.DataFrame([asdict(r) for r in results], infer_schema_length=None)
         units = {(r.season, r.division) for r in results}
 
         # DuckDB reads the Polars frame directly by name via a replacement scan.
@@ -1013,7 +1076,8 @@ class AnalyticsDB:
         rows = self._con.execute(
             "SELECT match_date, home, away, home_norm, away_norm, fthg, ftag, "
             "       close_home_odds, close_draw_odds, close_away_odds, "
-            "       home_shots_target, away_shots_target, close_over25_odds, close_under25_odds "
+            "       home_shots_target, away_shots_target, close_over25_odds, close_under25_odds, "
+            "       early_home_odds, early_draw_odds, early_away_odds, close_odds_book "
             "FROM results WHERE season=? AND division=? ORDER BY match_date, home",
             [season, division],
         ).fetchall()
@@ -1033,6 +1097,10 @@ class AnalyticsDB:
                 away_shots_target=r[11],
                 close_over25_odds=r[12],
                 close_under25_odds=r[13],
+                early_home_odds=r[14],
+                early_draw_odds=r[15],
+                early_away_odds=r[16],
+                close_odds_book=r[17],
             )
             for r in rows
         ]
@@ -1046,6 +1114,79 @@ class AnalyticsDB:
             [season, division],
         ).fetchone()
         return (row[0], row[1]) if row else (0, 0)
+
+    # --- Upcoming-match odds ---------------------------------------------------
+
+    def load_upcoming_odds(self, lines: list[UpcomingOdds], observed_at: datetime) -> int:
+        """Record a fetch of upcoming lines; returns how many were new observations.
+
+        A line identical to the latest stored one for the same match and book is not
+        re-added, so the table holds one row per distinct price, i.e. the line's history.
+        """
+        if not lines:
+            return 0
+        added = 0
+        self._con.execute("BEGIN")
+        try:
+            for o in lines:
+                last = self._con.execute(
+                    "SELECT home_odds, draw_odds, away_odds, over25_odds, under25_odds "
+                    "FROM odds_observation WHERE division=? AND match_date=? AND home_norm=? "
+                    "AND away_norm=? AND book=? ORDER BY observed_at DESC LIMIT 1",
+                    [o.division, o.match_date, o.home_norm, o.away_norm, o.book],
+                ).fetchone()
+                price = (o.home_odds, o.draw_odds, o.away_odds, o.over25_odds, o.under25_odds)
+                if last is not None and tuple(last) == price:
+                    continue
+                self._con.execute(
+                    "INSERT INTO odds_observation VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        o.division,
+                        o.match_date,
+                        o.kickoff,
+                        o.home,
+                        o.away,
+                        o.home_norm,
+                        o.away_norm,
+                        o.book,
+                        *price,
+                        observed_at,
+                    ],
+                )
+                added += 1
+            self._con.execute("COMMIT")
+        except Exception:
+            self._con.execute("ROLLBACK")
+            raise
+        return added
+
+    def upcoming_odds(self, from_date: date) -> list[OddsLine]:
+        """The latest observed line per match on or after `from_date`, kickoff order."""
+        rows = self._con.execute(
+            "SELECT division, match_date, kickoff, home, away, home_norm, away_norm, book, "
+            "       home_odds, draw_odds, away_odds, over25_odds, under25_odds, observed_at, "
+            "       first_home, first_draw, first_away, first_observed, n_obs "
+            "FROM ("
+            "  SELECT *, "
+            "    first_value(home_odds) OVER w AS first_home, "
+            "    first_value(draw_odds) OVER w AS first_draw, "
+            "    first_value(away_odds) OVER w AS first_away, "
+            "    first_value(observed_at) OVER w AS first_observed, "
+            "    count(*) OVER w AS n_obs, "
+            "    row_number() OVER (PARTITION BY division, match_date, home_norm, away_norm, book "
+            "                       ORDER BY observed_at DESC) AS rn "
+            "  FROM odds_observation WHERE match_date >= ? "
+            "  WINDOW w AS (PARTITION BY division, match_date, home_norm, away_norm, book "
+            "               ORDER BY observed_at "
+            "               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+            ") WHERE rn = 1 ORDER BY match_date, kickoff, division, home",
+            [from_date],
+        ).fetchall()
+        return [OddsLine(*r) for r in rows]
+
+    def latest_odds_observation(self) -> datetime | None:
+        row = self._con.execute("SELECT max(observed_at) FROM odds_observation").fetchone()
+        return row[0] if row else None
 
     # --- StatsBomb shots / xG -------------------------------------------------
 

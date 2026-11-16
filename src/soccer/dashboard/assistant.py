@@ -722,6 +722,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
         forecast_explanation,
         forecast_slate,
         format_missing,
+        market_line,
     )
 
     division, (home_e, away_e) = pair[0], pair[1][:2]
@@ -774,6 +775,14 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     else:
         text += (
             f"\n\nModel leans **{lead if lead != 'Draw' else 'a draw'}**. Directional, not advice."
+        )
+    line = market_line(analytics_db, division, home, away)
+    if line is not None:
+        mh, md, ma = line.probs
+        text += (
+            f"\n\nBookmakers ({line.book}, {line.match_date:%d %b}): {home} **{mh:.0%}** · "
+            f"draw **{md:.0%}** · {away} **{ma:.0%}** — where it differs from the model, the "
+            "market has been the better guide"
         )
     text += f"\n\n_{MARKET_CAVEAT}_"
     if adjusted is not None:

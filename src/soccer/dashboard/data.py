@@ -18,7 +18,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast
 
@@ -49,6 +49,7 @@ from soccer.storage.analytics_db import (
     AnalyticsDB,
     MatchLogRow,
     MatchRecord,
+    OddsLine,
     PlayerProfile,
     PlayerRow,
     ResultRow,
@@ -2308,6 +2309,79 @@ def alias_audit(analytics_db: Path) -> tuple[list[str], list[str]]:
     return stale, shadowing
 
 
+BOOK_NAMES = {"PS": "Pinnacle", "Avg": "market average", "B365": "Bet365"}
+
+
+@dataclass(frozen=True)
+class MarketLine:
+    """A bookmaker's current pre-match line for an upcoming match, as probabilities."""
+
+    match_date: date
+    book: str  # display name: "Pinnacle", "market average", "Bet365"
+    probs: tuple[float, float, float]  # vig-free home / draw / away
+    margin: float  # the book's overround on this line
+    over25: float | None  # vig-free P(over 2.5 goals), when the line has a total
+    observed_at: datetime
+    opened: tuple[float, float, float]  # vig-free at the first observation
+    opened_at: datetime
+    observations: int
+
+    @property
+    def moved(self) -> bool:
+        return self.observations > 1 and self.opened != self.probs
+
+
+def _market_line(o: OddsLine) -> MarketLine:
+    from soccer.market.implied import implied_probabilities, overround
+
+    over = None
+    if o.over25_odds and o.under25_odds:
+        raw_o, raw_u = 1 / o.over25_odds, 1 / o.under25_odds
+        over = raw_o / (raw_o + raw_u)
+    return MarketLine(
+        match_date=o.match_date,
+        book=BOOK_NAMES.get(o.book, o.book),
+        probs=implied_probabilities(o.home_odds, o.draw_odds, o.away_odds),
+        margin=overround(o.home_odds, o.draw_odds, o.away_odds),
+        over25=over,
+        observed_at=o.observed_at,
+        opened=implied_probabilities(o.first_home_odds, o.first_draw_odds, o.first_away_odds),
+        opened_at=o.first_observed_at,
+        observations=o.observations,
+    )
+
+
+# A line is matched to a fixture only within this many days of its kickoff, so a rearranged
+# fixture or the reverse leg can't pick up the wrong match's price.
+MARKET_DATE_TOLERANCE_DAYS = 3
+
+
+def _upcoming_lines(adb: AnalyticsDB) -> dict[tuple[str, str, str], list[MarketLine]]:
+    """(division, home norm, away norm) -> upcoming lines, one per match date/book.
+
+    Starts a day back so a late kickoff on a UTC date boundary keeps its line.
+    """
+    since = datetime.now(UTC).date() - timedelta(days=1)
+    out: dict[tuple[str, str, str], list[MarketLine]] = {}
+    for o in adb.upcoming_odds(since):
+        out.setdefault((o.division, o.home_norm, o.away_norm), []).append(_market_line(o))
+    return out
+
+
+def _line_near(lines: list[MarketLine], day: date) -> MarketLine | None:
+    near = [m for m in lines if abs((m.match_date - day).days) <= MARKET_DATE_TOLERANCE_DAYS]
+    return min(near, key=lambda m: abs((m.match_date - day).days)) if near else None
+
+
+def market_line(analytics_db: Path, division: str, home: str, away: str) -> MarketLine | None:
+    """The current bookmaker line for the next meeting of these two clubs, if priced."""
+    if not Path(analytics_db).exists():
+        return None
+    with AnalyticsDB(analytics_db) as adb:
+        lines = _upcoming_lines(adb).get((division, normalize_name(home), normalize_name(away)), [])
+    return min(lines, key=lambda m: m.match_date) if lines else None
+
+
 @dataclass(frozen=True)
 class FixtureForecast:
     kickoff_utc: datetime
@@ -2317,6 +2391,8 @@ class FixtureForecast:
     slate: MarketSlate | None  # None when no model covers the matchup
     experimental: bool = False
     """A cross-league cup forecast (models/crossleague.py) -- measured, but on few matches."""
+    market: MarketLine | None = None
+    """The bookmakers' current line for this fixture, when football-data.co.uk prices it."""
 
 
 # Cup competitions forecast by the cross-league model, and its measured standing so every
@@ -2455,9 +2531,15 @@ def fixture_forecasts(
     def cup_resolve(name: str, ratings: dict[str, Any]) -> str | None:
         return match_team(name, ratings)
 
+    lines: dict[tuple[str, str, str], list[MarketLine]] = {}
+    if Path(analytics_db).exists():
+        with AnalyticsDB(analytics_db) as adb:
+            lines = _upcoming_lines(adb)
+
     out: list[FixtureForecast] = []
     for v in ups:
         slate = None
+        market = None
         home, away = v.home, v.away
         division = COMPETITION_TO_DIVISION.get(v.competition)
         cup = CUP_COMPETITIONS.get(v.competition)
@@ -2482,5 +2564,6 @@ def fixture_forecasts(
                     home, away = names.get(hn, v.home), names.get(an, v.away)
                     lam, mu = model.expected_goals(hn, an)
                     slate = compute_markets(home, away, lam, mu, model.rho)
-        out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate))
+                    market = _line_near(lines.get((division, hn, an), []), v.kickoff_utc.date())
+        out.append(FixtureForecast(v.kickoff_utc, v.competition, home, away, slate, market=market))
     return out

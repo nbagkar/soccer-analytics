@@ -242,6 +242,15 @@ class MatchResult:
     # the attack/defence split of its implied expected goals (see market_expected_goals).
     close_over25_odds: float | None = None
     close_under25_odds: float | None = None
+    # Which columns the closing triple came from ("PSC" Pinnacle, "AvgC" market average,
+    # "B365C" Bet365; "PS"/"Avg"/"B365" when only pre-match lines existed).
+    close_odds_book: str | None = None
+    # The SAME bookmaker's early 1X2 line (collected days before kickoff -- Friday for a
+    # weekend match, Tuesday for midweek), so early -> close is one book's line movement.
+    # None when the close fell back to pre-match lines, or the book has no early column.
+    early_home_odds: float | None = None
+    early_draw_odds: float | None = None
+    early_away_odds: float | None = None
 
 
 # Preference order for closing 1X2 odds: Pinnacle closing (sharpest) -> market-average
@@ -277,12 +286,39 @@ def _float(row: dict[str, str], key: str) -> float | None:
         return None
 
 
+Triple = tuple[float, float, float]
+
+
+def _triple(row: dict[str, str], h_key: str, d_key: str, a_key: str) -> Triple | None:
+    h, d, a = _float(row, h_key), _float(row, d_key), _float(row, a_key)
+    if h and d and a and h > 1 and d > 1 and a > 1:
+        return h, d, a
+    return None
+
+
 def _best_close_odds(row: dict[str, str]) -> tuple[float | None, float | None, float | None]:
     """The best available closing 1X2 odds triple, or (None, None, None) if none parse."""
+    found = _close_and_early(row)
+    return found[0] if found[0] else (None, None, None)
+
+
+def _close_and_early(row: dict[str, str]) -> tuple[Triple | None, str | None, Triple | None]:
+    """(closing triple, its column prefix, the same book's early triple).
+
+    The early line is only paired with a genuine closing line from the same bookmaker
+    family: comparing Pinnacle's close to the market average's early price would read a
+    difference between books as a movement over time.
+    """
     for h_key, d_key, a_key in _ODDS_KEYS:
-        h, d, a = _float(row, h_key), _float(row, d_key), _float(row, a_key)
-        if h and d and a and h > 1 and d > 1 and a > 1:
-            return h, d, a
+        close = _triple(row, h_key, d_key, a_key)
+        if close is None:
+            continue
+        book = h_key[:-1]  # "PSCH" -> "PSC"
+        early = None
+        if book.endswith("C"):
+            stem = book[:-1]  # "PSC" -> "PS"
+            early = _triple(row, f"{stem}H", f"{stem}D", f"{stem}A")
+        return close, book, early
     return None, None, None
 
 
@@ -337,7 +373,9 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
             skipped += 1
             continue
 
-        close_h, close_d, close_a = _best_close_odds(row)
+        close, book, early = _close_and_early(row)
+        close_h, close_d, close_a = close or (None, None, None)
+        early_h, early_d, early_a = early or (None, None, None)
         close_over, close_under = _best_close_over_under(row)
         results.append(
             MatchResult(
@@ -369,6 +407,10 @@ def parse_results_csv(text: str, *, season: str, division: str) -> list[MatchRes
                 close_away_odds=close_a,
                 close_over25_odds=close_over,
                 close_under25_odds=close_under,
+                close_odds_book=book,
+                early_home_odds=early_h,
+                early_draw_odds=early_d,
+                early_away_odds=early_a,
             )
         )
 
@@ -414,7 +456,8 @@ def parse_new_league_csv(
             skipped += 1
             continue
 
-        close_h, close_d, close_a = _best_close_odds(row)
+        close, book, _early = _close_and_early(row)
+        close_h, close_d, close_a = close or (None, None, None)
         results.append(
             MatchResult(
                 season=season,
@@ -443,12 +486,123 @@ def parse_new_league_csv(
                 close_home_odds=close_h,
                 close_draw_odds=close_d,
                 close_away_odds=close_a,
+                close_odds_book=book,
             )
         )
 
     if skipped:
         logger.info("Skipped %d row(s) outside kept seasons / unusable in %s", skipped, division)
     return results
+
+
+# football-data.co.uk's "new leagues" files hold one league per country, so the Country
+# column of the upcoming-fixtures file identifies the division code.
+NEW_LEAGUE_COUNTRIES = {
+    "Argentina": "ARG",
+    "Austria": "AUT",
+    "Brazil": "BRA",
+    "China": "CHN",
+    "Denmark": "DNK",
+    "Finland": "FIN",
+    "Ireland": "IRL",
+    "Japan": "JPN",
+    "Mexico": "MEX",
+    "Norway": "NOR",
+    "Poland": "POL",
+    "Romania": "ROU",
+    "Sweden": "SWE",
+    "USA": "USA",
+}
+
+# Pre-match 1X2 preference for upcoming fixtures: Pinnacle (sharpest, when present) ->
+# market average (the consensus) -> Bet365. Same column names in both fixtures files.
+_UPCOMING_KEYS = (
+    ("PSH", "PSD", "PSA"),
+    ("AvgH", "AvgD", "AvgA"),
+    ("B365H", "B365D", "B365A"),
+)
+_UPCOMING_OU_KEYS = (("P>2.5", "P<2.5"), ("Avg>2.5", "Avg<2.5"), ("B365>2.5", "B365<2.5"))
+
+UPCOMING_FILES = {
+    "fixtures": "https://www.football-data.co.uk/fixtures.csv",
+    "new_league_fixtures": "https://www.football-data.co.uk/new_league_fixtures.csv",
+}
+
+
+@dataclass(frozen=True)
+class UpcomingOdds:
+    """One bookmaker line for a match not yet played, from football-data.co.uk's
+    fixtures files (published a few days before each round, refreshed as it nears)."""
+
+    division: str
+    match_date: date
+    kickoff: str | None  # "HH:MM", UK time as published; None if blank
+    home: str
+    away: str
+    home_norm: str
+    away_norm: str
+    book: str  # column prefix the triple came from: "PS", "Avg" or "B365"
+    home_odds: float
+    draw_odds: float
+    away_odds: float
+    over25_odds: float | None = None
+    under25_odds: float | None = None
+
+
+def parse_upcoming_csv(text: str) -> list[UpcomingOdds]:
+    """Parse either fixtures file (European `Div` schema or new-league `Country` schema).
+
+    Rows without a usable date, both team names and a full 1X2 triple are skipped: a
+    fixture without a price is not an odds observation. Countries outside
+    NEW_LEAGUE_COUNTRIES are skipped rather than guessed.
+    """
+    out: list[UpcomingOdds] = []
+    skipped = 0
+    for row in csv.DictReader(io.StringIO(text.lstrip("\ufeff"))):
+        if "Div" in row:
+            division: str | None = (row.get("Div") or "").strip() or None
+            home = (row.get("HomeTeam") or "").strip()
+            away = (row.get("AwayTeam") or "").strip()
+        else:
+            division = NEW_LEAGUE_COUNTRIES.get((row.get("Country") or "").strip())
+            home = (row.get("Home") or "").strip()
+            away = (row.get("Away") or "").strip()
+        match_date = _parse_date(row.get("Date") or "")
+        line, book = None, None
+        for h_key, d_key, a_key in _UPCOMING_KEYS:
+            line = _triple(row, h_key, d_key, a_key)
+            if line:
+                book = h_key[:-1]
+                break
+        if not division or not home or not away or match_date is None or not line or not book:
+            skipped += 1
+            continue
+        over = under = None
+        for o_key, u_key in _UPCOMING_OU_KEYS:
+            o, u = _float(row, o_key), _float(row, u_key)
+            if o and u and o > 1 and u > 1:
+                over, under = o, u
+                break
+        out.append(
+            UpcomingOdds(
+                division=division,
+                match_date=match_date,
+                kickoff=(row.get("Time") or "").strip() or None,
+                home=home,
+                away=away,
+                home_norm=normalize_name(home),
+                away_norm=normalize_name(away),
+                book=book,
+                home_odds=line[0],
+                draw_odds=line[1],
+                away_odds=line[2],
+                over25_odds=over,
+                under25_odds=under,
+            )
+        )
+    if skipped:
+        logger.info("Skipped %d upcoming row(s) without a usable fixture and price", skipped)
+    return out
 
 
 class FootballDataCoUk:
@@ -492,6 +646,26 @@ class FootballDataCoUk:
             request_meta={"url": url, "season": season, "division": division},
         )
         return parse_results_csv(response.text, season=season, division=division)
+
+    def fetch_upcoming_odds(self) -> list[UpcomingOdds]:
+        """Download both upcoming-fixtures files and parse their pre-match odds.
+
+        Each file is snapshotted (an unchanged file dedupes to the existing snapshot), so
+        the raw store doubles as the observation history. A failure on either file raises:
+        an empty list must mean "no fixtures priced", never "the download broke".
+        """
+        out: list[UpcomingOdds] = []
+        for endpoint, url in UPCOMING_FILES.items():
+            response = self._client.get(url)
+            response.raise_for_status()
+            self._raw.write(
+                SourceId.FOOTBALL_DATA_CO_UK,
+                endpoint,
+                response.text,
+                request_meta={"url": url},
+            )
+            out.extend(parse_upcoming_csv(response.text))
+        return out
 
     def fetch_new_league(
         self, code: str, *, division: str | None = None, recent_seasons: int | None = 3

@@ -41,7 +41,8 @@ analytics (real xG, shot data). The read-only Streamlit dashboard has:
 - **Live scores** — what's in play now, else the last week's results
 - **Predictions** — upcoming fixtures with forecasts (Champions League ties via an
   experimental cross-league model: domestic ratings plus league strengths fitted on past
-  cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest); any **Matchup** (market slate,
+  cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest) beside the
+  bookmakers' current line where one is published; any **Matchup** (market slate,
   correct-score grid, team-news adjustment, attribution); the **Season** projection
   (Monte Carlo title / top-four / relegation odds); and the **Scorecard** — model vs the
   bookmaker's closing line, with calibration
@@ -85,7 +86,8 @@ gets used and what never does, so features are kept or cut on evidence. It never
 machine; set `SOCCER_USAGE_TRACKING=false` to turn it off.
 
 Data stays current without the terminal. When the dashboard opens, anything stale is
-refreshed in the background — results and fixtures after a day, injury news after a day
+refreshed in the background — results (with the next round's bookmaker prices) and fixtures
+after a day, injury news after a day
 (with FPL enabled), squads after a week — and the Predictions page is pre-computed so its
 first visit is fast. Live scores refresh when you look at them, once they're 30 minutes
 old. Every page warns plainly if data is stale or a refresh failed, and adjusted forecasts
@@ -96,10 +98,17 @@ demand, and `soccer serve` runs the very same refreshes unattended.
 future-dated results) and runs in `soccer doctor` and the weekly review — so a data defect
 announces itself instead of waiting to be spotted on a page.
 
-On betting value: there is no free source of odds for *upcoming* matches, so rather than
-fake a live edge, `soccer value` measures a real one against history — betting the model's
-positive-EV picks at the closing 1X2 odds already in the football-data.co.uk files
-(Pinnacle's close preferred). On 2024/25 Premier League the model beats the base-rate
+On the market: football-data.co.uk publishes the next round's bookmaker prices a few days
+ahead (`fixtures.csv`), so upcoming fixtures and the Matchup tab show the bookmakers' line,
+margin removed, next to the model. The same files record each bookmaker's early line as well
+as its close, which allows a test that needs no betting record: when the model disagrees with
+the early line, does the close move toward the model? Measured over six seasons in six leagues
+(~1,000-1,700 disagreements each), it does so about half the time, which is a coin flip. The
+model also trails even the early line on log loss. So the Scorecard's **Line movement**
+section says plainly that the model's disagreements with the market are noise. `soccer value`
+separately measures betting the model's positive-EV picks at the closing 1X2 odds already in
+the files (Pinnacle's close where present; it stops in January 2026, after which the market
+average is used). On 2024/25 Premier League the model beats the base-rate
 baseline but **loses to the closing line on log loss** (≈0.99 vs ≈0.97), and flat-stake
 yields swing either side of zero with the model and warmup — i.e. noise, not edge. The
 dashboard's Scorecard shows the same comparison; it deliberately has no betting
@@ -133,7 +142,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer ingest` | Fetch enabled sources → resolve → persist canonical match state |
 | `soccer matches` | Show ingested match state (add `--in-play`) |
 | `soccer live` | Ad-hoc live scores straight from TheSportsDB |
-| `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB. `--new-leagues BRA,ARG` adds extra-country files (Brazil, ...) |
+| `soccer ingest-history` | Download historical results (football-data.co.uk) into DuckDB. `--new-leagues BRA,ARG` adds extra-country files (Brazil, ...); `--from-raw` re-parses every loaded slice from its stored CSV, offline |
 | `soccer table` | League table computed from historical results |
 | `soccer power-rankings` | Elo power rankings from historical results |
 | `soccer forecast` | Match forecast — outcome probabilities, expected goals, likely scores |
@@ -187,7 +196,7 @@ free APIs / open datasets
         │
    SQLite live state (WAL) ── current score/status per canonical match, team news, refresh log
         │
-   DuckDB analytics ── historical results, shots, player stats, squads
+   DuckDB analytics ── historical results + early/closing odds, upcoming lines, shots, player stats, squads
         │
    models ── Poisson / Dixon-Coles, Elo, Monte Carlo, walk-forward evaluation
         │
@@ -199,7 +208,8 @@ free APIs / open datasets
 - `src/soccer/domain/` — name normalization, entity/match resolution, aliases, state,
   availability, data freshness, usage log
 - `src/soccer/ingest/` — mappers, pipeline, rate limiting, scheduler
-- `src/soccer/models/` — forecasting, simulation, evaluation, market comparison
+- `src/soccer/models/` — forecasting, simulation, evaluation
+- `src/soccer/market/` — odds as probabilities, early-to-close line movement vs the model
 - `src/soccer/dashboard/` — pages, the assistant, refresh actions, background auto-refresh
 - `src/soccer/cli/` — the `soccer` command
 
@@ -230,7 +240,7 @@ partly because some sources' terms forbid redistributing their payloads.
 
 ```bash
 pip install -e ".[dashboard,dev]"
-pytest              # full suite (~40s)
+pytest              # full suite (~2 min)
 ruff check src tests
 ruff format src tests
 mypy src            # strict

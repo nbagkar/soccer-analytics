@@ -17,6 +17,7 @@ from soccer.domain.crosswalk import EntityResolver
 from soccer.domain.match_state import MatchState, MatchStateStore, MatchStatus
 from soccer.domain.matches import MatchObservation, MatchResolver, SourceRef
 from soccer.sources.registry import SourceId
+from soccer.storage.analytics_db import AnalyticsDB
 from soccer.storage.live_db import LiveDB
 
 
@@ -1096,6 +1097,54 @@ class TestFixtureForecasts:
         assert f.slate is not None  # both teams in the E0 model
         result = {m.name: m.probability for m in f.slate.result}
         assert result["Arsenal"] > result["Brentford"]  # strong over weak
+
+    def test_fixture_picks_up_the_bookmakers_line_near_its_kickoff(self, tmp_path) -> None:
+        from soccer.dashboard.data import fixture_forecasts, market_line
+        from soccer.sources.football_data_co_uk import UpcomingOdds
+
+        live = tmp_path / "live.sqlite"
+        with LiveDB(live) as build:
+            add_match(
+                build,
+                match_id="1",
+                home="Arsenal",
+                away="Brentford",
+                competition="Premier League",
+                status=MatchStatus.NOT_STARTED,
+            )
+        analytics = tmp_path / "analytics.duckdb"
+        TestAnalyticsSnapshot()._seed_results(analytics)
+        kickoff = fixture_forecasts(live, analytics)[0].kickoff_utc.date()
+
+        def line(day: object, home_odds: float) -> UpcomingOdds:
+            return UpcomingOdds(
+                division="E0",
+                match_date=day,  # type: ignore[arg-type]
+                kickoff="15:00",
+                home="Arsenal",
+                away="Brentford",
+                home_norm="arsenal",
+                away_norm="brentford",
+                book="Avg",
+                home_odds=home_odds,
+                draw_odds=4.0,
+                away_odds=6.0,
+            )
+
+        with AnalyticsDB(analytics) as adb:
+            # A meeting of the same pair weeks away must not be matched to this fixture.
+            adb.load_upcoming_odds([line(kickoff + timedelta(days=20), 3.0)], datetime(2026, 1, 1))
+        assert fixture_forecasts(live, analytics)[0].market is None
+
+        with AnalyticsDB(analytics) as adb:
+            adb.load_upcoming_odds([line(kickoff, 1.5)], datetime(2026, 1, 2))
+        f = fixture_forecasts(live, analytics)[0]
+        assert f.market is not None
+        assert f.market.match_date == kickoff and f.market.book == "market average"
+        assert abs(sum(f.market.probs) - 1) < 1e-9 and f.market.margin > 0
+        # The Matchup lookup takes display names and returns the NEXT priced meeting.
+        nxt = market_line(analytics, "E0", "Arsenal", "Brentford")
+        assert nxt is not None and nxt.match_date == kickoff
 
     def test_uncovered_competition_listed_without_forecast(self, tmp_path) -> None:
         from soccer.dashboard.data import fixture_forecasts

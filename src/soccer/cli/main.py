@@ -599,6 +599,12 @@ def ingest_history(
         "", help="Comma-separated 'new league' country codes, e.g. BRA,ARG,USA."
     ),
     recent: int = typer.Option(3, help="For new leagues: keep the N most-recent seasons."),
+    from_raw: bool = typer.Option(
+        False,
+        "--from-raw",
+        help="Re-parse every loaded slice from its stored raw CSV instead of downloading "
+        "(applies a parser change to all history, offline).",
+    ),
 ) -> None:
     """Download historical results from football-data.co.uk into the analytics store.
 
@@ -608,6 +614,11 @@ def ingest_history(
     """
     settings = get_settings()
     settings.ensure_dirs()
+    if from_raw:
+        from soccer.dashboard.actions import reparse_results_from_raw
+
+        console.print(reparse_results_from_raw(settings))
+        return
     if not seasons:
         from soccer.sources.football_data_co_uk import current_season_code
 

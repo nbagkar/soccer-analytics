@@ -164,6 +164,24 @@ The strongest analytics source available free, and the one with the murkiest ter
 - Men's football only. No women's coverage.
 - Itself an aggregation layer — compiled from Flashscore, BBC, ESPN and others.
 
+**Odds, verified 2026-11-16:**
+
+- Each result row carries a bookmaker's **early** line (`PSH`, `AvgH`, `B365H`, …;
+  collected Friday for weekend games, Tuesday for midweek) as well as its **close**
+  (`PSCH`, `AvgCH`, `B365CH`, …), for 1X2, over/under 2.5 and Asian handicap. Early and
+  closing lines are paired by bookmaker in the store (`close_odds_book`, `early_*_odds`):
+  94,512 matches carry both.
+- **Pinnacle's columns stop on 2026-01-14.** The 2026/27 files have none, so the market
+  average (`AvgC*`) is the closing line from then on.
+- Before ~2012 (Europe) there are no closing columns at all; the store's "closing" odds
+  for those seasons are Bet365's pre-match line (`close_odds_book = 'B365'`).
+- **Free odds for upcoming matches exist** — this corrects the earlier README claim.
+  `https://football-data.co.uk/fixtures.csv` (European divisions) and
+  `new_league_fixtures.csv` (the extra countries) list the next round with pre-match
+  prices in the same columns (`www.` 302-redirects to the bare host). One snapshot per
+  publication, a few days ahead of the round — not a tick feed; a fixture only appears
+  once it is priced. No both-teams-to-score market.
+
 ## openfootball
 
 - **`football.json` is a stale downstream artifact.** Last data commit 2026-05-30,
