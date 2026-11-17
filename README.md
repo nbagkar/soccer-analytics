@@ -35,23 +35,24 @@ entity/match resolution with a source crosswalk → SQLite live state → curate
 replay-from-raw, plus historical results (football-data.co.uk → DuckDB) with computed
 league tables, Elo power rankings, ratio-method and Dixon-Coles-MLE match forecasting,
 Monte Carlo league simulations, walk-forward forecast backtesting, and StatsBomb event
-analytics (real xG, shot data). The read-only Streamlit dashboard has:
+analytics (real xG, shot data). The read-only Streamlit dashboard is organised in six sections:
 
-- **Ask a question** — the built-in assistant (below), at parity with the pages
-- **Live scores** — what's in play now, else the last week's results
-- **Predictions** — upcoming fixtures with forecasts (Champions League ties via an
-  experimental cross-league model: domestic ratings plus league strengths fitted on past
-  cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest) beside the
-  bookmakers' current line where one is published; any **Matchup** (market slate,
-  correct-score grid, team-news adjustment, attribution); the **Season** projection
-  (Monte Carlo title / top-four / relegation odds); and the **Scorecard** — model vs the
-  bookmaker's closing line, with calibration
-- **League tables** — standings, form guide, and underlying (xG) performance
-- **Teams** — one club at a glance, with a season-on-season trajectory
-- **Records** — this season's streaks and standout results, plus all-time honours
-- **Analysis** — StatsBomb match xG (timeline, shot map, shot log) and player scouting
-  (leaderboard, percentile fingerprints, match logs, similar players)
-- **About & sources** — data health and optional data top-ups
+- **Home** — data status, quick actions and an Ask box; **About & sources** for data health and
+  optional top-ups
+- **Predictions** — upcoming fixtures with forecasts beside the bookmakers' line (Champions
+  League ties via an experimental cross-league model: domestic ratings plus league strengths
+  fitted on past cup results, +3.5% ± 2% skill over base rates in a walk-forward backtest);
+  any **Matchup** (market slate, correct-score grid, team-news adjustment, attribution, model vs
+  the bookmakers); and the **Season** projection (Monte Carlo title / top-four / relegation odds)
+- **Player scouting** — StatsBomb leaderboard, percentile fingerprints, match logs, similar players
+- **Market intelligence** — **Bookmakers' lines** for upcoming matches against the model, and the
+  **Scorecard**: model vs the closing line, calibration, and early-to-close line movement
+- **Team & match analysis** — **League tables** (standings, form, underlying xG), **Teams** (one
+  club with a season-on-season trajectory), **Records** (streaks, all-time honours) and
+  **Match xG** (timeline, shot map, shot log)
+- **AI research** — **Ask a question**, the built-in assistant (below), at parity with the pages
+
+Each page has its own URL (`/predictor`, `/market`, `/players`, …).
 
 Forecasts fit on a rolling multi-season window and re-fit as results land.
 

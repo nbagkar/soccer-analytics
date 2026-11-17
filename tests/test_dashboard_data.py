@@ -1906,6 +1906,13 @@ class TestNewcomerPriors:
         assert model.strengths["thin"].attack == pytest.approx(1.2)
 
 
+def _goto(at, key: str):  # type: ignore[no-untyped-def]
+    """Navigate an AppTest to a page by routing key and keep it there for later reruns
+    (AppTest has no URL to remember a page by; see `_pin_page` in app.main)."""
+    at.session_state["_pin_page"] = key
+    return at.run()
+
+
 class TestAppSmoke:
     """One end-to-end render check so a broken st.* call cannot slip through.
 
@@ -1960,28 +1967,39 @@ class TestAppSmoke:
             # (this also exercises _go's navigation without a session_state error).
             at.chat_input(key="home_ask").set_value("who is top of the premier league?").run()
             assert not at.exception, f"Home ask raised: {at.exception}"
-            assert at.radio[0].value == "Ask a question"
+            assert at.chat_input, "Home's question should land on the assistant page"
             said = [m.markdown[0].value for m in at.chat_message if m.markdown]
             assert "who is top of the premier league?" in said
             assert len(said) >= 3  # greeting, the question, and an answer
 
             # Live scores is archived (nav.ARCHIVED): no longer in the sidebar.
-            assert "Live scores" not in at.radio[0].options
+            from soccer.dashboard.nav import PAGE_KEYS, SECTIONS
 
-            at.radio[0].set_value("About & sources").run()
+            assert "Live Centre" not in PAGE_KEYS
+            assert [name for name, _ in SECTIONS] == [
+                "Home",
+                "Predictions",
+                "Player scouting",
+                "Market intelligence",
+                "Team & match analysis",
+                "AI research",
+            ]
+            assert sorted(k for _, keys in SECTIONS for k in keys) == sorted(PAGE_KEYS)
+
+            _goto(at, "Data Health")
             assert not at.exception, f"Data Health raised: {at.exception}"
 
             # Predictions merges upcoming fixtures + matchup + season into one page. Visit it
             # before seeding league data: the Upcoming tab lists fixtures (none forecastable
             # here), and the Matchup/Season tabs fall back to their "add data" prompts.
-            at.radio[0].set_value("Predictions").run()
+            _goto(at, "Predictor")
             assert not at.exception, f"Predictions (empty) raised: {at.exception}"
 
             # League tables now folds the form guide in as a second tab, and adds a Form
             # column to the table itself. AppTest executes both tab bodies on one visit, so
             # this single navigation covers the standings render and the trends render.
             TestAnalyticsSnapshot()._seed_results(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("League tables").run()
+            _goto(at, "Analytics")
             assert not at.exception, f"League tables raised: {at.exception}"
             # The form guide is folded in as a Form column on the standings table itself.
             assert any(">Form</th>" in (m.value or "") for m in at.markdown), (
@@ -1989,11 +2007,11 @@ class TestAppSmoke:
             )
 
             # Teams hub: pick a club and render its dossier (standing, form, trajectory).
-            at.radio[0].set_value("Teams").run()
+            _goto(at, "Team")
             assert not at.exception, f"Teams raised: {at.exception}"
 
             # Assistant answers a real question now that data is present.
-            at.radio[0].set_value("Ask a question").run()
+            _goto(at, "Assistant")
             assert not at.exception, f"Assistant raised: {at.exception}"
             at.chat_input[0].set_value("who is top of the premier league?").run()
             assert not at.exception, f"Assistant query raised: {at.exception}"
@@ -2006,22 +2024,27 @@ class TestAppSmoke:
             # With league data seeded, revisit Predictions: AppTest executes all three tab
             # bodies, so this covers the upcoming-fixtures list, the matchup forecast slate
             # and the season simulation in one visit.
-            at.radio[0].set_value("Predictions").run()
+            _goto(at, "Predictor")
             assert not at.exception, f"Predictions raised: {at.exception}"
 
-            at.radio[0].set_value("Records").run()
+            _goto(at, "Records")
             assert not at.exception, f"Records raised: {at.exception}"
 
-            # Analysis merges match xG + players into one page (two tabs). Seed both shots
-            # and full-event player stats so each tab has data, then a single visit renders
-            # both tab bodies.
+            # Match xG and Player scouting are separate pages. Seed shots and full-event
+            # player stats so each has data.
             seed_player_events(tmp_path / "analytics.duckdb")
             TestShotMap()._seed_shots(tmp_path / "analytics.duckdb")
-            at.radio[0].set_value("Analysis").run()
-            assert not at.exception, f"Analysis raised: {at.exception}"
-            # Switch the Players tab to the per-player profile view (percentile fingerprint).
+            _goto(at, "Analysis")
+            assert not at.exception, f"Match xG raised: {at.exception}"
+            _goto(at, "Players")
+            assert not at.exception, f"Player scouting raised: {at.exception}"
+            # Switch to the per-player profile view (percentile fingerprint).
             at.segmented_control[0].set_value("Player profile").run()
-            assert not at.exception, f"Analysis players profile raised: {at.exception}"
+            assert not at.exception, f"Player profile raised: {at.exception}"
+            # Market intelligence: upcoming lines (none priced here) and the Scorecard.
+            _goto(at, "Market")
+            assert not at.exception, f"Market raised: {at.exception}"
+            assert any("No upcoming fixture is priced yet" in (m.value or "") for m in at.info)
 
             # The walk above was logged to the local usage table: one event per page visit
             # (not per rerun), and each assistant question tagged with the intent it hit.
@@ -2035,8 +2058,8 @@ class TestAppSmoke:
             asks = [e["name"] for e in events if e["kind"] == "ask"]
             actions = [e["name"] for e in events if e["kind"] == "action"]
             assert pages[0] == "Home"
-            assert {"Assistant", "Predictor", "Analysis"} <= set(pages)
-            assert pages.count("Analysis") == 1  # the profile toggle rerun isn't a new visit
+            assert {"Assistant", "Predictor", "Analysis", "Players", "Market"} <= set(pages)
+            assert pages.count("Players") == 1  # the profile toggle rerun isn't a new visit
             # The Home question is logged as asked from Home, then answered like any other.
             assert asks == ["standings", "standings", "team"]
             assert actions == ["ask_from_home"]
@@ -2080,7 +2103,7 @@ class TestAppSmoke:
 
             app_path = str(files("soccer.dashboard") / "app.py")
             at = AppTest.from_file(app_path, default_timeout=120).run()
-            at.radio[0].set_value("Predictions").run()
+            _goto(at, "Predictor")
             assert not at.exception, f"Predictions raised: {at.exception}"
             sb = [s for s in at.selectbox if s.label == "Competition"]
             assert sb, "expected a Competition filter on the Upcoming tab"
@@ -2108,7 +2131,7 @@ class TestAppSmoke:
 
             app_path = str(files("soccer.dashboard") / "app.py")
             at = AppTest.from_file(app_path, default_timeout=120).run()
-            at.radio[0].set_value("Predictions").run()
+            _goto(at, "Predictor")
             assert not at.exception, f"Predictions raised: {at.exception}"
             seasons = [s for s in at.selectbox if s.label == "Season"]
             assert seasons, "expected a Season selector on Predictions"
@@ -2136,7 +2159,7 @@ class TestAppSmoke:
             at = AppTest.from_file(app_path, default_timeout=60).run()
             assert not at.exception
             assert at.text_input, "expected a password field"
-            assert not at.radio, "nav must not render before the password is entered"
+            assert not at.chat_input and not at.button, "nothing renders before the password"
         finally:
             config._settings = None
 

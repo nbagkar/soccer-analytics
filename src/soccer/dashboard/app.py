@@ -13,6 +13,7 @@ Run with `soccer dashboard` (or `streamlit run src/soccer/dashboard/app.py`).
 from __future__ import annotations
 
 import html
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -74,7 +75,7 @@ from soccer.dashboard.data import (
     underlying_table,
     upcoming_season_briefing,
 )
-from soccer.dashboard.nav import NAV
+from soccer.dashboard.nav import NAV, PAGE_KEYS, SECTIONS, url_path
 from soccer.domain import usage
 from soccer.domain.freshness import age_label
 from soccer.domain.match_state import MatchStatus, MatchView
@@ -141,7 +142,7 @@ def _go(page: str) -> None:
     key, which Streamlit forbids once the widget has been instantiated this run; main()
     applies the request before the radio is created.
     """
-    st.session_state._nav_to = _LABEL_BY_KEY.get(page, page)
+    st.session_state._nav_to = page
     st.rerun()
 
 
@@ -198,7 +199,8 @@ def _render_home(settings: Settings) -> None:
         if st.button(
             "How accurate are our predictions?", icon=":material/fact_check:", width="stretch"
         ):
-            _go("Predictor")
+            st.session_state["_tab_Market"] = "Scorecard"  # open on the Scorecard tab
+            _go("Market")
     with right, st.container(border=True):
         st.markdown("#### :material/refresh: Keep it current")
         if st.button("Update results", icon=":material/scoreboard:", width="stretch"):
@@ -2460,6 +2462,92 @@ def _render_line_movement(lm: LineMovement) -> None:
     )
 
 
+def _render_market_page(settings: Settings) -> None:
+    """Market intelligence: the bookmakers' lines for upcoming matches, and how the model
+    has measured up against them."""
+    available = analytics_available(settings.analytics_db)
+    lines_tab, card_tab = _tabs("Market", ["Upcoming lines", "Scorecard"])
+    with lines_tab:
+        fixtures = _cached_fixture_forecasts(
+            str(settings.live_db),
+            str(settings.analytics_db),
+            max(_db_version(settings.analytics_db), _db_version(settings.live_db)),
+            5000,
+        )
+        _render_market_lines(fixtures)
+        with card_tab:
+            if not available:
+                st.info(
+                    "No league data yet. Go to **About & sources** → **Add a league**.",
+                    icon=":material/download:",
+                )
+            else:
+                st.caption(
+                    "How good are these forecasts, really? Measured over the last few seasons "
+                    "against the bookmaker's closing line — the honest benchmark."
+                )
+                by_league = {division_name(d): d for _s, d, _n in available}
+                league_names = sorted(by_league)
+                default_idx = _default_index(league_names)
+                league = st.selectbox("League", league_names, index=default_idx, key="card_league")
+                if card_tab.open:
+                    _track_view("league:card", usage.LEAGUE, league, "card")
+                ready, fc_report = forecast_report_if_ready(
+                    settings.analytics_db, by_league[league], n_seasons=6
+                )
+                if not ready:
+                    st.info(
+                        "Scoring the last six seasons against the closing line — this takes "
+                        "about 20 seconds after new results arrive, and runs in the background "
+                        "so the rest of the page doesn't wait.",
+                        icon=":material/hourglass_top:",
+                    )
+                    st.button("Show it now", key="card_refresh", icon=":material/refresh:")
+                elif fc_report is None:
+                    st.info("No closing odds loaded for that league yet.")
+                else:
+                    _render_report_card(fc_report, by_league[league])
+
+
+def _render_market_lines(fixtures: list[FixtureForecast]) -> None:
+    """Upcoming matches the bookmakers have priced: their line, the model, and the gap."""
+    priced = [f for f in fixtures if f.market is not None and f.slate is not None]
+    if not priced:
+        st.info(
+            "No upcoming fixture is priced yet. football-data.co.uk publishes the next round's "
+            "prices a few days ahead (usually by Friday); they're fetched with the daily "
+            "results refresh.",
+            icon=":material/schedule:",
+        )
+        return
+    rows = []
+    for f in priced:
+        assert f.market is not None and f.slate is not None
+        model = tuple(m.probability for m in f.slate.result)
+        mkt = f.market.probs
+        gap = max(range(3), key=lambda i: abs(model[i] - mkt[i]))
+        label = (f.home, "Draw", f.away)[gap]
+        moved = f"{f.market.opened[0]:.0%} → {mkt[0]:.0%}" if f.market.moved else "—"
+        rows.append(
+            {
+                "Date (UTC)": f.kickoff_utc.strftime("%m-%d %H:%M"),
+                "Competition": _esc(f.competition),
+                "Match": f"{_esc(f.home)} v {_esc(f.away)}",
+                "Market 1·X·2": " · ".join(f"{round(p * 100)}" for p in mkt),
+                "Model 1·X·2": " · ".join(f"{round(p * 100)}" for p in model),
+                "Biggest gap": f"{_esc(label)} {100 * (model[gap] - mkt[gap]):+.0f} pts",
+                "Home price moved": moved,
+                "Book": _esc(f.market.book),
+            }
+        )
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+    latest = max(f.market.observed_at for f in priced if f.market is not None)
+    st.caption(
+        f"{len(priced)} priced fixtures, margin removed; lines checked {latest:%d %b %H:%M} UTC. "
+        f"Gap = model minus market, in percentage points. {MARKET_HONESTY}"
+    )
+
+
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
     if not uncovered:
         return
@@ -2495,10 +2583,6 @@ def _confidence_cell(p: float) -> str:
     return f"<b style='color:{color};font-variant-numeric:tabular-nums'>{p:.0%}</b>"
 
 
-_NAV_LABELS = [label for _k, label, _i, _c in NAV]
-_NAV_CAPTIONS = [caption for _k, _l, _i, caption in NAV]
-_KEY_BY_LABEL = {label: key for key, label, _i, _c in NAV}
-_LABEL_BY_KEY = {key: label for key, label, _i, _c in NAV}
 _HEADER = {key: (icon, label, caption) for key, label, icon, caption in NAV}
 
 
@@ -2730,31 +2814,56 @@ def main() -> None:
     _require_password()
 
     settings = get_settings()
-    with st.sidebar:
-        st.markdown("### :material/sports_soccer: Soccer Analytics")
-        st.caption("Local-first football intelligence")
-        st.space("small")
-        # Apply a pending navigation request (from a call-to-action button) before the
-        # radio is created -- setting its key afterwards is not allowed.
-        if "_nav_to" in st.session_state:
-            st.session_state.nav = st.session_state.pop("_nav_to")
-        if st.session_state.get("nav") not in (None, *_NAV_LABELS):
-            del st.session_state["nav"]  # a page archived since (nav.ARCHIVED): back to Home
-        selected = st.radio(
-            "Menu",
-            _NAV_LABELS,
-            captions=_NAV_CAPTIONS,
-            label_visibility="collapsed",
-            key="nav",
+
+    def page_for(key: str) -> Callable[[], None]:
+        def run() -> None:
+            _run_page(settings, key)
+
+        run.__name__ = f"page_{url_path(key).replace('-', '_')}"
+        return run
+
+    # The landing page is Home. `_pin_page` exists only for Streamlit's AppTest, which has no
+    # URL to remember a page by: a test pins the page it is exercising. Nothing in the app
+    # sets it, so for a real visitor the landing page is always Home.
+    pinned = st.session_state.get("_pin_page")
+    landing = pinned if pinned in PAGE_KEYS else "Home"
+    pages = {
+        key: st.Page(
+            page_for(key),
+            title=label,
+            icon=icon,
+            url_path="" if key == landing else url_path(key),
+            default=key == landing,
         )
-    page = _KEY_BY_LABEL[selected]
+        for key, label, icon, _caption in NAV
+    }
+    nav = st.navigation({section: [pages[k] for k in keys] for section, keys in SECTIONS})
+    with st.sidebar:
+        st.caption(":material/sports_soccer: Soccer Analytics · local-first football intelligence")
+    # A call-to-action button asked for another page (see _go): switch before rendering.
+    target = st.session_state.pop("_nav_to", None)
+    if target in pages:
+        if pinned is not None:
+            st.session_state._pin_page = target  # a pinned test follows the button
+        st.switch_page(pages[target])
+    # A pinned test page wins over wherever the last switch left AppTest (newer Streamlit
+    # keeps a switched-to page across runs and ignores a changed default).
+    if pinned in pages and nav.url_path != pages[pinned].url_path:
+        st.switch_page(pages[pinned])
     if NO_TRACK_PARAM in st.query_params:
         st.session_state._notrack = True
-    _track_view("page", usage.PAGE, page)
+    nav.run()
 
+
+def _run_page(settings: Settings, page: str) -> None:
+    """Everything one page renders: usage log, header, freshness, then its body."""
+    _track_view("page", usage.PAGE, page)
     _page_header(page)
     _render_freshness(settings, page)
+    _render_page(settings, page)
 
+
+def _render_page(settings: Settings, page: str) -> None:
     if page == "Home":
         _render_home(settings)
         return
@@ -2764,18 +2873,20 @@ def main() -> None:
         return
 
     if page == "Analysis":
-        match_tab, players_tab = _tabs(page, ["Match", "Players"])
-        with match_tab:
-            _render_match_analysis(settings)
-        with players_tab:
-            _render_players_page(settings)
+        _render_match_analysis(settings)
+        return
+
+    if page == "Players":
+        _render_players_page(settings)
+        return
+
+    if page == "Market":
+        _render_market_page(settings)
         return
 
     if page == "Predictor":
         available = analytics_available(settings.analytics_db)
-        upcoming_tab, match_tab, season_tab, card_tab = _tabs(
-            page, ["Upcoming", "Matchup", "Season", "Scorecard"]
-        )
+        upcoming_tab, match_tab, season_tab = _tabs(page, ["Upcoming", "Matchup", "Season"])
 
         with upcoming_tab:
             upcoming_fixtures = _cached_fixture_forecasts(
@@ -2903,39 +3014,6 @@ def main() -> None:
                             "**Home → Update fixtures** for an upcoming-season projection."
                         )
                         _render_season(latest_briefing)
-
-        with card_tab:
-            if not available:
-                st.info(
-                    "No league data yet. Go to **About & sources** → **Add a league**.",
-                    icon=":material/download:",
-                )
-            else:
-                st.caption(
-                    "How good are these forecasts, really? Measured over the last few seasons "
-                    "against the bookmaker's closing line — the honest benchmark."
-                )
-                by_league = {division_name(d): d for _s, d, _n in available}
-                league_names = sorted(by_league)
-                default_idx = _default_index(league_names)
-                league = st.selectbox("League", league_names, index=default_idx, key="card_league")
-                if card_tab.open:
-                    _track_view("league:card", usage.LEAGUE, league, "card")
-                ready, fc_report = forecast_report_if_ready(
-                    settings.analytics_db, by_league[league], n_seasons=6
-                )
-                if not ready:
-                    st.info(
-                        "Scoring the last six seasons against the closing line — this takes "
-                        "about 20 seconds after new results arrive, and runs in the background "
-                        "so the rest of the page doesn't wait.",
-                        icon=":material/hourglass_top:",
-                    )
-                    st.button("Show it now", key="card_refresh", icon=":material/refresh:")
-                elif fc_report is None:
-                    st.info("No closing odds loaded for that league yet.")
-                else:
-                    _render_report_card(fc_report, by_league[league])
 
         return
 
