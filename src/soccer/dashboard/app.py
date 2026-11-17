@@ -45,6 +45,7 @@ from soccer.dashboard.data import (
     availability_adjusted_slate,
     fixture_forecasts,
     forecast_explanation,
+    forecast_model_version,
     forecast_report_if_ready,
     forecast_slate,
     forecast_teams,
@@ -1666,7 +1667,7 @@ def _render_forecast(slate: MarketSlate) -> None:
     st.caption(
         "Prices are the model's fair probability in cents (100¢ = certain), no bookmaker "
         "margin. Shots-on-target model over ~3 recent seasons, re-fit as results land. "
-        "Directional, not advice."
+        f"Directional, not advice. Model {forecast_model_version()}."
     )
 
 
@@ -1904,7 +1905,8 @@ def _render_report_card(report: ForecastReport, division: str) -> None:
     st.caption(
         f"Closing 1X2 odds from football-data.co.uk, de-vigged — {mix or 'n/a'} (Pinnacle is "
         "used where the file has it; it stops in January 2026). Model = Poisson fit on a "
-        "shots-on-target expected-goals blend (the app's live forecast model)."
+        f"shots-on-target expected-goals blend (the app's live forecast model, "
+        f"{forecast_model_version()})."
     )
 
     if report.line_movement is not None:

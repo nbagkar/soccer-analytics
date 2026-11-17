@@ -720,6 +720,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
     from soccer.dashboard.data import (
         availability_adjusted_slate,
         forecast_explanation,
+        forecast_model_version,
         forecast_slate,
         format_missing,
         market_line,
@@ -784,7 +785,7 @@ def _intent_forecast(q: str, analytics_db: Path, live_db: Path | None) -> Reply 
             f"draw **{md:.0%}** · {away} **{ma:.0%}** — where it differs from the model, the "
             "market has been the better guide"
         )
-    text += f"\n\n_{MARKET_CAVEAT}_"
+    text += f"\n\n_{MARKET_CAVEAT} Model {forecast_model_version()}._"
     if adjusted is not None:
         adj_res = {m.name: m.probability for m in adjusted.adjusted.result}
         # One more decimal than the headline numbers above: team-news nudges are individually
