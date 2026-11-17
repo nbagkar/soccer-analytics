@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     # can be swapped in without a code change.
     football_data_org_token: str | None = None
     thesportsdb_key: str = "123"
+    # Optional LLM narrator for the assistant (soccer.intelligence). Off unless provider,
+    # model and key are all set; see .env.example.
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_api_key: SecretStr | None = None
+    llm_base_url: str | None = None
+    llm_monthly_token_cap: int = Field(default=2_000_000, ge=1)
+    llm_price_in_per_m: float | None = None
+    """USD per million input tokens, from the provider's pricing page -- for cost estimates."""
+    llm_price_out_per_m: float | None = None
     api_football_key: SecretStr | None = None
     """API-Football (api-sports.io) key. Unset = the source is off. SecretStr so it never
     lands in a log line or a repr."""

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -91,7 +92,14 @@ from soccer.models.simulation import TeamProjection
 from soccer.models.value import ValueReport
 from soccer.sources.football_data_co_uk import division_name, season_label, season_sort_key
 from soccer.sources.statsbomb import ATTRIBUTION as ATTRIBUTION_STATSBOMB
-from soccer.storage.analytics_db import MatchLogRow, MatchRecord, PlayerProfile, PlayerRow, TeamForm
+from soccer.storage.analytics_db import (
+    AnalyticsDB,
+    MatchLogRow,
+    MatchRecord,
+    PlayerProfile,
+    PlayerRow,
+    TeamForm,
+)
 from soccer.storage.live_db import LiveDB
 
 # What st.altair_chart actually accepts -- a plain `alt.Chart` return type is too narrow for
@@ -379,6 +387,26 @@ def _render_assistant(settings: Settings) -> None:
         st.session_state.chat = [greeting]
         st.session_state._chat_context = None
 
+    from soccer.intelligence.llm_provider import client_from_settings
+
+    narrator = client_from_settings(settings)
+    narrate_on = False
+    if narrator is not None:
+        spent = narrator.usage()
+        cost = f", about ${spent.estimated_cost:.2f}" if spent.estimated_cost is not None else ""
+        narrate_on = st.toggle(
+            f"Explain answers with {narrator.provider} ({narrator.model})",
+            value=True,
+            key="_narrate",
+            help="The app still computes every answer locally. When on, your question and that "
+            "computed answer are sent to the provider to be rewritten; a rewrite that mentions "
+            "any number the computed answer doesn't contain is thrown away.",
+        )
+        st.caption(
+            f"Sent to {narrator.provider} when on: your question and the computed answer — "
+            f"nothing else. This month: {spent.tokens:,} of {spent.cap:,} tokens{cost}."
+        )
+
     prompt = st.chat_input("Ask a question…") or st.session_state.pop("_suggestion", None)
     if prompt:
         st.session_state.chat.append({"role": "user", "text": prompt})
@@ -409,10 +437,31 @@ def _render_assistant(settings: Settings) -> None:
             intent,
             prompt if intent == usage.FALLBACK_INTENT else None,
         )
+        narrated, narration_note = None, ""
+        if narrate_on and narrator is not None:
+            from soccer.intelligence.narrator import narrate, should_narrate
+
+            if should_narrate(reply.intent):
+                with st.spinner("Explaining…"):
+                    n = narrate(
+                        narrator,
+                        prompt,
+                        reply.text,
+                        reply.table,
+                        data_date=_latest_result_date(settings),
+                    )
+                narrated = n.text
+                narration_note = (
+                    f"Explained by {n.model} from the answer the app computed."
+                    if n.accepted
+                    else f"Showing the computed answer ({n.note})."
+                )
         st.session_state.chat.append(
             {
                 "role": "assistant",
                 "text": reply.text,
+                "narrated": narrated,
+                "narration_note": narration_note,
                 "table": reply.table,
                 "suggestions": reply.suggestions,
                 "chart": reply.chart,
@@ -422,7 +471,15 @@ def _render_assistant(settings: Settings) -> None:
     for message in st.session_state.chat:
         avatar = "⚽" if message["role"] == "assistant" else None
         with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["text"])
+            if message.get("narrated"):
+                st.markdown(message["narrated"])
+                st.caption(message["narration_note"])
+                with st.expander("The computed answer"):
+                    st.markdown(message["text"])
+            else:
+                st.markdown(message["text"])
+                if message.get("narration_note"):
+                    st.caption(message["narration_note"])
             if message.get("table"):
                 st.dataframe(
                     pl.DataFrame(message["table"]).to_pandas(), hide_index=True, width="stretch"
@@ -437,6 +494,14 @@ def _render_assistant(settings: Settings) -> None:
             if col.button(suggestion, key=f"sug_{suggestion}", width="stretch"):
                 st.session_state._suggestion = suggestion
                 st.rerun()
+
+
+def _latest_result_date(settings: Settings) -> date | None:
+    """The newest result in the store -- the "data through" date a narration is told."""
+    if not settings.analytics_db.exists():
+        return None
+    with AnalyticsDB(settings.analytics_db) as adb:
+        return adb.latest_result_date()
 
 
 def _render_live(snap: LiveSnapshot) -> None:
