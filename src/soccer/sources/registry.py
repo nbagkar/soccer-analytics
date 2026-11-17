@@ -169,6 +169,12 @@ SOURCES: dict[SourceId, Source] = {
         caveats=(
             "The analytics backbone: 22 divisions, shots/corners/cards back to "
             "2000/01, plus closing odds from 17 bookmakers. No xG.",
+            "Each result carries a bookmaker's early line (collected Friday for weekend "
+            "games, Tuesday for midweek) as well as its close. Pinnacle's columns stop "
+            "in January 2026; the market average stands in after that.",
+            "fixtures.csv / new_league_fixtures.csv price the NEXT round a few days ahead "
+            "(verified 2026-11-16): one snapshot per publication, not a tick feed, and "
+            "fixtures only appear once priced. No BTTS market.",
             "No copyright grant and no redistribution clause exist. Downloading and "
             "analysing is plainly intended; republishing the CSVs is not granted.",
             "Men's football only.",

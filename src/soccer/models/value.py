@@ -1,8 +1,7 @@
 """Market-edge analysis: does the model actually beat the closing line?
 
-The honest counterpart to a "value bets" feature. There is no free source of odds for
-*upcoming* matches (football-data.org's free tier returns none), so rather than fake a
-live edge, this measures a real, verifiable question against history: taking the closing
+The honest counterpart to a "value bets" feature. Rather than claim a live edge, this
+measures a real, verifiable question against history: taking the closing
 1X2 odds already in the football-data.co.uk files -- with Pinnacle's close, the sharpest
 public line, preferred -- would betting the model's positive-EV selections have made
 money, and is the model even better calibrated than the vig-free market?
@@ -17,22 +16,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+# Re-exported (explicitly, for strict mypy): older callers import it from here.
+from soccer.market.implied import implied_probabilities as implied_probabilities
 from soccer.storage.analytics_db import OddsRow
 
 _EPS = 1e-15
-
-
-def implied_probabilities(
-    home_odds: float, draw_odds: float, away_odds: float
-) -> tuple[float, float, float]:
-    """Vig-free 1X2 probabilities implied by decimal odds (normalized to sum to 1).
-
-    Dividing out the overround (the bookmaker's margin) via simple normalization -- the
-    standard first-order de-vig. The result is what the market 'thinks' before its cut.
-    """
-    raw = (1.0 / home_odds, 1.0 / draw_odds, 1.0 / away_odds)
-    total = sum(raw)
-    return (raw[0] / total, raw[1] / total, raw[2] / total)
 
 
 def expected_value(prob: float, decimal_odds: float) -> float:

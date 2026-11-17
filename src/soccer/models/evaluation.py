@@ -15,16 +15,18 @@ robust trend rather than an overfit point.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
+from soccer.market.implied import implied_probabilities
+from soccer.market.movement import EARLY_LAG_DAYS, LineMovement, MovementRecord, line_movement
 from soccer.models.backtest import (
     CalibrationBin,
     _calibration,
     _outcome_index,
     expected_calibration_error,
 )
-from soccer.models.value import implied_probabilities
 from soccer.sources.football_data_co_uk import current_season_code
 from soccer.storage.analytics_db import OddsRow
 
@@ -158,6 +160,10 @@ class ForecastReport:
     """Fraction of matches where predicted total goals (rounded) was within 1 of the actual."""
     recent: list[PredictionRecord]
     """The track record: this season's predictions, most recent first."""
+    line_movement: LineMovement | None = None
+    """Early -> close movement vs a lagged model (matches with a same-book early line)."""
+    close_books: tuple[tuple[str, int], ...] = ()
+    """Which columns the scored closing lines came from, most-used first ("PSC", "AvgC"...)."""
 
     @property
     def blend_beats_market(self) -> bool:
@@ -185,6 +191,7 @@ def evaluate_forecasts(
     min_history: int = 60,
     weight_steps: int = 21,
     top_divergences: int = 12,
+    early_lag_days: int = EARLY_LAG_DAYS,
 ) -> ForecastReport | None:
     """Walk a slice, scoring model vs market vs blend vs baseline. None if too little data.
 
@@ -231,8 +238,19 @@ def evaluate_forecasts(
     expected_goals: list[tuple[float, float]] = []  # (home_expected, away_expected), aligned
     goals_preds: list[tuple[Probs, int]] = []  # goals-only Poisson, for comparison
     compare_goals = model != "poisson"
+    # Line movement: a second, LAGGED model (fit only on matches >= early_lag_days before
+    # kickoff) so it never knows a result the early line could not have. One fit per cutoff,
+    # shared by every match with that cutoff (a whole weekend), not one per match.
+    lag = timedelta(days=early_lag_days)
+    cut = 0  # chronological[:cut] = matches at least `lag` before the current one
+    seen_lagged: set[str] = set()
+    lagged_fits: dict[int, object] = {}
+    movement: list[MovementRecord] = []
 
     for o in chronological:
+        while cut < len(chronological) and chronological[cut].match_date <= o.match_date - lag:
+            seen_lagged.update((chronological[cut].home_norm, chronological[cut].away_norm))
+            cut += 1
         eligible = (
             len(played) >= min_history
             and o.home_norm in seen
@@ -252,6 +270,28 @@ def evaluate_forecasts(
             actual = _outcome_index(o.fthg, o.ftag)
             records.append((model_p, market_p, actual, o))
             expected_goals.append((fc.home_expected, fc.away_expected))
+            if (
+                o.has_early_odds
+                and cut >= min_history
+                and o.home_norm in seen_lagged
+                and o.away_norm in seen_lagged
+            ):
+                assert o.early_home_odds is not None
+                assert o.early_draw_odds is not None
+                assert o.early_away_odds is not None
+                if cut not in lagged_fits:
+                    lagged_fits[cut] = fit(chronological[:cut])
+                lfc = lagged_fits[cut].forecast(o.home_norm, o.away_norm)  # type: ignore[attr-defined]
+                movement.append(
+                    MovementRecord(
+                        model=(lfc.prob_home, lfc.prob_draw, lfc.prob_away),
+                        early=implied_probabilities(
+                            o.early_home_odds, o.early_draw_odds, o.early_away_odds
+                        ),
+                        close=market_p,
+                        actual=actual,
+                    )
+                )
             if compare_goals:
                 gfc = fit_poisson(played).forecast(o.home_norm, o.away_norm)
                 goals_preds.append(((gfc.prob_home, gfc.prob_draw, gfc.prob_away), actual))
@@ -352,4 +392,8 @@ def evaluate_forecasts(
         hit_rate=hits / n,
         goals_within_one_rate=goals_within_one,
         recent=recent,
+        line_movement=line_movement(movement),
+        close_books=tuple(
+            Counter(o.close_odds_book or "?" for _m, _k, _a, o in records).most_common()
+        ),
     )

@@ -25,6 +25,8 @@ from soccer.sources.football_data_co_uk import (
     MatchResult,
     current_season_code,
     division_name,
+    parse_new_league_csv,
+    parse_results_csv,
 )
 from soccer.storage.analytics_db import AnalyticsDB, SquadMember
 from soccer.storage.live_db import LiveDB
@@ -257,13 +259,19 @@ def refresh_results(settings: Settings) -> str:
                     adb.load_results(results)
                     slices += 1
                     total += len(results)
-        cup = ""
+        # Upcoming-match odds ride along: two small files, isolated so a failure there never
+        # sinks the results refresh it piggybacks on (reported in the message instead).
+        try:
+            odds = "; " + _load_upcoming_odds(raw, settings)
+        except Exception as exc:
+            odds = f"; upcoming odds refresh failed: {type(exc).__name__}: {exc}"
+        cup = odds
         if "UCL" in divisions and settings.football_data_org_token:
             # One request for the season in play; a cup failure must not sink the leagues.
             try:
-                cup = "; " + load_champions_league(settings, seasons=champions_league_seasons(1))
+                cup += "; " + load_champions_league(settings, seasons=champions_league_seasons(1))
             except Exception as exc:  # network, rate limit, schema -- reported, not raised
-                cup = f"; Champions League refresh failed: {type(exc).__name__}: {exc}"
+                cup += f"; Champions League refresh failed: {type(exc).__name__}: {exc}"
         if not slices:
             return (
                 f"no new results (European season {season} not started, no in-season extras)" + cup
@@ -271,6 +279,59 @@ def refresh_results(settings: Settings) -> str:
         return f"refreshed {total} results across {slices} league slice(s) (season {season})" + cup
 
     return _logged(settings, RESULTS, run)
+
+
+def _load_upcoming_odds(raw: RawStore, settings: Settings) -> str:
+    with FootballDataCoUk(raw) as source:
+        lines = source.fetch_upcoming_odds()
+    with AnalyticsDB(settings.analytics_db) as adb:
+        added = adb.load_upcoming_odds(lines, datetime.now(UTC).replace(tzinfo=None))
+    return f"{len(lines)} upcoming lines priced ({added} new or moved)"
+
+
+def refresh_upcoming_odds(settings: Settings) -> str:
+    """Fetch football-data.co.uk's upcoming-fixtures odds into the store (no-op without one)."""
+    if not settings.analytics_db.exists():
+        return "skipped (no analytics DB yet)"
+    settings.ensure_dirs()
+    return _load_upcoming_odds(RawStore(settings.raw_dir), settings)
+
+
+def reparse_results_from_raw(settings: Settings) -> str:
+    """Re-derive every loaded results slice from its newest raw snapshot -- offline.
+
+    The point of keeping raw CSVs: a parser change (here, early odds) reaches all history
+    without re-downloading. Only (season, division) slices already in the store are
+    replaced, and a new-league file keeps exactly the seasons that were loaded.
+    """
+    from soccer.sources.registry import SourceId
+
+    if not settings.analytics_db.exists():
+        return "skipped (no analytics DB yet)"
+    raw = RawStore(settings.raw_dir)
+    reloaded = rows = 0
+    with AnalyticsDB(settings.analytics_db) as adb:
+        loaded = adb.seasons_loaded()
+        by_division: dict[str, set[str]] = {}
+        for season, division, _n in loaded:
+            by_division.setdefault(division, set()).add(season)
+        for division, seasons in sorted(by_division.items()):
+            results: list[MatchResult] = []
+            if division in NEW_LEAGUE_CODES:
+                snap = raw.latest(SourceId.FOOTBALL_DATA_CO_UK, f"new_{division}")
+                if snap is not None:
+                    parsed = parse_new_league_csv(snap.payload, division=division)
+                    results = [r for r in parsed if r.season in seasons]
+            elif division not in CUP_DIVISIONS:
+                for season in sorted(seasons):
+                    snap = raw.latest(SourceId.FOOTBALL_DATA_CO_UK, f"{season}_{division}")
+                    if snap is not None:
+                        results += parse_results_csv(snap.payload, season=season, division=division)
+            if results:
+                adb.load_results(results)
+                reloaded += len({(r.season, r.division) for r in results})
+                rows += len(results)
+    return f"re-parsed {rows} results across {reloaded} slice(s) from raw snapshots"
 
 
 def _recent_seasons(n: int = 3) -> list[str]:

@@ -32,6 +32,7 @@ from soccer.dashboard.data import (
     HealthSnapshot,
     LeagueHistory,
     LiveSnapshot,
+    MarketLine,
     MetricPercentile,
     SeasonBriefing,
     SeasonRecords,
@@ -53,6 +54,7 @@ from soccer.dashboard.data import (
     league_history,
     live_snapshot,
     market_edge,
+    market_line,
     player_board,
     player_competitions,
     player_match_log,
@@ -75,6 +77,7 @@ from soccer.dashboard.nav import NAV
 from soccer.domain import usage
 from soccer.domain.freshness import age_label
 from soccer.domain.match_state import MatchStatus, MatchView
+from soccer.market.movement import LineMovement
 from soccer.models.evaluation import (
     BlendPoint,
     ForecastReport,
@@ -1893,10 +1896,20 @@ def _render_report_card(report: ForecastReport, division: str) -> None:
         for d in report.divergences
     ]
     st.markdown(_html_table(div_rows), unsafe_allow_html=True)
-    st.caption(
-        "Closing 1X2 odds from football-data.co.uk (Pinnacle preferred), de-vigged. Model = "
-        "Poisson fit on a shots-on-target expected-goals blend (the app's live forecast model)."
+    books = {"PSC": "Pinnacle", "AvgC": "market average", "B365C": "Bet365"}
+    total = sum(n for _b, n in report.close_books) or 1
+    mix = ", ".join(
+        f"{books.get(b, 'pre-match line')} {n / total:.0%}" for b, n in report.close_books
     )
+    st.caption(
+        f"Closing 1X2 odds from football-data.co.uk, de-vigged — {mix or 'n/a'} (Pinnacle is "
+        "used where the file has it; it stops in January 2026). Model = Poisson fit on a "
+        "shots-on-target expected-goals blend (the app's live forecast model)."
+    )
+
+    if report.line_movement is not None:
+        st.divider()
+        _render_line_movement(report.line_movement)
 
     st.divider()
     _render_track_record(report.recent, report.hit_rate, report.goals_within_one_rate, report.n)
@@ -2266,6 +2279,7 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         "BTTS",
         "Favourite",
         "Confidence",
+        "Market 1·X·2",
     ]
     body = ""
     for f in forecastable:
@@ -2294,6 +2308,7 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
             _pct_cell(btts_yes, btts_yes >= 0.5),
             f'<span style="color:{_YES}">{_esc(fav)}</span>',
             _confidence_cell(pick_p),
+            _market_cell(f.market),
         ]
         tds = "".join(f'<td style="padding:3px 12px 3px 0">{c}</td>' for c in cells)
         body += f'<tr style="border-top:1px solid #33333322">{tds}</tr>'
@@ -2310,9 +2325,137 @@ def _render_fixtures(fixtures: list[FixtureForecast]) -> None:
         "Confidence = the probability the model gave its favourite; ~33% is a coin flip, "
         "anything near that is barely a lean."
     )
+    priced = [f.market for f in forecastable if f.market is not None]
+    if priced:
+        latest = max(m.observed_at for m in priced)
+        st.caption(
+            f"Market = the bookmakers' current line for {len(priced)} of these matches "
+            f"(football-data.co.uk, checked {latest:%d %b %H:%M} UTC), margin removed. "
+            f"{MARKET_HONESTY}"
+        )
+    else:
+        st.caption(
+            "Market: no bookmaker line yet for these fixtures — football-data.co.uk publishes "
+            "the next round's prices a few days ahead (usually by Friday)."
+        )
     if any(f.experimental for f in forecastable):
         st.caption(f"ᵉˣᵖ {CUP_MODEL_NOTE}")
     _render_uncovered_fixtures(uncovered)
+
+
+# Measured, not assumed (Scorecard -> Line movement, six leagues, ~1,000-1,700 matches each):
+# when the model disagrees with the early line, the close moves its way about half the time.
+MARKET_HONESTY = (
+    "Where the two differ, trust the market: measured over six seasons, the model is less "
+    "accurate than even the bookmakers' early line, and when they disagree the line moves "
+    "toward the model only about half the time — a coin flip."
+)
+
+
+def _market_cell(m: MarketLine | None) -> str:
+    if m is None:
+        return f"<span style='color:{_MUTE}'>—</span>"
+    h, d, a = (round(p * 100) for p in m.probs)
+    return (
+        f"<span style='color:{_MUTE};font-variant-numeric:tabular-nums' "
+        f"title='{_esc(m.book)}, margin {m.margin:.1%}'>{h} · {d} · {a}</span>"
+    )
+
+
+def _render_market_line(slate: MarketSlate, line: MarketLine) -> None:
+    """The model's forecast next to the bookmakers' current line for the same match."""
+    st.markdown("**Model vs the bookmakers**")
+    model = tuple(mk.probability for mk in slate.result)
+    rows = [
+        ("Model", model),
+        (f"Market now ({line.book})", line.probs),
+    ]
+    if line.moved:
+        rows.append((f"Market at first sight ({line.opened_at:%d %b})", line.opened))
+    over = next(o for o in slate.over_under if o.line == 2.5).over
+    table = []
+    for name, (h, d, a) in rows:
+        table.append(
+            {
+                "": _esc(name),
+                slate.home: f"{h:.0%}",
+                "Draw": f"{d:.0%}",
+                slate.away: f"{a:.0%}",
+                "Over 2.5": (
+                    f"{over:.0%}"
+                    if name == "Model"
+                    else f"{line.over25:.0%}"
+                    if line.over25 is not None and name.startswith("Market now")
+                    else "—"
+                ),
+            }
+        )
+    st.markdown(_html_table(table), unsafe_allow_html=True)
+    gap = max(range(3), key=lambda i: abs(model[i] - line.probs[i]))
+    label = (slate.home, "a draw", slate.away)[gap]
+    diff = model[gap] - line.probs[gap]
+    st.caption(
+        f"{line.match_date:%a %d %b}. Biggest gap: the model rates {label} "
+        f"{abs(diff) * 100:.0f} points {'higher' if diff > 0 else 'lower'} than the market. "
+        f"Line checked {line.observed_at:%d %b %H:%M} UTC; bookmaker margin {line.margin:.1%}, "
+        f"removed. {MARKET_HONESTY}"
+    )
+
+
+def _render_line_movement(lm: LineMovement) -> None:
+    st.markdown(
+        "**Line movement** — does the bookmakers' line move toward the model before kickoff?"
+    )
+    rows = [
+        {"Forecaster": "Early line (days before kickoff)", "Log loss": f"{lm.early_log_loss:.4f}"},
+        {"Forecaster": "Closing line (same bookmaker)", "Log loss": f"{lm.close_log_loss:.4f}"},
+        {
+            "Forecaster": "Model (fit only on results 2+ days old)",
+            "Log loss": f"{lm.model_log_loss:.4f}",
+        },
+    ]
+    st.markdown(_html_table(rows), unsafe_allow_html=True)
+    c = st.columns(3)
+    c[0].metric("Matches", f"{lm.n:,}", border=True)
+    c[1].metric(
+        "Line moved toward model",
+        f"{lm.toward_model:.0%}",
+        f"±{2 * lm.toward_model_se:.0%} · 50% = no information",
+        delta_color="off",
+        border=True,
+    )
+    c[2].metric(
+        "Typical move",
+        f"{lm.mean_move:.1%}",
+        "early → close, probability",
+        delta_color="off",
+        border=True,
+    )
+    if lm.moves_toward_model:
+        verdict = (
+            f"the line moved toward the model {lm.toward_model:.0%} of the time across "
+            f"{lm.views} disagreements, more than chance — the model picks up some of what the "
+            "market learns before kickoff. That is information, not a proven betting edge."
+        )
+    else:
+        verdict = (
+            f"across {lm.views} matches where the model disagreed with the early line by 3+ "
+            f"points, the close moved toward the model {lm.toward_model:.0%} of the time — no "
+            "better than a coin flip. Its disagreements with the market are noise, not "
+            "information the market hadn't priced yet."
+        )
+    beat = "beats" if lm.model_beats_early else "trails"
+    st.info(
+        f"The model {beat} even the early line on log loss, and {verdict}",
+        icon=":material/trending_up:",
+    )
+    st.caption(
+        "Early and closing prices are the same bookmaker's, from football-data.co.uk (the early "
+        "line is collected Friday for weekend games, Tuesday for midweek). The model here is "
+        "fit only on matches at least two days before kickoff, so it never knew a result the "
+        "early line didn't. Best blend with the early line: "
+        f"{lm.best_weight_vs_early:.0%} model."
+    )
 
 
 def _render_uncovered_fixtures(uncovered: list[FixtureForecast]) -> None:
@@ -2664,6 +2807,10 @@ def main() -> None:
                         st.info("Could not forecast that matchup.")
                     else:
                         _render_forecast(slate)
+                        line = market_line(settings.analytics_db, division, home, away)
+                        if line is not None:
+                            st.divider()
+                            _render_market_line(slate, line)
                         # PL only, and only when current injuries/suspensions actually move the
                         # number: show the base model nudged for team news, side by side.
                         adj = (
