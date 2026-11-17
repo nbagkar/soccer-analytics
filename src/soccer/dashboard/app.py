@@ -2843,7 +2843,13 @@ def main() -> None:
     # A call-to-action button asked for another page (see _go): switch before rendering.
     target = st.session_state.pop("_nav_to", None)
     if target in pages:
+        if pinned is not None:
+            st.session_state._pin_page = target  # a pinned test follows the button
         st.switch_page(pages[target])
+    # A pinned test page wins over wherever the last switch left AppTest (newer Streamlit
+    # keeps a switched-to page across runs and ignores a changed default).
+    if pinned in pages and nav.url_path != pages[pinned].url_path:
+        st.switch_page(pages[pinned])
     if NO_TRACK_PARAM in st.query_params:
         st.session_state._notrack = True
     nav.run()
