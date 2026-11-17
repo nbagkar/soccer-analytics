@@ -4,20 +4,39 @@ Shared by the app (sidebar + routing) and `soccer usage` (to list pages that wer
 visited), so it must stay importable without the dashboard extra.
 """
 
-# Per-page identity: a Material Symbol icon and a one-line description, for a consistent
-# header on every page and cleaner navigation.
-# Navigation: (routing key, sidebar label, icon, one-line description). The routing keys
-# stay stable so the page dispatch is untouched; only the plain-English labels and the
-# captions the user reads change. Ordered as a journey: start -> this season -> explore.
+# Per-page identity: (routing key, sidebar label, Material icon, one-line description). The
+# routing keys stay stable -- the usage log records them -- so only labels and captions change.
 NAV = [
     ("Home", "Home", ":material/home:", "Set up and quick actions"),
-    ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
+    ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
     ("Predictor", "Predictions", ":material/insights:", "Fixtures, matchups and season odds"),
-    ("Analytics", "League tables", ":material/table_chart:", "Standings, form and title odds"),
+    (
+        "Players",
+        "Player scouting",
+        ":material/person_search:",
+        "Leaderboards, profiles, similar players",
+    ),
+    ("Market", "Bookmakers' lines", ":material/candlestick_chart:", "The market vs the model"),
+    (
+        "Analytics",
+        "League tables",
+        ":material/table_chart:",
+        "Standings, form and underlying numbers",
+    ),
     ("Team", "Teams", ":material/shield:", "One club, everything at a glance"),
     ("Records", "Records", ":material/military_tech:", "Streaks and standout results"),
-    ("Analysis", "Analysis", ":material/analytics:", "Match xG and player scouting"),
-    ("Data Health", "About & sources", ":material/health_and_safety:", "Where the data comes from"),
+    ("Analysis", "Match xG", ":material/sports:", "Shot maps and xG timelines"),
+    ("Assistant", "Ask a question", ":material/chat:", "Chat about your data in plain English"),
+]
+
+# The six sections of the sidebar (the upgrade plan's dashboard layout), in order.
+SECTIONS: list[tuple[str, list[str]]] = [
+    ("Home", ["Home", "Data Health"]),
+    ("Predictions", ["Predictor"]),
+    ("Player scouting", ["Players"]),
+    ("Market intelligence", ["Market"]),
+    ("Team & match analysis", ["Analytics", "Team", "Records", "Analysis"]),
+    ("AI research", ["Assistant"]),
 ]
 
 PAGE_KEYS = [key for key, _label, _icon, _caption in NAV]
@@ -29,3 +48,8 @@ PAGE_KEYS = [key for key, _label, _icon, _caption in NAV]
 ARCHIVED = [
     ("Live Centre", "Live scores", ":material/bolt:", "Today's and recent results"),
 ]
+
+
+def url_path(key: str) -> str:
+    """A page's URL segment: "Data Health" -> "data-health"."""
+    return key.lower().replace(" ", "-")
