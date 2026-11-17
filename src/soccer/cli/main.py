@@ -654,6 +654,105 @@ def ingest_history(
     )
 
 
+@app.command(name="backfill-xg")
+def backfill_xg(
+    league: int = typer.Option(39, help="API-Football league id (39 = Premier League)."),
+    season: int = typer.Option(2024, help="Season start year; the free plan serves 2022-2024."),
+    division: str = typer.Option("E0", help="This project's division code for that league."),
+    use_reserve: bool = typer.Option(
+        False, "--use-reserve", help="Also spend the requests held back for manual checks."
+    ),
+) -> None:
+    """Backfill team xG per match from API-Football, resuming where it left off.
+
+    One request per match on the free plan (~380 for a top-flight season); each run spends
+    what today's budget allows and stops cleanly. Re-run daily (or let `soccer serve` do it).
+    """
+    from soccer.ingest.api_football_xg import backfill_team_xg
+    from soccer.ingest.quota import QuotaExhaustedError
+    from soccer.sources.api_football import from_settings
+    from soccer.sources.errors import SourceUnavailableError
+    from soccer.storage.analytics_db import AnalyticsDB
+
+    settings = get_settings()
+    try:
+        api = from_settings(settings)
+    except SourceUnavailableError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1) from exc
+    st = api.ledger.status()
+    console.print(f"Budget: {st.used}/{st.limit} used today (UTC), {st.reserve} held in reserve.")
+    try:
+        with api, AnalyticsDB(settings.analytics_db) as adb:
+            result = backfill_team_xg(
+                api,
+                adb,
+                league_id=league,
+                api_season=season,
+                division=division,
+                use_reserve=use_reserve,
+            )
+    except QuotaExhaustedError as exc:
+        console.print(f"[yellow]Nothing spent: {exc}[/yellow]")
+        return
+    console.print(result.summary())
+
+
+@app.command(name="probe-api-football")
+def probe_api_football(
+    season: int | None = typer.Option(
+        None, help="Season start year, e.g. 2026 for 2026/27 (default: the current season)."
+    ),
+    leagues: str = typer.Option(
+        "", help="Comma-separated API-Football league ids (default: the six priority ones)."
+    ),
+    out: str = typer.Option(
+        "docs/api-football-coverage.md", help="Where to write the coverage matrix."
+    ),
+) -> None:
+    """Measure what your API-Football key actually returns, per competition and endpoint.
+
+    About ten requests per competition (~61 for the default six), checked against the daily
+    quota before each one. Writes a Markdown matrix built only from real responses.
+    """
+    from soccer.ingest.quota import QuotaExhaustedError
+    from soccer.sources.api_football import PRIORITY_LEAGUES, from_settings
+    from soccer.sources.api_football_coverage import (
+        REQUESTS_PER_LEAGUE,
+        coverage_markdown,
+        probe_coverage,
+    )
+    from soccer.sources.errors import SourceUnavailableError
+
+    settings = get_settings()
+    try:
+        api = from_settings(settings)
+    except SourceUnavailableError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1) from exc
+    today = datetime.now(UTC).date()
+    season = season or (today.year if today.month >= 7 else today.year - 1)
+    ids = [int(x) for x in leagues.split(",") if x.strip()] or list(PRIORITY_LEAGUES)
+    needed = 1 + REQUESTS_PER_LEAGUE * len(ids)
+    status = api.ledger.status()
+    console.print(
+        f"Budget: {status.used}/{status.limit} used today (UTC); this probe needs ~{needed}."
+    )
+    try:
+        api.ledger.check(needed, use_reserve=True)
+    except QuotaExhaustedError as exc:
+        console.print(f"[yellow]{exc}. Probing what fits; the rest is marked skipped.[/yellow]")
+    with api:
+        report = probe_coverage(
+            api, season=season, leagues=ids, on_progress=lambda m: console.print(f"  {m}")
+        )
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(coverage_markdown(report) + "\n")
+    console.print(f"\n[green]Wrote {out_path}[/green] ({report.requests_used} requests).")
+    console.print(coverage_markdown(report))
+
+
 @app.command()
 def table(
     season: str | None = typer.Option(
@@ -1400,6 +1499,16 @@ def serve(
 
         return refresh_results(settings)
 
+    def xg_backfill_job() -> str:
+        if settings.api_football_key is None:
+            return "skipped (no SOCCER_API_FOOTBALL_KEY)"
+        from soccer.ingest.api_football_xg import run_backfill_plan
+        from soccer.sources.api_football import from_settings
+        from soccer.storage.analytics_db import AnalyticsDB
+
+        with from_settings(settings) as api, AnalyticsDB(settings.analytics_db) as adb:
+            return run_backfill_plan(api, adb)
+
     def prune_job() -> str:
         removed = raw.prune(SourceId.THESPORTSDB, "livescore", keep_days=7)
         return f"pruned {removed} old live snapshot(s)"
@@ -1412,6 +1521,9 @@ def serve(
             Job("injuries", timedelta(seconds=history_interval), news_job),
             Job("squads", timedelta(days=1), squads_job),
             Job("prune", timedelta(days=1), prune_job),
+            # Spends only the day's job budget (the quota ledger holds back the reserve), so
+            # running it more often than daily just finds nothing left to spend.
+            Job("xg-backfill", timedelta(hours=6), xg_backfill_job),
         ]
     )
 

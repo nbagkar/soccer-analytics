@@ -22,6 +22,7 @@ class SourceId(StrEnum):
     THESPORTSDB = "thesportsdb"
     OPENLIGADB = "openligadb"
     FOOTBALL_DATA_CO_UK = "football_data_co_uk"
+    API_FOOTBALL = "api_football"
     OPENFOOTBALL = "openfootball"
     FPL = "fpl"
     # A historical dataset (proprietary EULA), not a live source: used as a raw-store
@@ -178,6 +179,28 @@ SOURCES: dict[SourceId, Source] = {
             "No copyright grant and no redistribution clause exist. Downloading and "
             "analysing is plainly intended; republishing the CSVs is not granted.",
             "Men's football only.",
+        ),
+    ),
+    SourceId.API_FOOTBALL: Source(
+        id=SourceId.API_FOOTBALL,
+        name="API-Football (api-sports.io)",
+        base_url="https://v3.football.api-sports.io",
+        # Deliberately EMPTY until `soccer probe-api-football` has shown, from real responses,
+        # what this plan returns for which competitions. The vendor lists fixtures, events,
+        # lineups, player stats, injuries and odds; the free plan reportedly restricts
+        # seasons. No feature may depend on a capability this record doesn't grant.
+        capabilities=frozenset(),
+        trust=Trust.EXPERIMENTAL,
+        latency_seconds=None,
+        rate_limit_per_minute=10,
+        licence="Commercial API, proprietary terms (paid plans from ~$19/mo, unverified)",
+        enabled_by_default=False,
+        caveats=(
+            "Needs SOCCER_API_FOOTBALL_KEY. Free plan: 100 requests/day, resetting 00:00 UTC.",
+            "An error comes back as an `errors` object beside an EMPTY `response` array "
+            "(verified 2026-11-16 with a missing key) -- never read `response: []` as 'no "
+            "data' without checking `errors`.",
+            "Pricing and docs pages sit behind a bot check; plan terms are unverified.",
         ),
     ),
     SourceId.OPENFOOTBALL: Source(

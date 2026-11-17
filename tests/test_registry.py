@@ -90,7 +90,10 @@ class TestCapabilityResolution:
 class TestIntegrity:
     @pytest.mark.parametrize("source", SOURCES.values(), ids=lambda s: s.id.value)
     def test_source_is_self_consistent(self, source: Source) -> None:
-        assert source.capabilities, f"{source.id} declares no capabilities"
+        # A source awaiting its coverage probe may declare nothing yet -- but only while it
+        # is experimental and off by default, so no feature can lean on it.
+        unprobed = source.trust is Trust.EXPERIMENTAL and not source.enabled_by_default
+        assert source.capabilities or unprobed, f"{source.id} declares no capabilities"
         assert source.licence, f"{source.id} has no licence recorded"
         # A source claiming live data must be fresh enough to justify it.
         if source.supports(Capability.LIVE_SCORES):
