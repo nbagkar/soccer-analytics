@@ -71,6 +71,8 @@ about a third of the model's log-loss gap — +0.0194 → +0.0127 on 10,021 matc
 leagues it was never tuned on, with all 18 leagues tested improving. The model still trails
 the closing line; it is a better-informed forecaster, not a source of betting edge.
 
+Two more ideas were measured and rejected (Phase C, `scripts/experiments/phase_c/`): days of rest since each side's last league game, and a gradient-boosted model stacked on the forecasts. Over ~42,000 walk-forward matches in 14 leagues, rest moved the gap to the closing line by less than its standard error, and boosting made it worse in every league. Forecasts and the Scorecard now name the model configuration that produced them (e.g. `m-8af71e8`), derived from its settings.
+
 This realizes the original 12-week plan's full scope. Remaining ideas are optional
 extensions: Wyscout event data (a second, CC-BY event source) and richer visualizations.
 

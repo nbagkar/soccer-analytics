@@ -2200,3 +2200,13 @@ class TestRelegationPlaces:
             0,
         ]
         assert relegation_places("B1") == 3  # split-format league: the bottom-three default
+
+
+class TestModelVersion:
+    def test_version_is_stable_and_tracks_the_configuration(self, monkeypatch) -> None:
+        from soccer.dashboard import data
+
+        first = data.forecast_model_version()
+        assert first == data.forecast_model_version() and first.startswith("m-")
+        monkeypatch.setattr(data, "FORECAST_SPREAD", data.FORECAST_SPREAD + 0.01)
+        assert data.forecast_model_version() != first

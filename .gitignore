@@ -26,3 +26,4 @@ htmlcov/
 # Local agent/skill tooling -- environment, not project source.
 .agents/
 .claude/
+scripts/experiments/*/preds/

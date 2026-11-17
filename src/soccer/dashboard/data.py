@@ -1003,6 +1003,27 @@ FORECAST_MARKET_WEIGHT = 1.0
 FORECAST_SPREAD = 1.08
 FORECAST_HOME_SHIFT = 0.02
 FORECAST_RHO = -0.09
+
+
+def forecast_model_version() -> str:
+    """A short, stable id for the live forecast model's configuration.
+
+    Derived from the settings above (not hand-maintained), so any change to them yields a new
+    id: a Scorecard result or a forecast can be tied to the exact model that produced it.
+    Measured-and-rejected features (Phase C: rest days, gradient-boosted stacking) never
+    entered this configuration -- see scripts/experiments/.
+    """
+    import hashlib
+
+    config = (
+        f"shots-poisson|seasons={FORECAST_SEASONS}|alpha={FORECAST_ALPHA}"
+        f"|shrink={FORECAST_SHRINKAGE}|decay={FORECAST_TIME_DECAY_DAYS}"
+        f"|market={FORECAST_MARKET_WEIGHT}|spread={FORECAST_SPREAD}"
+        f"|home_shift={FORECAST_HOME_SHIFT}|rho={FORECAST_RHO}"
+    )
+    return "m-" + hashlib.sha256(config.encode()).hexdigest()[:7]
+
+
 # Below this many matches in the fitting window, a team's goals-only Dixon-Coles fit (which
 # has no shrinkage of its own, unlike the shots blend above) is unreliable -- `simulate_season`
 # replays it hundreds of times, so one small-sample outlier compounds into a wildly overstated
