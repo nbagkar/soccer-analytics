@@ -60,6 +60,27 @@ CREATE TABLE IF NOT EXISTS results (
     early_away_odds    DOUBLE
 );
 
+-- Team expected goals per match from API-Football's fixture statistics (`expected_goals`).
+-- Keyed on the provider's fixture id; home_norm/away_norm are the results-table names the
+-- provider's club names were bridged to (NULL when the bridge failed), for joining by
+-- (division, date, home_norm, away_norm). xG may be NULL when the provider had none.
+CREATE TABLE IF NOT EXISTS team_match_xg (
+    provider      VARCHAR   NOT NULL,
+    fixture_id    BIGINT    NOT NULL,
+    league_id     INTEGER   NOT NULL,
+    season        VARCHAR   NOT NULL,
+    division      VARCHAR   NOT NULL,
+    match_date    DATE      NOT NULL,
+    home          VARCHAR   NOT NULL,
+    away          VARCHAR   NOT NULL,
+    home_norm     VARCHAR,
+    away_norm     VARCHAR,
+    home_xg       DOUBLE,
+    away_xg       DOUBLE,
+    fetched_at    TIMESTAMP NOT NULL,
+    PRIMARY KEY (provider, fixture_id)
+);
+
 -- Pre-match lines for matches not yet played (football-data.co.uk fixtures files). One row
 -- per observed line: a re-fetch only adds a row when the price changed, so the table is the
 -- line's history. Keyed on normalized names like `results`, joined to fixtures by them.
@@ -589,6 +610,25 @@ class OddsRow:
 
 
 @dataclass(frozen=True)
+class TeamMatchXg:
+    """One match's team xG from a provider, bridged to the results table's club names."""
+
+    provider: str
+    fixture_id: int
+    league_id: int
+    season: str  # football-data.co.uk season code ("2425"), matching `results`
+    division: str
+    match_date: date
+    home: str  # the provider's names
+    away: str
+    home_norm: str | None  # bridged results-table names; None if unmatched
+    away_norm: str | None
+    home_xg: float | None
+    away_xg: float | None
+    fetched_at: datetime
+
+
+@dataclass(frozen=True)
 class OddsLine:
     """The latest pre-match line for an upcoming match, plus where it started."""
 
@@ -1114,6 +1154,44 @@ class AnalyticsDB:
             [season, division],
         ).fetchone()
         return (row[0], row[1]) if row else (0, 0)
+
+    # --- Team xG (API-Football) --------------------------------------------------
+
+    def upsert_team_xg(self, rows: list[TeamMatchXg]) -> int:
+        for r in rows:
+            self._con.execute(
+                "INSERT OR REPLACE INTO team_match_xg VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    r.provider,
+                    r.fixture_id,
+                    r.league_id,
+                    r.season,
+                    r.division,
+                    r.match_date,
+                    r.home,
+                    r.away,
+                    r.home_norm,
+                    r.away_norm,
+                    r.home_xg,
+                    r.away_xg,
+                    r.fetched_at,
+                ],
+            )
+        return len(rows)
+
+    def team_xg_fixture_ids(self, provider: str, league_id: int, season: str) -> set[int]:
+        rows = self._con.execute(
+            "SELECT fixture_id FROM team_match_xg WHERE provider=? AND league_id=? AND season=?",
+            [provider, league_id, season],
+        ).fetchall()
+        return {int(r[0]) for r in rows}
+
+    def team_xg_for(self, division: str, season: str) -> list[TeamMatchXg]:
+        rows = self._con.execute(
+            "SELECT * FROM team_match_xg WHERE division=? AND season=? ORDER BY match_date",
+            [division, season],
+        ).fetchall()
+        return [TeamMatchXg(*r) for r in rows]
 
     # --- Upcoming-match odds ---------------------------------------------------
 

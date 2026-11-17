@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from soccer.sources.registry import SourceId
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # can be swapped in without a code change.
     football_data_org_token: str | None = None
     thesportsdb_key: str = "123"
+    api_football_key: SecretStr | None = None
+    """API-Football (api-sports.io) key. Unset = the source is off. SecretStr so it never
+    lands in a log line or a repr."""
 
     # --- Source toggles ----------------------------------------------------
     enable_fpl: bool = False
@@ -53,6 +56,12 @@ class Settings(BaseSettings):
     # limit is 10/min; we budget 8 to leave headroom for retries without tripping it.
     football_data_org_rpm: int = Field(default=8, ge=1, le=10)
     thesportsdb_rpm: int = Field(default=20, ge=1, le=30)
+    # API-Football's free plan: 100 requests/day (resets 00:00 UTC), a per-minute cap
+    # reported as 10 by its own docs. Paid plans raise both; set these to match.
+    api_football_daily_limit: int = Field(default=100, ge=1)
+    api_football_rpm: int = Field(default=10, ge=1)
+    api_football_reserve: int = Field(default=5, ge=0)
+    """Requests per day held back from automated jobs, so a manual check is always possible."""
 
     http_timeout_seconds: float = Field(default=20.0, gt=0)
     max_retries: int = Field(default=3, ge=0, le=10)
@@ -83,6 +92,12 @@ class Settings(BaseSettings):
     def analytics_db(self) -> Path:
         return self.data_dir / "analytics.duckdb"
 
+    @property
+    def quota_db(self) -> Path:
+        """Paid-API request ledger -- its own file, like usage.sqlite, so counting a request
+        never touches a data store's mtime (which keys the dashboard caches)."""
+        return self.data_dir / "quota.sqlite"
+
     def is_enabled(self, source: SourceId) -> bool:
         """Whether a source may be used, honouring both its default and the override."""
         match source:
@@ -91,6 +106,8 @@ class Settings(BaseSettings):
                 return False
             case SourceId.FPL:
                 return self.enable_fpl
+            case SourceId.API_FOOTBALL:
+                return self.api_football_key is not None
             case SourceId.FOOTBALL_DATA_ORG:
                 # Silently disabled without a token rather than failing at request time.
                 return self.football_data_org_token is not None

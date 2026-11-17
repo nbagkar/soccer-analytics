@@ -152,6 +152,7 @@ soccer matches       # the ingested live centre, read from SQLite
 | `soccer ingest-events` | Ingest StatsBomb open-data events — shots (xG) and full per-player stats. `--from-raw` re-parses snapshots offline. Proprietary EULA, opt-in |
 | `soccer xg` | Expected-goals summary for a match — team xG and top shooters |
 | `soccer players` | Player leaderboard — xG, non-penalty xG, goals, finishing (G-xG) |
+| `soccer probe-api-football` | Optional paid source: measure what your API-Football key covers (6 competitions × 10 endpoints, ~61 requests, quota-checked) and write `docs/api-football-coverage.md` |
 | `soccer dashboard` | Launch the read-only Streamlit dashboard |
 | `soccer serve` | Run the dashboard's refreshes unattended on a cadence (live scores, fixtures, current-season results, injury news and squads when stale, housekeeping) |
 | `soccer check` | Self-check the loaded data; exits non-zero on errors |
