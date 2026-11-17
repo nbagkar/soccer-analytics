@@ -81,7 +81,16 @@ The dashboard is also usable without the terminal: a **Home** page shows data st
 loads/refreshes data with buttons (scores, fixtures, a league's history, a StatsBomb
 player-data pack), and a built-in **Assistant** answers plain-English questions
 ("who's top of the Premier League?", "Arsenal vs Chelsea?", "how many goals did Messi
-score?") entirely offline — rule-based, no LLM, nothing leaves the machine.
+score?") entirely offline by default — rule-based, nothing leaves the machine.
+
+Optionally, an LLM can **explain** those answers (`soccer.intelligence`; OpenAI, DeepSeek or
+Gemini through their OpenAI-compatible endpoint, configured in `.env`). It never answers on its
+own: the assistant still routes the question and computes the answer locally, the LLM is sent
+only the question and that computed answer, and a rewrite that mentions any number the computed
+answer doesn't contain is thrown away (the computed answer is shown instead, and is always one
+click away). Questions the assistant can't answer are never sent. Usage is capped per month
+(`SOCCER_LLM_MONTHLY_TOKEN_CAP`) and shown on the chat page, with a cost estimate when you set
+the provider's prices. A switch on the chat page turns it off.
 
 The dashboard keeps a local usage log (page visits, data actions, which kind of question
 the assistant answered, and the text of questions it couldn't). `soccer usage` reports what
@@ -214,6 +223,7 @@ free APIs / open datasets
 - `src/soccer/ingest/` — mappers, pipeline, rate limiting, scheduler
 - `src/soccer/models/` — forecasting, simulation, evaluation
 - `src/soccer/market/` — odds as probabilities, early-to-close line movement vs the model
+- `src/soccer/intelligence/` — the optional LLM narrator: provider client, usage cap, number guard
 - `src/soccer/dashboard/` — pages, the assistant, refresh actions, background auto-refresh
 - `src/soccer/cli/` — the `soccer` command
 

@@ -25,7 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 # pandas is already pulled in transitively (altair/streamlit need it for `.to_pandas()`
 # frames); listed explicitly because dashboard/app.py now imports it directly for typing.
-dashboard = ["streamlit>=1.36", "plotly>=5.22", "mplsoccer>=1.4", "pandas>=2.0"]
+# Streamlit pinned to one minor version so CI and local installs match: AppTest's page
+# navigation changed between 1.60 and 1.67 and broke CI while passing locally. Bump it
+# deliberately and re-run the app tests.
+dashboard = ["streamlit>=1.67,<1.68", "plotly>=5.22", "mplsoccer>=1.4", "pandas>=2.0"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
